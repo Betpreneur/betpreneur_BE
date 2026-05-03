@@ -45,9 +45,9 @@ log = logging.getLogger(__name__)
 WAT = timezone(timedelta(hours=1))
 
 # ── CONFIG ────────────────────────────────────────────────────────
-FD_TOKEN  = os.environ.get("FD_TOKEN",  "af9309abb0834885a5f16b945578e4fc")
-APS_KEY   = os.environ.get("APS_KEY",   "caa2f2a25188bda278057835cef77eaf")
-ODDS_KEY  = os.environ.get("ODDS_KEY",  "74de10b26693f3b189d408128500c3e6")
+FD_TOKEN  = os.environ.get("FD_TOKEN",  "")
+APS_KEY   = os.environ.get("APS_KEY",   "")
+ODDS_KEY  = os.environ.get("ODDS_KEY",  "")
 
 FD_BASE   = "https://api.football-data.org/v4"
 APS_BASE  = "https://v3.football.api-sports.io"
