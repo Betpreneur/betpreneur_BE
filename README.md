@@ -2,7 +2,7 @@
 
 Django + DRF backend for Betpreneur GrindAlgo betting intelligence engine.
 
-## Current Shape
+## The Current Shape
 
 - `apps/accounts` - custom user model plus starter signup/login/me APIs.
 - `apps/algo` - algo run records, pick records, and a service boundary around the legacy runner.
