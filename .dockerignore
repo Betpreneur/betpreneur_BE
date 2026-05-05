@@ -1,0 +1,73 @@
+# ================================================================
+# Docker Ignore
+# ================================================================
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.eggs/
+*.egg-info/
+*.egg
+MANIFEST
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Git
+.git/
+.gitignore
+
+# Docker
+Dockerfile*
+docker-compose*
+.docker/
+.dockerignore
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Database
+db.sqlite3
+*.db
+
+# Static and Media
+staticfiles/
+media/
+static/
+media/
+
+# Logs
+*.log
+logs/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Testing
+tests/
+*_test.py
+test_*.py
+
+# Documentation
+*.md
+docs/
+LICENSE
