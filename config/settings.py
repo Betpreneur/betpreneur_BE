@@ -1,3 +1,4 @@
+from datetime import timedelta
 from pathlib import Path
 
 from decouple import Csv, config
@@ -18,6 +19,8 @@ INSTALLED_APPS = [
     "django.contrib.staticfiles",
     "rest_framework",
     "rest_framework_simplejwt",
+    "rest_framework_simplejwt.token_blacklist",
+    "drf_spectacular",
     "corsheaders",
     "apps.common",
     "apps.accounts",
@@ -100,6 +103,7 @@ REST_FRAMEWORK = {
     "DEFAULT_PERMISSION_CLASSES": (
         "rest_framework.permissions.IsAuthenticated",
     ),
+    "DEFAULT_SCHEMA_CLASS": "drf_spectacular.openapi.AutoSchema",
 }
 
 EMAIL_BACKEND = config(
@@ -116,4 +120,72 @@ GRIND_ALGO = {
     "SHEET_NAME": config("SHEET_NAME", default="GrindAlgo Tracker"),
     "DRIVE_FOLDER": config("DRIVE_FOLDER", default="GrindAlgo Reports"),
     "EMAIL_RECIPIENT": config("EMAIL_RECIPIENT", default=""),
+}
+
+# Auth settings
+RESEND_API_KEY = config("RESEND_API_KEY", default="")
+FRONTEND_URL = config("FRONTEND_URL", default="http://localhost:3000")
+
+# JWT Settings
+SIMPLE_JWT = {
+    "ACCESS_TOKEN_LIFETIME": timedelta(minutes=60),
+    "REFRESH_TOKEN_LIFETIME": timedelta(days=7),
+    "ROTATE_REFRESH_TOKENS": True,
+    "BLACKLIST_AFTER_ROTATION": True,
+    "UPDATE_LAST_TOKEN": True,
+}
+
+# Swagger/OpenAPI Settings
+SPECTACULAR_SETTINGS = {
+    "TITLE": "Betpreneur API",
+    "DESCRIPTION": """
+## Betpreneur - Sports Betting Intelligence Engine
+
+A Django REST API backend for the GrindAlgo betting intelligence system.
+
+### Authentication
+This API uses JWT (JSON Web Tokens) for authentication.
+1. Obtain tokens via `/api/auth/login/` or `/api/auth/signup/`
+2. Include access token in header: `Authorization: Bearer <access_token>`
+3. Refresh expired tokens via `/api/auth/token/refresh/`
+
+### Key Features
+- **User Authentication**: Signup, login, email verification, password reset
+- **Algo Management**: Run betting algorithms, track picks
+- **Bankroll Tracking**: Monitor betting bankroll
+- **Reports**: Generate and track reports
+    """,
+    "VERSION": "1.0.0",
+    "SERVE_INCLUDE_SCHEMA": False,
+    "SWAGGER_UI_SETTINGS": {
+        "deepLinking": True,
+        "displayOperationId": True,
+        "defaultModelsExpandDepth": 2,
+        "defaultModelExpandDepth": 2,
+        "persistAuthorization": True,
+    },
+    "COMPONENT_SPLITING": False,
+    "APPEND_TAG": [
+        {
+            "name": "Authentication",
+            "description": "User authentication endpoints (signup, login, logout, password reset)",
+        },
+        {
+            "name": "Algo",
+            "description": "Betting algorithm run management",
+        },
+        {
+            "name": "Bankroll",
+            "description": "Bankroll tracking endpoints",
+        },
+        {
+            "name": "Reports",
+            "description": "Report generation and tracking",
+        },
+        {
+            "name": "Health",
+            "description": "System health check endpoints",
+        },
+    ],
+    "TAGS": [],
 }

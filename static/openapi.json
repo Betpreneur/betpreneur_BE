@@ -1,0 +1,790 @@
+openapi: 3.0.3
+info:
+  title: Betpreneur API
+  version: 1.0.0
+  description: "\n## Betpreneur - Sports Betting Intelligence Engine\n\nA Django REST
+    API backend for the GrindAlgo betting intelligence system.\n\n### Authentication\nThis
+    API uses JWT (JSON Web Tokens) for authentication.\n1. Obtain tokens via `/api/auth/login/`
+    or `/api/auth/signup/`\n2. Include access token in header: `Authorization: Bearer
+    <access_token>`\n3. Refresh expired tokens via `/api/auth/token/refresh/`\n\n###
+    Key Features\n- **User Authentication**: Signup, login, email verification, password
+    reset\n- **Algo Management**: Run betting algorithms, track picks\n- **Bankroll
+    Tracking**: Monitor betting bankroll\n- **Reports**: Generate and track reports\n
+    \   "
+paths:
+  /api/algo/runs/:
+    get:
+      operationId: algo_runs_list
+      description: Get all algorithm execution records
+      summary: List algo runs
+      tags:
+      - Algo
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/AlgoRun'
+          description: ''
+    post:
+      operationId: algo_runs_create
+      description: "\n        Execute the betting algorithm for a target date.\n        \n
+        \       **Optional payload:**\n        ```json\n        {\n          \"target_date\":
+        \"2026-05-04\"\n        }\n        ```\n        \n        If no target_date
+        is provided, runs for today.\n        "
+      summary: Run algo
+      tags:
+      - Algo
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AlgoRunCreate'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/AlgoRunCreate'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/AlgoRunCreate'
+      security:
+      - jwtAuth: []
+      responses:
+        '201':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AlgoRun'
+          description: ''
+  /api/algo/runs/{id}/:
+    get:
+      operationId: algo_runs_retrieve
+      description: Get a specific algo run by ID
+      summary: Get algo run
+      parameters:
+      - in: path
+        name: id
+        schema:
+          type: integer
+        description: A unique integer value identifying this algo run.
+        required: true
+      tags:
+      - Algo
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AlgoRun'
+          description: ''
+  /api/auth/change-password/:
+    post:
+      operationId: auth_change_password_create
+      description: "\n        Change password while logged in.\n        \n        **Requires:**
+        Current password verification\n        "
+      summary: Change password
+      tags:
+      - Authentication
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ChangePassword'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/ChangePassword'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/ChangePassword'
+        required: true
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: Password changed successfully
+          description: ''
+        '400':
+          content:
+            application/json:
+              schema:
+                description: Invalid old password
+          description: ''
+  /api/auth/forgot-password/:
+    post:
+      operationId: auth_forgot_password_create
+      description: "\n        Request password reset email.\n        \n        **Flow:**\n
+        \       1. Submit email address\n        2. Reset link/code sent to email\n
+        \       3. Use `/api/auth/reset-password/` to set new password\n        \n
+        \       **Rate limit:** 1 minute between requests\n        "
+      summary: Request password reset
+      tags:
+      - Authentication
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ForgotPassword'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/ForgotPassword'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/ForgotPassword'
+        required: true
+      security:
+      - jwtAuth: []
+      - {}
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: Reset email sent (if account exists)
+          description: ''
+        '429':
+          content:
+            application/json:
+              schema:
+                description: Too many requests
+          description: ''
+  /api/auth/login/:
+    post:
+      operationId: auth_login_create
+      description: "\n        Authenticate user and return JWT tokens.\n        \n
+        \       **Login with:** Username OR email address + password\n        \n        **Returns:**\n
+        \       - `access`: Short-lived access token (60 min)\n        - `refresh`:
+        Long-lived refresh token (7 days)\n        - `user`: User profile data\n        \n
+        \       **Note:** Email must be verified before login succeeds.\n        "
+      summary: User login
+      tags:
+      - Authentication
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Login'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/Login'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/Login'
+        required: true
+      security:
+      - jwtAuth: []
+      - {}
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: Login successful
+          description: ''
+        '401':
+          content:
+            application/json:
+              schema:
+                description: Invalid credentials or email not verified
+          description: ''
+  /api/auth/logout/:
+    post:
+      operationId: auth_logout_create
+      description: "\n        Logout user by blacklisting the refresh token.\n        \n
+        \       **Requires:** Valid access token in header\n        "
+      summary: User logout
+      tags:
+      - Authentication
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: Logged out successfully
+          description: ''
+        '400':
+          content:
+            application/json:
+              schema:
+                description: Invalid token
+          description: ''
+  /api/auth/me/:
+    get:
+      operationId: auth_me_retrieve
+      description: Get authenticated user's profile data
+      summary: Get current user profile
+      tags:
+      - Authentication
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/User'
+          description: ''
+    patch:
+      operationId: auth_me_partial_update
+      description: Update authenticated user's profile (partial update)
+      summary: Update user profile
+      tags:
+      - Authentication
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PatchedUser'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/PatchedUser'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/PatchedUser'
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/User'
+          description: ''
+  /api/auth/resend-verification/:
+    post:
+      operationId: auth_resend_verification_create
+      description: "\n        Resend email verification code.\n        \n        **Rate
+        limit:** 1 minute between requests\n        "
+      summary: Resend verification code
+      tags:
+      - Authentication
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ResendVerification'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/ResendVerification'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/ResendVerification'
+        required: true
+      security:
+      - jwtAuth: []
+      - {}
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: Verification code sent (if account exists)
+          description: ''
+        '429':
+          content:
+            application/json:
+              schema:
+                description: Too many requests - please wait
+          description: ''
+  /api/auth/reset-password/:
+    post:
+      operationId: auth_reset_password_create
+      description: "\n        Reset password using token from email.\n        \n        **Requirements:**\n
+        \       - Valid token (from forgot password email)\n        - New password
+        + confirmation\n        \n        **Token expires:** 10 minutes\n        "
+      summary: Reset password
+      tags:
+      - Authentication
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ResetPassword'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/ResetPassword'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/ResetPassword'
+        required: true
+      security:
+      - jwtAuth: []
+      - {}
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: Password reset successful
+          description: ''
+        '400':
+          content:
+            application/json:
+              schema:
+                description: Invalid or expired token
+          description: ''
+  /api/auth/signup/:
+    post:
+      operationId: auth_signup_create
+      description: "\n        Create a new user account.\n        \n        **Flow:**\n
+        \       1. Submit signup with username, email, password\n        2. Verification
+        code is sent to email\n        3. Verify email using `/api/auth/verify-email/`\n
+        \       4. Login with verified credentials\n        "
+      summary: Register new user
+      tags:
+      - Authentication
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Signup'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/Signup'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/Signup'
+        required: true
+      security:
+      - jwtAuth: []
+      - {}
+      responses:
+        '201':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/User'
+          description: ''
+  /api/auth/token/refresh/:
+    post:
+      operationId: auth_token_refresh_create
+      description: |-
+        Takes a refresh type JSON web token and returns an access type JSON web
+        token if the refresh token is valid.
+      tags:
+      - auth
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TokenRefresh'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/TokenRefresh'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/TokenRefresh'
+        required: true
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TokenRefresh'
+          description: ''
+  /api/auth/verify-email/:
+    post:
+      operationId: auth_verify_email_create
+      description: "\n        Verify user's email address with 6-digit code.\n        \n
+        \       **Code sent to:** User's email address\n        **Expires in:** 10
+        minutes\n        "
+      summary: Verify email address
+      tags:
+      - Authentication
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/VerifyEmail'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/VerifyEmail'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/VerifyEmail'
+        required: true
+      security:
+      - jwtAuth: []
+      - {}
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: Email verified successfully
+          description: ''
+        '400':
+          content:
+            application/json:
+              schema:
+                description: Invalid or expired code
+          description: ''
+  /api/health/:
+    get:
+      operationId: health_retrieve
+      description: Check if the API is running
+      summary: Health check
+      tags:
+      - Health
+      security:
+      - jwtAuth: []
+      - {}
+      responses:
+        '200':
+          description: No response body
+components:
+  schemas:
+    AlgoRun:
+      type: object
+      properties:
+        id:
+          type: integer
+          readOnly: true
+        target_date:
+          type: string
+          format: date
+        status:
+          $ref: '#/components/schemas/StatusEnum'
+        fd_fixtures:
+          type: integer
+          maximum: 2147483647
+          minimum: 0
+        aps_fixtures:
+          type: integer
+          maximum: 2147483647
+          minimum: 0
+        total_scored:
+          type: integer
+          maximum: 2147483647
+          minimum: 0
+        picks_count:
+          type: integer
+          maximum: 2147483647
+          minimum: 0
+        bankers:
+          type: integer
+          maximum: 2147483647
+          minimum: 0
+        value_gems:
+          type: integer
+          maximum: 2147483647
+          minimum: 0
+        wild_cards:
+          type: integer
+          maximum: 2147483647
+          minimum: 0
+        bankroll:
+          type: string
+          format: decimal
+          pattern: ^-?\d{0,10}(?:\.\d{0,2})?$
+          nullable: true
+        result: {}
+        error:
+          type: string
+        started_at:
+          type: string
+          format: date-time
+          nullable: true
+        finished_at:
+          type: string
+          format: date-time
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+          readOnly: true
+        updated_at:
+          type: string
+          format: date-time
+          readOnly: true
+        picks:
+          type: array
+          items:
+            $ref: '#/components/schemas/Pick'
+          readOnly: true
+      required:
+      - created_at
+      - id
+      - picks
+      - target_date
+      - updated_at
+    AlgoRunCreate:
+      type: object
+      properties:
+        target_date:
+          type: string
+          format: date
+    ChangePassword:
+      type: object
+      properties:
+        old_password:
+          type: string
+          writeOnly: true
+        new_password:
+          type: string
+          writeOnly: true
+        confirm_password:
+          type: string
+          writeOnly: true
+      required:
+      - confirm_password
+      - new_password
+      - old_password
+    ForgotPassword:
+      type: object
+      properties:
+        email:
+          type: string
+          format: email
+      required:
+      - email
+    Login:
+      type: object
+      properties:
+        username:
+          type: string
+        password:
+          type: string
+          writeOnly: true
+      required:
+      - password
+      - username
+    PatchedUser:
+      type: object
+      properties:
+        id:
+          type: integer
+          readOnly: true
+        username:
+          type: string
+          description: Required. 150 characters or fewer. Letters, digits and @/./+/-/_
+            only.
+          pattern: ^[\w.@+-]+$
+          maxLength: 150
+        email:
+          type: string
+          format: email
+          maxLength: 254
+        is_email_verified:
+          type: boolean
+        whatsapp_country_code:
+          type: string
+          maxLength: 5
+        whatsapp_number:
+          type: string
+          maxLength: 15
+        full_whatsapp:
+          type: string
+          readOnly: true
+        date_joined:
+          type: string
+          format: date-time
+          readOnly: true
+    Pick:
+      type: object
+      properties:
+        id:
+          type: integer
+          readOnly: true
+        fixture:
+          type: string
+          maxLength: 255
+        league:
+          type: string
+          maxLength: 255
+        kickoff:
+          type: string
+          maxLength: 50
+        tier:
+          $ref: '#/components/schemas/TierEnum'
+        market:
+          type: string
+          maxLength: 100
+        meaning:
+          type: string
+          maxLength: 255
+        confidence:
+          type: integer
+          maximum: 2147483647
+          minimum: 0
+        odds:
+          type: string
+          format: decimal
+          pattern: ^-?\d{0,6}(?:\.\d{0,2})?$
+        ev:
+          type: string
+          format: decimal
+          pattern: ^-?\d{0,5}(?:\.\d{0,3})?$
+        source:
+          type: string
+          maxLength: 20
+        created_at:
+          type: string
+          format: date-time
+          readOnly: true
+      required:
+      - confidence
+      - created_at
+      - ev
+      - fixture
+      - id
+      - market
+      - odds
+      - tier
+    ResendVerification:
+      type: object
+      properties:
+        email:
+          type: string
+          format: email
+          maxLength: 254
+      required:
+      - email
+    ResetPassword:
+      type: object
+      properties:
+        token:
+          type: string
+          maxLength: 6
+        user_id:
+          type: string
+          format: uuid
+        new_password:
+          type: string
+          writeOnly: true
+        confirm_password:
+          type: string
+          writeOnly: true
+      required:
+      - confirm_password
+      - new_password
+      - token
+      - user_id
+    Signup:
+      type: object
+      properties:
+        id:
+          type: integer
+          readOnly: true
+        username:
+          type: string
+          description: Required. 150 characters or fewer. Letters, digits and @/./+/-/_
+            only.
+          pattern: ^[\w.@+-]+$
+          maxLength: 150
+        email:
+          type: string
+          format: email
+          maxLength: 254
+        password:
+          type: string
+          writeOnly: true
+        whatsapp_country_code:
+          type: string
+          default: ''
+          maxLength: 5
+        whatsapp_number:
+          type: string
+          default: ''
+          maxLength: 15
+      required:
+      - email
+      - id
+      - password
+      - username
+    StatusEnum:
+      enum:
+      - pending
+      - running
+      - success
+      - failed
+      - rest_day
+      - no_data
+      type: string
+      description: |-
+        * `pending` - Pending
+        * `running` - Running
+        * `success` - Success
+        * `failed` - Failed
+        * `rest_day` - Rest Day
+        * `no_data` - No Data
+    TierEnum:
+      enum:
+      - banker
+      - value_gem
+      - wild_card
+      type: string
+      description: |-
+        * `banker` - Banker
+        * `value_gem` - Value Gem
+        * `wild_card` - Wild Card
+    TokenRefresh:
+      type: object
+      properties:
+        access:
+          type: string
+          readOnly: true
+        refresh:
+          type: string
+      required:
+      - access
+      - refresh
+    User:
+      type: object
+      properties:
+        id:
+          type: integer
+          readOnly: true
+        username:
+          type: string
+          description: Required. 150 characters or fewer. Letters, digits and @/./+/-/_
+            only.
+          pattern: ^[\w.@+-]+$
+          maxLength: 150
+        email:
+          type: string
+          format: email
+          maxLength: 254
+        is_email_verified:
+          type: boolean
+        whatsapp_country_code:
+          type: string
+          maxLength: 5
+        whatsapp_number:
+          type: string
+          maxLength: 15
+        full_whatsapp:
+          type: string
+          readOnly: true
+        date_joined:
+          type: string
+          format: date-time
+          readOnly: true
+      required:
+      - date_joined
+      - email
+      - full_whatsapp
+      - id
+      - username
+    VerifyEmail:
+      type: object
+      properties:
+        code:
+          type: string
+          maxLength: 6
+      required:
+      - code
+  securitySchemes:
+    jwtAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
