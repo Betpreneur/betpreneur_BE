@@ -96,10 +96,10 @@ services:
       DRIVE_FOLDER: ${DRIVE_FOLDER:-GrindAlgo Reports}
 
       # Frontend
-      FRONTEND_URL: ${FRONTEND_URL:-http://localhost:3000}
+      FRONTEND_URL: ${FRONTEND_URL:-https://betprenuer.lovable.app,https://www.betpreneur.ng,http://localhost:3000}
 
       # CORS
-      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-http://localhost:3000}
+      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-https://betprenuer.lovable.app,https://www.betpreneur.ng,http://localhost:3000}
 
       # Timezone
       TZ: ${TZ:-Africa/Lagos}
