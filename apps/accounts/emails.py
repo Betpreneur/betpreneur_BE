@@ -1,7 +1,6 @@
 import logging
 import random
 import string
-from datetime import datetime, timedelta
 
 import resend
 from django.conf import settings
@@ -25,8 +24,9 @@ class EmailService:
 
         try:
             resend.api_key = settings.RESEND_API_KEY
+            from_email = f"{settings.RESEND_FROM_NAME} <{settings.RESEND_FROM_EMAIL}>"
             response = resend.Emails.send({
-                "from": "Betpreneur <noreply@betpreneur.com>",
+                "from": from_email,
                 "to": to,
                 "subject": subject,
                 "html": html,

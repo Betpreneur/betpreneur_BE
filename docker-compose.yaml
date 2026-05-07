@@ -85,6 +85,10 @@ services:
       APS_KEY: ${APS_KEY:-}
       ODDS_KEY: ${ODDS_KEY:-}
       RESEND_API_KEY: ${RESEND_API_KEY:-}
+      RESEND_FROM_NAME: ${RESEND_FROM_NAME:-Betpreneur}
+      RESEND_FROM_EMAIL_PREFIX: ${RESEND_FROM_EMAIL_PREFIX:-support}
+      RESEND_FROM_EMAIL_DOMAIN: ${RESEND_FROM_EMAIL_DOMAIN:-betpreneur.ng}
+      RESEND_FROM_EMAIL: ${RESEND_FROM_EMAIL:-support@betpreneur.ng}
 
       # Google Drive
       KEY_FILE: ${KEY_FILE:-}

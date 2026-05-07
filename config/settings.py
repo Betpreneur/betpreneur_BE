@@ -124,6 +124,13 @@ GRIND_ALGO = {
 
 # Auth settings
 RESEND_API_KEY = config("RESEND_API_KEY", default="")
+RESEND_FROM_NAME = config("RESEND_FROM_NAME", default="Betpreneur")
+RESEND_FROM_EMAIL_PREFIX = config("RESEND_FROM_EMAIL_PREFIX", default="support")
+RESEND_FROM_EMAIL_DOMAIN = config("RESEND_FROM_EMAIL_DOMAIN", default="betpreneur.ng")
+RESEND_FROM_EMAIL = config(
+    "RESEND_FROM_EMAIL",
+    default=f"{RESEND_FROM_EMAIL_PREFIX}@{RESEND_FROM_EMAIL_DOMAIN}",
+)
 FRONTEND_URL = config("FRONTEND_URL", default="http://localhost:3000")
 
 # JWT Settings
