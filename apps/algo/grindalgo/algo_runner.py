@@ -501,6 +501,32 @@ ODDS_KEYS_MAP = {
 
 def est_odds(c): return round(1/max(c/100,0.05)*1.05,2)
 
+def recent_form_summary(form):
+    games = max(form.get("games", 0), 1)
+    return {
+        "games": form.get("games", 0),
+        "wins": form.get("wins", 0),
+        "avg_scored": form.get("avg_scored", 0),
+        "avg_conceded": form.get("avg_conceded", 0),
+        "clean_sheets": form.get("clean_sheets", 0),
+        "btts_rate": round(form.get("btts_count", 0) / games * 100, 1),
+        "over25_rate": round(form.get("over25_count", 0) / games * 100, 1),
+        "streak": form.get("streak", 0),
+    }
+
+def pick_reasoning(pick):
+    return (
+        f"{pick.get('market')} rates at {pick.get('conf')}% confidence with "
+        f"{pick.get('odds')} odds and {pick.get('ev'):+.3f} expected value. "
+        f"The model prefers this market from the available fixture markets."
+    )
+
+def pick_verdict(pick):
+    tier = pick.get("tier") or "pick"
+    if pick.get("proven"):
+        return f"{tier.replace('_', ' ').title()} backed by a proven market profile."
+    return f"{tier.replace('_', ' ').title()} selected for positive value and confidence."
+
 def select_picks(all_confs, scored_fxs, odds_list):
     pool=[]
     for fx,confs,real_odds in zip(scored_fxs,all_confs,odds_list):
@@ -512,12 +538,15 @@ def select_picks(all_confs, scored_fxs, odds_list):
             ev = round((conf/100)*odds-1,3)
             pool.append({"fixture":fx["fixture"],"league":fx["league"],
                          "code":fx.get("code","?"),"kickoff":fx["kickoff"],
+                         "home_team":fx.get("hname",""),"away_team":fx.get("aname",""),
                          "market":market,"meaning":MARKET_MEANINGS.get(market,""),
                          "conf":conf,"odds":odds,"ev":ev,
                          "proven":market in PROVEN_MARKETS,
                          "hname":fx["hname"],"aname":fx["aname"],
                          "match_id":fx.get("match_id"),
-                         "source":fx.get("source","?")})
+                         "source":fx.get("source","?"),
+                         "home_recent_form":fx.get("home_recent_form",{}),
+                         "away_recent_form":fx.get("away_recent_form",{})})
 
     # ── BANKERS: up to MAX_BANKERS, one per fixture, proven markets ──
     banker_cands = sorted([p for p in pool if p["proven"] and p["conf"]>=BANKER_MIN and 1.25<=p["odds"]<=3.50],
@@ -568,6 +597,11 @@ def select_picks(all_confs, scored_fxs, odds_list):
             if len(bankers)+len(value_gems)>=TARGET_MAX: break
 
     log.info(f"Picks selected — Bankers:{len(bankers)} ValueGems:{len(value_gems)} WildCards:{len(wild_cards)}")
+    for tier, selected in (("banker", bankers), ("value_gem", value_gems), ("wild_card", wild_cards)):
+        for pick in selected:
+            pick["tier"] = tier
+            pick["reasoning"] = pick_reasoning(pick)
+            pick["model_verdict"] = pick_verdict(pick)
     return bankers, value_gems, wild_cards
 
 # ── RECORD TO SHEETS ──────────────────────────────────────────────
@@ -616,12 +650,18 @@ def serialize_selected_picks(bankers, value_gems, wild_cards, target_date, bankr
             picks.append({
                 "match_date": target_date,
                 "fixture": pick.get("fixture", ""),
+                "home_team": pick.get("home_team", ""),
+                "away_team": pick.get("away_team", ""),
                 "league": pick.get("league", ""),
                 "kickoff": pick.get("kickoff", ""),
                 "match_id": str(pick.get("match_id") or ""),
                 "tier": tier,
                 "market": pick.get("market", ""),
                 "meaning": pick.get("meaning", ""),
+                "reasoning": pick.get("reasoning", ""),
+                "model_verdict": pick.get("model_verdict", ""),
+                "home_recent_form": pick.get("home_recent_form", {}),
+                "away_recent_form": pick.get("away_recent_form", {}),
                 "confidence": pick.get("conf", 0),
                 "odds": pick.get("odds", 0),
                 "ev": pick.get("ev", 0),
@@ -629,6 +669,22 @@ def serialize_selected_picks(bankers, value_gems, wild_cards, target_date, bankr
                 "source": "FD" if pick.get("source") == "fd" else "APS",
             })
     return picks
+
+def serialize_fixture_summaries(scored_fxs, all_confs):
+    summaries = []
+    for fx, confs in zip(scored_fxs, all_confs):
+        summaries.append({
+            "fixture": fx.get("fixture", ""),
+            "home_team": fx.get("hname", ""),
+            "away_team": fx.get("aname", ""),
+            "league": fx.get("league", ""),
+            "kickoff": fx.get("kickoff", ""),
+            "match_id": str(fx.get("match_id") or ""),
+            "market_count": len(confs),
+            "markets_70_plus": sum(1 for value in confs.values() if value >= 70),
+            "markets_65_plus": sum(1 for value in confs.values() if value >= 65),
+        })
+    return summaries
 
 # ── PDF + DRIVE ───────────────────────────────────────────────────
 def generate_and_upload_pdf(drive, bankers, value_gems, wild_cards,
@@ -1317,6 +1373,8 @@ def run_daily_algo():
             else:
                 hf=_default_form(); af=_default_form()
                 h2h={"games":5,"t1w":2,"o25":3,"btts":2}
+            fx["home_recent_form"] = recent_form_summary(hf)
+            fx["away_recent_form"] = recent_form_summary(af)
             real_odds = get_api_football_odds(fx["aps_id"])
             confs = score_fixture(hf,af,h2h,real_odds,api_preds=pred_data)
             all_confs.append(confs); scored_fxs.append(fx); odds_list.append(real_odds)
@@ -1350,6 +1408,10 @@ def run_daily_algo():
     result = {"status":"success","date":target_date,
               "fd_fixtures":0,"aps_fixtures":len(fixtures),
               "total_scored":len(all_confs),"picks_count":picks_count,
+              "market_count":sum(len(confs) for confs in all_confs),
+              "markets_70_plus":sum(1 for confs in all_confs for value in confs.values() if value >= 70),
+              "markets_65_plus":sum(1 for confs in all_confs for value in confs.values() if value >= 65),
+              "fixture_summaries":serialize_fixture_summaries(scored_fxs, all_confs),
               "bankers":len(bankers or []),"value_gems":len(value_gems or []),
               "wild_cards":len(wild_cards or []),"bankroll":bankroll,
               "selected_picks": serialize_selected_picks(

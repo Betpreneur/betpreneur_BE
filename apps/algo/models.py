@@ -57,6 +57,8 @@ class Pick(models.Model):
     run = models.ForeignKey(AlgoRun, on_delete=models.CASCADE, related_name="picks")
     match_date = models.DateField(null=True, blank=True)
     fixture = models.CharField(max_length=255)
+    home_team = models.CharField(max_length=255, blank=True)
+    away_team = models.CharField(max_length=255, blank=True)
     league = models.CharField(max_length=255, blank=True)
     kickoff = models.CharField(max_length=50, blank=True)
     match_id = models.CharField(max_length=100, blank=True)
@@ -64,6 +66,9 @@ class Pick(models.Model):
     market = models.CharField(max_length=100)
     meaning = models.CharField(max_length=255, blank=True)
     reasoning = models.TextField(blank=True)
+    model_verdict = models.TextField(blank=True)
+    home_recent_form = models.JSONField(default=dict, blank=True)
+    away_recent_form = models.JSONField(default=dict, blank=True)
     risk_flags = models.JSONField(default=list, blank=True)
     confidence = models.PositiveIntegerField()
     odds = models.DecimalField(max_digits=8, decimal_places=2)
@@ -82,3 +87,20 @@ class Pick(models.Model):
 
     def __str__(self):
         return f"{self.fixture} - {self.market}"
+
+
+class PickBack(models.Model):
+    pick = models.ForeignKey(Pick, on_delete=models.CASCADE, related_name="backs")
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="backed_picks",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        unique_together = ("pick", "user")
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return f"{self.user} backed {self.pick}"

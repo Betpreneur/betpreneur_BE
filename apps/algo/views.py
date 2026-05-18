@@ -1,16 +1,20 @@
 from datetime import timedelta
+import csv
 
 from celery.result import AsyncResult
+from django.http import HttpResponse
+from django.shortcuts import get_object_or_404
 from django.db.models import Count, Q, Sum
 from django.utils import timezone
+from drf_spectacular.types import OpenApiTypes
 from drf_spectacular.utils import extend_schema, extend_schema_view
 from rest_framework import status, viewsets
 from rest_framework.decorators import action
-from rest_framework.permissions import AllowAny, IsAdminUser
+from rest_framework.permissions import AllowAny, IsAdminUser, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from .models import AlgoRun, Pick
+from .models import AlgoRun, Pick, PickBack
 from .serializers import (
     AlgoRunCreateSerializer,
     AlgoRunSerializer,
@@ -18,6 +22,7 @@ from .serializers import (
     DailyPicksQuerySerializer,
     DailyPicksResponseSerializer,
     PickSerializer,
+    PickBackResponseSerializer,
     PublicSummarySerializer,
     RecordResponseSerializer,
     RecordQuerySerializer,
@@ -62,6 +67,91 @@ def _latest_successful_run(target_date):
         .order_by("-created_at")
         .first()
     )
+
+
+def _daily_picks_payload(target_date, request=None):
+    algo_run = _latest_successful_run(target_date)
+    if not algo_run:
+        return {
+            "date": target_date,
+            "published": False,
+            "run_id": None,
+            "posted_at": None,
+            "summary": {
+                "fixture_count": 0,
+                "market_count": 0,
+                "selected_pick_count": 0,
+                "picks_70_plus": 0,
+                "picks_65_plus": 0,
+                "markets_70_plus": 0,
+                "markets_65_plus": 0,
+            },
+            "fixtures": [],
+        }
+
+    picks = list(algo_run.picks.all().order_by("kickoff", "-confidence", "-ev"))
+    backed_ids = set()
+    if request and request.user.is_authenticated:
+        backed_ids = set(
+            PickBack.objects.filter(user=request.user, pick__in=picks)
+            .values_list("pick_id", flat=True)
+        )
+
+    fixture_summaries = {
+        str(item.get("match_id")): item
+        for item in (algo_run.result or {}).get("fixture_summaries", [])
+    }
+    fixtures = {}
+    for item in fixture_summaries.values():
+        fixtures[item.get("match_id")] = {
+            "fixture": item.get("fixture", ""),
+            "home_team": item.get("home_team", ""),
+            "away_team": item.get("away_team", ""),
+            "league": item.get("league", ""),
+            "kickoff": item.get("kickoff", ""),
+            "match_id": item.get("match_id", ""),
+            "market_count": item.get("market_count", 0),
+            "markets_70_plus": item.get("markets_70_plus", 0),
+            "markets_65_plus": item.get("markets_65_plus", 0),
+            "picks": [],
+        }
+
+    for pick in picks:
+        key = str(pick.match_id)
+        if key not in fixtures:
+            fixtures[key] = {
+                "fixture": pick.fixture,
+                "home_team": pick.home_team,
+                "away_team": pick.away_team,
+                "league": pick.league,
+                "kickoff": pick.kickoff,
+                "match_id": pick.match_id,
+                "market_count": 0,
+                "markets_70_plus": 0,
+                "markets_65_plus": 0,
+                "picks": [],
+            }
+        data = PickSerializer(pick).data
+        data["backed_by_me"] = pick.id in backed_ids
+        data["backed_count"] = pick.backs.count()
+        fixtures[key]["picks"].append(data)
+
+    return {
+        "date": target_date,
+        "published": True,
+        "run_id": algo_run.id,
+        "posted_at": algo_run.created_at,
+        "summary": {
+            "fixture_count": algo_run.total_scored,
+            "market_count": (algo_run.result or {}).get("market_count", 0),
+            "selected_pick_count": len(picks),
+            "picks_70_plus": sum(1 for pick in picks if pick.confidence >= 70),
+            "picks_65_plus": sum(1 for pick in picks if pick.confidence >= 65),
+            "markets_70_plus": (algo_run.result or {}).get("markets_70_plus", 0),
+            "markets_65_plus": (algo_run.result or {}).get("markets_65_plus", 0),
+        },
+        "fixtures": list(fixtures.values()),
+    }
 
 
 @extend_schema_view(
@@ -179,12 +269,12 @@ class PublicSummaryView(APIView):
         return Response(_performance_summary(queryset, window_days))
 
 
-class PublicDailyPicksView(APIView):
-    permission_classes = [AllowAny]
+class DailyPicksView(APIView):
+    permission_classes = [IsAuthenticated]
     serializer_class = DailyPicksResponseSerializer
 
     @extend_schema(
-        summary="Public daily picks",
+        summary="Daily picks",
         description="Returns the published picks for a matchday. Defaults to today in WAT.",
         tags=["Algo"],
         parameters=[DailyPicksQuerySerializer],
@@ -194,25 +284,15 @@ class PublicDailyPicksView(APIView):
         query = DailyPicksQuerySerializer(data=request.query_params)
         query.is_valid(raise_exception=True)
         target_date = query.validated_data.get("date") or timezone.localdate()
-        algo_run = _latest_successful_run(target_date)
-        picks = algo_run.picks.all() if algo_run else Pick.objects.none()
-        return Response(
-            {
-                "date": target_date,
-                "published": bool(algo_run),
-                "run_id": algo_run.id if algo_run else None,
-                "posted_at": algo_run.created_at if algo_run else None,
-                "picks": PickSerializer(picks, many=True).data,
-            }
-        )
+        return Response(_daily_picks_payload(target_date, request))
 
 
-class PublicTopPickView(APIView):
-    permission_classes = [AllowAny]
+class TopPickView(APIView):
+    permission_classes = [IsAuthenticated]
     serializer_class = TopPickResponseSerializer
 
     @extend_schema(
-        summary="Public top pick of the day",
+        summary="Top pick of the day",
         description="Returns the highest-confidence published pick for the requested matchday.",
         tags=["Algo"],
         parameters=[DailyPicksQuerySerializer],
@@ -226,12 +306,77 @@ class PublicTopPickView(APIView):
         pick = None
         if algo_run:
             pick = algo_run.picks.order_by("-confidence", "-ev").first()
+        pick_data = PickSerializer(pick).data if pick else None
+        if pick_data:
+            pick_data["backed_by_me"] = PickBack.objects.filter(pick=pick, user=request.user).exists()
+            pick_data["backed_count"] = pick.backs.count()
         return Response(
             {
                 "date": target_date,
                 "published": bool(pick),
-                "pick": PickSerializer(pick).data if pick else None,
+                "pick": pick_data,
             }
+        )
+
+
+class DailyPicksDownloadView(APIView):
+    permission_classes = [IsAuthenticated]
+    serializer_class = DailyPicksResponseSerializer
+
+    @extend_schema(
+        summary="Download daily picks",
+        description="Downloads the authenticated daily picks as CSV.",
+        tags=["Algo"],
+        parameters=[DailyPicksQuerySerializer],
+        responses={(200, "text/csv"): OpenApiTypes.BINARY},
+    )
+    def get(self, request):
+        query = DailyPicksQuerySerializer(data=request.query_params)
+        query.is_valid(raise_exception=True)
+        target_date = query.validated_data.get("date") or timezone.localdate()
+        algo_run = _latest_successful_run(target_date)
+        response = HttpResponse(content_type="text/csv")
+        response["Content-Disposition"] = f'attachment; filename="betpreneur_picks_{target_date}.csv"'
+        writer = csv.writer(response)
+        writer.writerow(["date", "fixture", "league", "kickoff", "tier", "market", "confidence", "odds", "ev", "status"])
+        if algo_run:
+            for pick in algo_run.picks.all().order_by("kickoff", "-confidence"):
+                writer.writerow([
+                    pick.match_date,
+                    pick.fixture,
+                    pick.league,
+                    pick.kickoff,
+                    pick.tier,
+                    pick.market,
+                    pick.confidence,
+                    pick.odds,
+                    pick.ev,
+                    pick.status,
+                ])
+        return response
+
+
+class BackPickView(APIView):
+    permission_classes = [IsAuthenticated]
+    serializer_class = PickBackResponseSerializer
+
+    @extend_schema(
+        summary="Back a pick",
+        description="Marks that the authenticated user backed this pick.",
+        tags=["Algo"],
+        responses={200: PickBackResponseSerializer, 201: PickBackResponseSerializer},
+    )
+    def post(self, request, pick_id):
+        pick = get_object_or_404(Pick, id=pick_id)
+        backed, created = PickBack.objects.get_or_create(pick=pick, user=request.user)
+        return Response(
+            {
+                "pick_id": pick.id,
+                "backed": True,
+                "created": created,
+                "backed_count": pick.backs.count(),
+            },
+            status=status.HTTP_201_CREATED if created else status.HTTP_200_OK,
         )
 
 

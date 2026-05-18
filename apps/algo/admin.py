@@ -2,7 +2,7 @@ from django.contrib import admin
 from django.contrib import messages
 from django.utils import timezone
 
-from .models import AlgoRun, Pick
+from .models import AlgoRun, Pick, PickBack
 from .tasks import generate_daily_picks, run_monthly_auditor, settle_daily_results
 
 
@@ -216,3 +216,11 @@ class PickAdmin(admin.ModelAdmin):
         messages.success(request, f"Marked {updated} pick(s) as void.")
 
     actions = ("queue_settlement_for_pick_dates", "mark_void")
+
+
+@admin.register(PickBack)
+class PickBackAdmin(admin.ModelAdmin):
+    list_display = ("id", "pick", "user", "created_at")
+    list_filter = ("created_at",)
+    search_fields = ("pick__fixture", "pick__market", "user__username", "user__email")
+    readonly_fields = ("created_at",)

@@ -31,9 +31,11 @@ python manage.py runserver
 - `POST /api/auth/token/refresh/`
 - `GET /api/auth/me/`
 - `GET /api/algo/public/summary/`
-- `GET /api/algo/public/picks/`
-- `GET /api/algo/public/top-pick/`
 - `GET /api/algo/public/record/`
+- `GET /api/algo/picks/`
+- `GET /api/algo/picks/download/`
+- `POST /api/algo/picks/{id}/back/`
+- `GET /api/algo/top-pick/`
 - `GET /api/algo/runs/`
 - `POST /api/algo/runs/`
 - `GET /api/algo/runs/{id}/`
@@ -55,4 +57,4 @@ Staff manual intervention lives in Django Admin:
 
 - `AlgoRun` admin actions can queue pick generation, result settlement, or auditor runs for selected dates.
 - `Pick` admin groups picks by `match_date`, supports date filtering/search, and allows staff to edit `status`, `score`, and `pnl` for manual corrections.
-- Public users should consume only the public picks/record endpoints; manual run endpoints are staff-only.
+- Public users can view the 90-day audited record. Authenticated users can view daily picks/top pick, download picks, and mark "I backed this." Manual run endpoints are staff-only.

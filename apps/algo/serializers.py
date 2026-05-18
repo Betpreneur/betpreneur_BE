@@ -1,15 +1,20 @@
 from rest_framework import serializers
 
-from .models import AlgoRun, Pick
+from .models import AlgoRun, Pick, PickBack
 
 
 class PickSerializer(serializers.ModelSerializer):
+    backed_count = serializers.SerializerMethodField()
+    backed_by_me = serializers.SerializerMethodField()
+
     class Meta:
         model = Pick
         fields = (
             "id",
             "match_date",
             "fixture",
+            "home_team",
+            "away_team",
             "league",
             "kickoff",
             "match_id",
@@ -17,6 +22,9 @@ class PickSerializer(serializers.ModelSerializer):
             "market",
             "meaning",
             "reasoning",
+            "model_verdict",
+            "home_recent_form",
+            "away_recent_form",
             "risk_flags",
             "confidence",
             "odds",
@@ -29,7 +37,18 @@ class PickSerializer(serializers.ModelSerializer):
             "source",
             "settled_at",
             "created_at",
+            "backed_count",
+            "backed_by_me",
         )
+
+    def get_backed_count(self, obj) -> int:
+        return obj.backs.count()
+
+    def get_backed_by_me(self, obj) -> bool:
+        request = self.context.get("request")
+        if not request or not request.user.is_authenticated:
+            return False
+        return obj.backs.filter(user=request.user).exists()
 
 
 class AlgoRunSerializer(serializers.ModelSerializer):
@@ -109,7 +128,8 @@ class DailyPicksResponseSerializer(serializers.Serializer):
     published = serializers.BooleanField()
     run_id = serializers.IntegerField(allow_null=True)
     posted_at = serializers.DateTimeField(allow_null=True)
-    picks = PickSerializer(many=True)
+    summary = serializers.JSONField()
+    fixtures = serializers.JSONField()
 
 
 class TopPickResponseSerializer(serializers.Serializer):
@@ -121,3 +141,17 @@ class TopPickResponseSerializer(serializers.Serializer):
 class RecordResponseSerializer(serializers.Serializer):
     summary = PublicSummarySerializer()
     picks = PickSerializer(many=True)
+
+
+class PickBackSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = PickBack
+        fields = ("id", "pick", "created_at")
+        read_only_fields = fields
+
+
+class PickBackResponseSerializer(serializers.Serializer):
+    pick_id = serializers.IntegerField()
+    backed = serializers.BooleanField()
+    created = serializers.BooleanField()
+    backed_count = serializers.IntegerField()
