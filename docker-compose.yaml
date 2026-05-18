@@ -28,11 +28,9 @@ services:
       retries: 5
     networks:
       - betpreneur_network
-    profiles:
-      - database
 
   # ------------------------------
-  # Redis (Optional - for caching/sessions)
+  # Redis (Celery broker/result backend)
   # ------------------------------
   redis:
     image: redis:7-alpine
@@ -50,8 +48,6 @@ services:
       retries: 5
     networks:
       - betpreneur_network
-    profiles:
-      - cache
 
   # ------------------------------
   # Backend Application
@@ -81,9 +77,8 @@ services:
       # DB_PASSWORD set via.docker/env below
 
       # External APIs (set in .env)
-      FD_TOKEN: ${FD_TOKEN:-}
       APS_KEY: ${APS_KEY:-}
-      ODDS_KEY: ${ODDS_KEY:-}
+      APS_MAX_FIXTURES: ${APS_MAX_FIXTURES:-90}
       RESEND_API_KEY: ${RESEND_API_KEY:-}
       RESEND_FROM_NAME: ${RESEND_FROM_NAME:-Betpreneur}
       RESEND_FROM_EMAIL_PREFIX: ${RESEND_FROM_EMAIL_PREFIX:-support}
@@ -103,13 +98,24 @@ services:
 
       # Timezone
       TZ: ${TZ:-Africa/Lagos}
+
+      # Celery
+      CELERY_BROKER_URL: ${CELERY_BROKER_URL:-redis://redis:6379/0}
+      CELERY_RESULT_BACKEND: ${CELERY_RESULT_BACKEND:-redis://redis:6379/0}
+      ALGO_GENERATE_HOUR: ${ALGO_GENERATE_HOUR:-0}
+      ALGO_GENERATE_MINUTE: ${ALGO_GENERATE_MINUTE:-5}
+      ALGO_SETTLE_HOUR: ${ALGO_SETTLE_HOUR:-6}
+      ALGO_SETTLE_MINUTE: ${ALGO_SETTLE_MINUTE:-30}
+      ALGO_AUDITOR_DAY: ${ALGO_AUDITOR_DAY:-1}
+      ALGO_AUDITOR_HOUR: ${ALGO_AUDITOR_HOUR:-8}
+      ALGO_AUDITOR_MINUTE: ${ALGO_AUDITOR_MINUTE:-0}
     env_file:
       - .env
     depends_on:
       db:
         condition: service_healthy
-      # redis:
-      #   condition: service_healthy
+      redis:
+        condition: service_healthy
     volumes:
       - ./staticfiles:/home/appuser/staticfiles
       - ./media:/home/appuser/media
@@ -119,6 +125,94 @@ services:
       timeout: 10s
       retries: 3
       start_period: 40s
+    networks:
+      - betpreneur_network
+
+  # ------------------------------
+  # Celery Worker
+  # ------------------------------
+  celery-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: production
+    container_name: betpreneur_celery_worker
+    restart: unless-stopped
+    command: celery -A config worker --loglevel=info --concurrency=${CELERY_WORKER_CONCURRENCY:-2}
+    environment:
+      DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY:-change-me-in-production}
+      DJANGO_DEBUG: ${DJANGO_DEBUG:-False}
+      DJANGO_ALLOWED_HOSTS: ${DJANGO_ALLOWED_HOSTS:-localhost,127.0.0.1}
+      DJANGO_SETTINGS_MODULE: config.settings
+      DB_ENGINE: django.db.backends.postgresql
+      DB_NAME: ${DB_NAME:-postgres}
+      DB_USER: ${DB_USER:-postgres}
+      DB_HOST: db
+      DB_PORT: 5432
+      APS_KEY: ${APS_KEY:-}
+      APS_MAX_FIXTURES: ${APS_MAX_FIXTURES:-90}
+      KEY_FILE: ${KEY_FILE:-}
+      SHEET_NAME: ${SHEET_NAME:-GrindAlgo Tracker}
+      DRIVE_FOLDER: ${DRIVE_FOLDER:-GrindAlgo Reports}
+      EMAIL_RECIPIENT: ${EMAIL_RECIPIENT:-}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      GEMINI_MODEL: ${GEMINI_MODEL:-gemini-2.5-flash}
+      CELERY_BROKER_URL: ${CELERY_BROKER_URL:-redis://redis:6379/0}
+      CELERY_RESULT_BACKEND: ${CELERY_RESULT_BACKEND:-redis://redis:6379/0}
+      TZ: ${TZ:-Africa/Lagos}
+    env_file:
+      - .env
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./staticfiles:/home/appuser/staticfiles
+      - ./media:/home/appuser/media
+    networks:
+      - betpreneur_network
+
+  # ------------------------------
+  # Celery Beat Scheduler
+  # ------------------------------
+  celery-beat:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: production
+    container_name: betpreneur_celery_beat
+    restart: unless-stopped
+    command: celery -A config beat --loglevel=info --schedule=/tmp/celerybeat-schedule
+    environment:
+      DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY:-change-me-in-production}
+      DJANGO_DEBUG: ${DJANGO_DEBUG:-False}
+      DJANGO_ALLOWED_HOSTS: ${DJANGO_ALLOWED_HOSTS:-localhost,127.0.0.1}
+      DJANGO_SETTINGS_MODULE: config.settings
+      DB_ENGINE: django.db.backends.postgresql
+      DB_NAME: ${DB_NAME:-postgres}
+      DB_USER: ${DB_USER:-postgres}
+      DB_HOST: db
+      DB_PORT: 5432
+      APS_KEY: ${APS_KEY:-}
+      APS_MAX_FIXTURES: ${APS_MAX_FIXTURES:-90}
+      CELERY_BROKER_URL: ${CELERY_BROKER_URL:-redis://redis:6379/0}
+      CELERY_RESULT_BACKEND: ${CELERY_RESULT_BACKEND:-redis://redis:6379/0}
+      ALGO_GENERATE_HOUR: ${ALGO_GENERATE_HOUR:-0}
+      ALGO_GENERATE_MINUTE: ${ALGO_GENERATE_MINUTE:-5}
+      ALGO_SETTLE_HOUR: ${ALGO_SETTLE_HOUR:-6}
+      ALGO_SETTLE_MINUTE: ${ALGO_SETTLE_MINUTE:-30}
+      ALGO_AUDITOR_DAY: ${ALGO_AUDITOR_DAY:-1}
+      ALGO_AUDITOR_HOUR: ${ALGO_AUDITOR_HOUR:-8}
+      ALGO_AUDITOR_MINUTE: ${ALGO_AUDITOR_MINUTE:-0}
+      TZ: ${TZ:-Africa/Lagos}
+    env_file:
+      - .env
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
     networks:
       - betpreneur_network
 

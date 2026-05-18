@@ -157,6 +157,12 @@ ENV/
 env.bak/
 venv.bak/
 
+# Local service account credentials
+/grindalgo/
+grind_key.json
+grindalgo/grind_key.json
+apps/algo/grindalgo/grind_key.json
+
 # Spyder project settings
 .spyderproject
 .spyproject

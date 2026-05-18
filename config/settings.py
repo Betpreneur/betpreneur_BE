@@ -89,6 +89,14 @@ STATIC_URL = "static/"
 STATIC_ROOT = BASE_DIR / "staticfiles"
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
+CELERY_BROKER_URL = config("CELERY_BROKER_URL", default="redis://localhost:6379/0")
+CELERY_RESULT_BACKEND = config("CELERY_RESULT_BACKEND", default=CELERY_BROKER_URL)
+CELERY_TIMEZONE = TIME_ZONE
+CELERY_ENABLE_UTC = True
+CELERY_TASK_TRACK_STARTED = True
+CELERY_TASK_TIME_LIMIT = config("CELERY_TASK_TIME_LIMIT", default=60 * 60 * 3, cast=int)
+CELERY_TASK_SOFT_TIME_LIMIT = config("CELERY_TASK_SOFT_TIME_LIMIT", default=60 * 60 * 2, cast=int)
+
 _cors_allowed_origins = config("CORS_ALLOWED_ORIGINS", default="")
 CORS_ALLOWED_ORIGINS = [
     origin.strip()
@@ -113,9 +121,10 @@ EMAIL_BACKEND = config(
 DEFAULT_FROM_EMAIL = config("DEFAULT_FROM_EMAIL", default="noreply@betpreneur.local")
 
 GRIND_ALGO = {
-    "FD_TOKEN": config("FD_TOKEN", default=""),
     "APS_KEY": config("APS_KEY", default=""),
-    "ODDS_KEY": config("ODDS_KEY", default=""),
+    "APS_MAX_FIXTURES": config("APS_MAX_FIXTURES", default="90"),
+    "GEMINI_API_KEY": config("GEMINI_API_KEY", default=""),
+    "GEMINI_MODEL": config("GEMINI_MODEL", default="gemini-2.5-flash"),
     "KEY_FILE": config("KEY_FILE", default=""),
     "SHEET_NAME": config("SHEET_NAME", default="GrindAlgo Tracker"),
     "DRIVE_FOLDER": config("DRIVE_FOLDER", default="GrindAlgo Reports"),

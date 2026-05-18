@@ -9,12 +9,10 @@ User = get_user_model()
 
 class SignupSerializer(serializers.ModelSerializer):
     password = serializers.CharField(write_only=True, validators=[validate_password])
-    whatsapp_country_code = serializers.CharField(max_length=5, required=False, allow_blank=True, default="")
-    whatsapp_number = serializers.CharField(max_length=15, required=False, allow_blank=True, default="")
 
     class Meta:
         model = User
-        fields = ("id", "username", "email", "password", "whatsapp_country_code", "whatsapp_number")
+        fields = ("id", "username", "email", "password")
         read_only_fields = ("id",)
 
     def validate_username(self, value):
