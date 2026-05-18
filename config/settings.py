@@ -182,14 +182,22 @@ This API uses JWT (JSON Web Tokens) for authentication.
         "persistAuthorization": True,
     },
     "COMPONENT_SPLITING": False,
-    "APPEND_TAG": [
+    "TAGS": [
         {
             "name": "Authentication",
             "description": "User authentication endpoints (signup, login, logout, password reset)",
         },
         {
-            "name": "Algo",
-            "description": "Betting algorithm run management",
+            "name": "Picks",
+            "description": "Authenticated app endpoints for daily picks, top pick, downloads, and I-backed-this actions.",
+        },
+        {
+            "name": "Public Record",
+            "description": "Public audited track-record endpoints for landing pages and proof widgets.",
+        },
+        {
+            "name": "Admin Algo",
+            "description": "Internal staff-only endpoints for manual Celery triggers, run inspection, and task status.",
         },
         {
             "name": "Bankroll",
@@ -204,5 +212,4 @@ This API uses JWT (JSON Web Tokens) for authentication.
             "description": "System health check endpoints",
         },
     ],
-    "TAGS": [],
 }

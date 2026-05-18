@@ -34,7 +34,12 @@ class SignupSerializer(serializers.ModelSerializer):
 
 
 class VerifyEmailSerializer(serializers.Serializer):
+    email = serializers.EmailField()
     code = serializers.CharField(max_length=6)
+
+
+class LogoutSerializer(serializers.Serializer):
+    refresh = serializers.CharField(required=False, allow_blank=True)
 
 
 class ResendVerificationSerializer(serializers.ModelSerializer):

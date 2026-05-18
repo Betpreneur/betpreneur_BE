@@ -8,7 +8,9 @@ from rest_framework import status
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
+from rest_framework_simplejwt.serializers import TokenRefreshSerializer
 from rest_framework_simplejwt.tokens import RefreshToken
+from rest_framework_simplejwt.views import TokenRefreshView
 
 from .emails import EmailService
 from .models import User
@@ -16,6 +18,7 @@ from .serializers import (
     ChangePasswordSerializer,
     ForgotPasswordSerializer,
     LoginSerializer,
+    LogoutSerializer,
     ResendVerificationSerializer,
     ResetPasswordSerializer,
     SignupSerializer,
@@ -24,6 +27,19 @@ from .serializers import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+@extend_schema_view(
+    post=extend_schema(
+        summary="Refresh access token",
+        description="Exchange a valid refresh token for a new access token.",
+        tags=["Authentication"],
+        request=TokenRefreshSerializer,
+        responses={200: TokenRefreshSerializer},
+    )
+)
+class TaggedTokenRefreshView(TokenRefreshView):
+    pass
 
 
 @extend_schema_view(
@@ -87,8 +103,8 @@ class VerifyEmailView(APIView):
         serializer = VerifyEmailSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
 
-        email = request.data.get("email")
-        code = request.data.get("code")
+        email = serializer.validated_data["email"]
+        code = serializer.validated_data["code"]
 
         try:
             user = User.objects.get(email__iexact=email)
@@ -234,7 +250,7 @@ class LoginView(APIView):
         **Requires:** Valid access token in header
         """,
         tags=["Authentication"],
-        request=None,
+        request=LogoutSerializer,
         responses={
             200: {"description": "Logged out successfully"},
             400: {"description": "Invalid token"},
@@ -245,8 +261,10 @@ class LogoutView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request):
+        serializer = LogoutSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
         try:
-            refresh_token = request.data.get("refresh")
+            refresh_token = serializer.validated_data.get("refresh")
             if refresh_token:
                 token = RefreshToken(refresh_token)
                 token.blacklist()

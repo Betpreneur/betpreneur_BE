@@ -7,7 +7,7 @@ from django.shortcuts import get_object_or_404
 from django.db.models import Count, Q, Sum
 from django.utils import timezone
 from drf_spectacular.types import OpenApiTypes
-from drf_spectacular.utils import extend_schema, extend_schema_view
+from drf_spectacular.utils import OpenApiExample, extend_schema, extend_schema_view
 from rest_framework import status, viewsets
 from rest_framework.decorators import action
 from rest_framework.permissions import AllowAny, IsAdminUser, IsAuthenticated
@@ -157,18 +157,18 @@ def _daily_picks_payload(target_date, request=None):
 @extend_schema_view(
     list=extend_schema(
         summary="List algo runs",
-        description="Get all algorithm execution records",
-        tags=["Algo"],
+        description="Internal staff endpoint. Lists algorithm execution records.",
+        tags=["Admin Algo"],
     ),
     retrieve=extend_schema(
         summary="Get algo run",
-        description="Get a specific algo run by ID",
-        tags=["Algo"],
+        description="Internal staff endpoint. Gets a specific algorithm execution record by ID.",
+        tags=["Admin Algo"],
     ),
     create=extend_schema(
-        summary="Run algo",
+        summary="Queue manual algo run",
         description="""
-        Execute the betting algorithm for a target date.
+        Internal staff endpoint. Queues the betting algorithm for a target date.
         
         **Optional payload:**
         ```json
@@ -179,9 +179,16 @@ def _daily_picks_payload(target_date, request=None):
         
         If no target_date is provided, runs for today.
         """,
-        tags=["Algo"],
+        tags=["Admin Algo"],
         request=AlgoRunCreateSerializer,
         responses={202: TaskQueuedSerializer},
+        examples=[
+            OpenApiExample(
+                "Generate picks for a date",
+                value={"target_date": "2026-05-19"},
+                request_only=True,
+            )
+        ],
     ),
 )
 class AlgoRunViewSet(viewsets.ReadOnlyModelViewSet):
@@ -205,10 +212,17 @@ class AlgoRunViewSet(viewsets.ReadOnlyModelViewSet):
 
     @extend_schema(
         summary="Update algo results",
-        description="Settle picks for the target date. If omitted, settles yesterday in WAT.",
-        tags=["Algo"],
+        description="Internal staff endpoint. Queues settlement for the target date. If omitted, settles yesterday in WAT.",
+        tags=["Admin Algo"],
         request=ResultsUpdateSerializer,
         responses={202: TaskQueuedSerializer},
+        examples=[
+            OpenApiExample(
+                "Settle a date",
+                value={"target_date": "2026-05-18"},
+                request_only=True,
+            )
+        ],
     )
     @action(detail=False, methods=["post"], url_path="update-results")
     def update_results(self, request):
@@ -227,10 +241,17 @@ class AlgoRunViewSet(viewsets.ReadOnlyModelViewSet):
 
     @extend_schema(
         summary="Run algo auditor",
-        description="Generate the monthly auditor report for an optional date range.",
-        tags=["Algo"],
+        description="Internal staff endpoint. Queues the monthly auditor report for an optional date range.",
+        tags=["Admin Algo"],
         request=AuditorRunSerializer,
         responses={202: TaskQueuedSerializer},
+        examples=[
+            OpenApiExample(
+                "Audit date range",
+                value={"from_date": "2026-04-01", "to_date": "2026-04-30"},
+                request_only=True,
+            )
+        ],
     )
     @action(detail=False, methods=["post"], url_path="run-auditor")
     def run_auditor(self, request):
@@ -259,7 +280,7 @@ class PublicSummaryView(APIView):
     @extend_schema(
         summary="Public audited performance summary",
         description="Returns headline stats for the public proof/landing page.",
-        tags=["Algo"],
+        tags=["Public Record"],
         responses={200: PublicSummarySerializer},
     )
     def get(self, request):
@@ -275,8 +296,8 @@ class DailyPicksView(APIView):
 
     @extend_schema(
         summary="Daily picks",
-        description="Returns the published picks for a matchday. Defaults to today in WAT.",
-        tags=["Algo"],
+        description="Authenticated user endpoint. Returns the published picks for a matchday. Defaults to today in WAT.",
+        tags=["Picks"],
         parameters=[DailyPicksQuerySerializer],
         responses={200: DailyPicksResponseSerializer},
     )
@@ -293,8 +314,8 @@ class TopPickView(APIView):
 
     @extend_schema(
         summary="Top pick of the day",
-        description="Returns the highest-confidence published pick for the requested matchday.",
-        tags=["Algo"],
+        description="Authenticated user endpoint. Returns the highest-confidence published pick for the requested matchday.",
+        tags=["Picks"],
         parameters=[DailyPicksQuerySerializer],
         responses={200: TopPickResponseSerializer},
     )
@@ -325,8 +346,8 @@ class DailyPicksDownloadView(APIView):
 
     @extend_schema(
         summary="Download daily picks",
-        description="Downloads the authenticated daily picks as CSV.",
-        tags=["Algo"],
+        description="Authenticated user endpoint. Downloads the daily picks as CSV.",
+        tags=["Picks"],
         parameters=[DailyPicksQuerySerializer],
         responses={(200, "text/csv"): OpenApiTypes.BINARY},
     )
@@ -362,8 +383,9 @@ class BackPickView(APIView):
 
     @extend_schema(
         summary="Back a pick",
-        description="Marks that the authenticated user backed this pick.",
-        tags=["Algo"],
+        description="Authenticated user endpoint. Marks that the user backed this pick. No request body is required.",
+        tags=["Picks"],
+        request=None,
         responses={200: PickBackResponseSerializer, 201: PickBackResponseSerializer},
     )
     def post(self, request, pick_id):
@@ -387,7 +409,7 @@ class PublicRecordView(APIView):
     @extend_schema(
         summary="Public audited pick record",
         description="Returns settled and pending picks for the requested audit window.",
-        tags=["Algo"],
+        tags=["Public Record"],
         parameters=[RecordQuerySerializer],
         responses={200: RecordResponseSerializer},
     )
@@ -410,8 +432,8 @@ class TaskStatusView(APIView):
 
     @extend_schema(
         summary="Get background task status",
-        description="Returns Celery task status and result/error when available.",
-        tags=["Algo"],
+        description="Internal staff endpoint. Returns Celery task status and result/error when available.",
+        tags=["Admin Algo"],
         responses={200: TaskStatusSerializer},
     )
     def get(self, request, task_id):

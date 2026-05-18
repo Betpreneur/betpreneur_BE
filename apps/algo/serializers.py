@@ -123,13 +123,36 @@ class RecordQuerySerializer(serializers.Serializer):
     days = serializers.IntegerField(required=False, min_value=1, max_value=365, default=90)
 
 
+class DailyPicksSummarySerializer(serializers.Serializer):
+    fixture_count = serializers.IntegerField()
+    market_count = serializers.IntegerField()
+    selected_pick_count = serializers.IntegerField()
+    picks_70_plus = serializers.IntegerField()
+    picks_65_plus = serializers.IntegerField()
+    markets_70_plus = serializers.IntegerField()
+    markets_65_plus = serializers.IntegerField()
+
+
+class FixturePickGroupSerializer(serializers.Serializer):
+    fixture = serializers.CharField()
+    home_team = serializers.CharField(allow_blank=True)
+    away_team = serializers.CharField(allow_blank=True)
+    league = serializers.CharField(allow_blank=True)
+    kickoff = serializers.CharField(allow_blank=True)
+    match_id = serializers.CharField(allow_blank=True)
+    market_count = serializers.IntegerField()
+    markets_70_plus = serializers.IntegerField()
+    markets_65_plus = serializers.IntegerField()
+    picks = PickSerializer(many=True)
+
+
 class DailyPicksResponseSerializer(serializers.Serializer):
     date = serializers.DateField()
     published = serializers.BooleanField()
     run_id = serializers.IntegerField(allow_null=True)
     posted_at = serializers.DateTimeField(allow_null=True)
-    summary = serializers.JSONField()
-    fixtures = serializers.JSONField()
+    summary = DailyPicksSummarySerializer()
+    fixtures = FixturePickGroupSerializer(many=True)
 
 
 class TopPickResponseSerializer(serializers.Serializer):
