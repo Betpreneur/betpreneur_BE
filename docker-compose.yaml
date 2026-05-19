@@ -1,7 +1,7 @@
 # ================================================================
 # Betpreneur Backend Docker Compose
 # ================================================================
-# Services: PostgreSQL, Redis (for caching/sessions), Backend
+# Services: PostgreSQL, Backend, Celery Worker, Celery Beat
 # ================================================================
 
 services:
@@ -28,24 +28,6 @@ services:
       - betpreneur_network
 
   # ------------------------------
-  # Redis (Celery broker/result backend)
-  # ------------------------------
-  redis:
-    image: redis:7-alpine
-    container_name: betpreneur_redis
-    restart: unless-stopped
-    command: redis-server --appendonly yes
-    volumes:
-      - redis_data:/data
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 5s
-      timeout: 5s
-      retries: 5
-    networks:
-      - betpreneur_network
-
-  # ------------------------------
   # Backend Application
   # ------------------------------
   backend:
@@ -55,13 +37,15 @@ services:
       target: production
     container_name: betpreneur_backend
     restart: unless-stopped
+    ports:
+      - "${BACKEND_HOST_PORT:-18000}:8000"
     expose:
       - "8000"
     environment:
       # Django
       DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY:-change-me-in-production}
       DJANGO_DEBUG: ${DJANGO_DEBUG:-False}
-      DJANGO_ALLOWED_HOSTS: ${DJANGO_ALLOWED_HOSTS:-localhost,127.0.0.1}
+      DJANGO_ALLOWED_HOSTS: ${DJANGO_ALLOWED_HOSTS:-backend.betpreneur.ng,localhost,127.0.0.1}
       DJANGO_SETTINGS_MODULE: config.settings
       CSRF_TRUSTED_ORIGINS: ${CSRF_TRUSTED_ORIGINS:-}
 
@@ -88,17 +72,17 @@ services:
       DRIVE_FOLDER: ${DRIVE_FOLDER:-GrindAlgo Reports}
 
       # Frontend
-      FRONTEND_URL: ${FRONTEND_URL:-https://betprenuer.lovable.app,https://www.betpreneur.ng,http://localhost:3000}
+      FRONTEND_URL: ${FRONTEND_URL:-https://tanstack-start-app.betpreneur.workers.dev,https://betpreneur.ng,https://www.betpreneur.ng,https://betpreneur.lovable.app,https://betprenuer.lovable.app,http://localhost:3000}
 
       # CORS
-      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-https://betprenuer.lovable.app,https://www.betpreneur.ng,http://localhost:3000}
+      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-https://tanstack-start-app.betpreneur.workers.dev,https://betpreneur.ng,https://www.betpreneur.ng,https://betpreneur.lovable.app,https://betprenuer.lovable.app,http://localhost:3000}
 
       # Timezone
       TZ: ${TZ:-Africa/Lagos}
 
       # Celery
-      CELERY_BROKER_URL: ${CELERY_BROKER_URL:-redis://default:L0M9a9g1qEmdtU4u0bHa89m39HHMdnEZ7cTqFZIPqvzTRivuT479VmdPP1KudD13@173.212.202.189:9909/0}
-      CELERY_RESULT_BACKEND: ${CELERY_RESULT_BACKEND:-redis://default:L0M9a9g1qEmdtU4u0bHa89m39HHMdnEZ7cTqFZIPqvzTRivuT479VmdPP1KudD13@173.212.202.189:9909/0}
+      CELERY_BROKER_URL: ${CELERY_BROKER_URL:?Set CELERY_BROKER_URL to your Coolify Redis URL}
+      CELERY_RESULT_BACKEND: ${CELERY_RESULT_BACKEND:?Set CELERY_RESULT_BACKEND to your Coolify Redis URL}
       ALGO_GENERATE_HOUR: ${ALGO_GENERATE_HOUR:-0}
       ALGO_GENERATE_MINUTE: ${ALGO_GENERATE_MINUTE:-5}
       ALGO_SETTLE_HOUR: ${ALGO_SETTLE_HOUR:-6}
@@ -110,8 +94,6 @@ services:
       - .env
     depends_on:
       db:
-        condition: service_healthy
-      redis:
         condition: service_healthy
     volumes:
       - ./media:/home/appuser/media
@@ -138,7 +120,7 @@ services:
     environment:
       DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY:-change-me-in-production}
       DJANGO_DEBUG: ${DJANGO_DEBUG:-False}
-      DJANGO_ALLOWED_HOSTS: ${DJANGO_ALLOWED_HOSTS:-localhost,127.0.0.1}
+      DJANGO_ALLOWED_HOSTS: ${DJANGO_ALLOWED_HOSTS:-backend.betpreneur.ng,localhost,127.0.0.1}
       DJANGO_SETTINGS_MODULE: config.settings
       CSRF_TRUSTED_ORIGINS: ${CSRF_TRUSTED_ORIGINS:-}
       DB_ENGINE: django.db.backends.postgresql
@@ -154,15 +136,13 @@ services:
       EMAIL_RECIPIENT: ${EMAIL_RECIPIENT:-}
       GEMINI_API_KEY: ${GEMINI_API_KEY:-}
       GEMINI_MODEL: ${GEMINI_MODEL:-gemini-2.5-flash}
-      CELERY_BROKER_URL: ${CELERY_BROKER_URL:-redis://default:L0M9a9g1qEmdtU4u0bHa89m39HHMdnEZ7cTqFZIPqvzTRivuT479VmdPP1KudD13@173.212.202.189:9909/0}
-      CELERY_RESULT_BACKEND: ${CELERY_RESULT_BACKEND:-redis://default:L0M9a9g1qEmdtU4u0bHa89m39HHMdnEZ7cTqFZIPqvzTRivuT479VmdPP1KudD13@173.212.202.189:9909/0}
+      CELERY_BROKER_URL: ${CELERY_BROKER_URL:?Set CELERY_BROKER_URL to your Coolify Redis URL}
+      CELERY_RESULT_BACKEND: ${CELERY_RESULT_BACKEND:?Set CELERY_RESULT_BACKEND to your Coolify Redis URL}
       TZ: ${TZ:-Africa/Lagos}
     env_file:
       - .env
     depends_on:
       db:
-        condition: service_healthy
-      redis:
         condition: service_healthy
     volumes:
       - ./media:/home/appuser/media
@@ -183,7 +163,7 @@ services:
     environment:
       DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY:-change-me-in-production}
       DJANGO_DEBUG: ${DJANGO_DEBUG:-False}
-      DJANGO_ALLOWED_HOSTS: ${DJANGO_ALLOWED_HOSTS:-localhost,127.0.0.1}
+      DJANGO_ALLOWED_HOSTS: ${DJANGO_ALLOWED_HOSTS:-backend.betpreneur.ng,localhost,127.0.0.1}
       DJANGO_SETTINGS_MODULE: config.settings
       CSRF_TRUSTED_ORIGINS: ${CSRF_TRUSTED_ORIGINS:-}
       DB_ENGINE: django.db.backends.postgresql
@@ -193,8 +173,8 @@ services:
       DB_PORT: 5432
       APS_KEY: ${APS_KEY:-}
       APS_MAX_FIXTURES: ${APS_MAX_FIXTURES:-90}
-      CELERY_BROKER_URL: ${CELERY_BROKER_URL:-redis://default:L0M9a9g1qEmdtU4u0bHa89m39HHMdnEZ7cTqFZIPqvzTRivuT479VmdPP1KudD13@173.212.202.189:9909/0}
-      CELERY_RESULT_BACKEND: ${CELERY_RESULT_BACKEND:-redis://default:L0M9a9g1qEmdtU4u0bHa89m39HHMdnEZ7cTqFZIPqvzTRivuT479VmdPP1KudD13@173.212.202.189:9909/0}
+      CELERY_BROKER_URL: ${CELERY_BROKER_URL:?Set CELERY_BROKER_URL to your Coolify Redis URL}
+      CELERY_RESULT_BACKEND: ${CELERY_RESULT_BACKEND:?Set CELERY_RESULT_BACKEND to your Coolify Redis URL}
       ALGO_GENERATE_HOUR: ${ALGO_GENERATE_HOUR:-0}
       ALGO_GENERATE_MINUTE: ${ALGO_GENERATE_MINUTE:-5}
       ALGO_SETTLE_HOUR: ${ALGO_SETTLE_HOUR:-6}
@@ -207,8 +187,6 @@ services:
       - .env
     depends_on:
       db:
-        condition: service_healthy
-      redis:
         condition: service_healthy
     networks:
       - betpreneur_network
@@ -266,8 +244,6 @@ networks:
 volumes:
   postgres_data:
     name: betnehmer_postgres_data
-  redis_data:
-    name: betpreneur_redis_data
   media:
     name: betpreneur_media
 

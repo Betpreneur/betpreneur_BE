@@ -28,6 +28,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     fonts-dejavu-core \
     # Gunicorn
     gunicorn \
+    # Docker healthcheck
+    curl \
     # Clean up
     && rm -rf /var/lib/apt/lists/*
 
