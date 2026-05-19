@@ -35,6 +35,9 @@ from .tasks import generate_daily_picks, run_monthly_auditor, settle_daily_resul
 
 
 def _performance_summary(queryset, window_days):
+    if not hasattr(queryset, "aggregate"):
+        return _performance_summary_from_picks(queryset, window_days)
+
     aggregate = queryset.aggregate(
         wins=Count("id", filter=Q(status=Pick.Status.WIN)),
         losses=Count("id", filter=Q(status=Pick.Status.LOSS)),
@@ -57,6 +60,63 @@ def _performance_summary(queryset, window_days):
         "voids": aggregate["voids"] or 0,
         "pending": aggregate["pending"] or 0,
         "window_days": window_days,
+    }
+
+
+def _performance_summary_from_picks(picks, window_days):
+    wins = sum(1 for pick in picks if pick.status == Pick.Status.WIN)
+    losses = sum(1 for pick in picks if pick.status == Pick.Status.LOSS)
+    voids = sum(1 for pick in picks if pick.status == Pick.Status.VOID)
+    pending = sum(1 for pick in picks if pick.status == Pick.Status.PENDING)
+    settled = wins + losses
+    stake = sum(float(pick.stake or 0) for pick in picks if pick.status in [Pick.Status.WIN, Pick.Status.LOSS])
+    pnl = sum(float(pick.pnl or 0) for pick in picks if pick.status in [Pick.Status.WIN, Pick.Status.LOSS])
+    return {
+        "hit_rate": round((wins / settled) * 100, 1) if settled else 0.0,
+        "roi_flat": round((pnl / stake) * 100, 1) if stake else 0.0,
+        "picks_logged": len(picks),
+        "wins": wins,
+        "losses": losses,
+        "voids": voids,
+        "pending": pending,
+        "window_days": window_days,
+    }
+
+
+def _dedupe_latest_public_picks(picks):
+    latest = {}
+    for pick in picks:
+        key = (
+            pick.match_date or pick.run.target_date,
+            str(pick.match_id or "").strip(),
+            pick.fixture,
+            pick.market,
+        )
+        if key not in latest:
+            latest[key] = pick
+    return list(latest.values())
+
+
+def _public_record_pick_payload(pick):
+    return {
+        "id": pick.id,
+        "posted_at": pick.created_at,
+        "match_date": pick.match_date or pick.run.target_date,
+        "fixture": pick.fixture,
+        "home_team": pick.home_team,
+        "away_team": pick.away_team,
+        "league": pick.league,
+        "kickoff": pick.kickoff,
+        "tier": pick.tier,
+        "market": pick.market,
+        "pick": pick.meaning or pick.market,
+        "confidence": pick.confidence,
+        "odds": pick.odds,
+        "stake": pick.stake,
+        "status": pick.status,
+        "score": pick.score,
+        "pnl": pick.pnl,
+        "settled_at": pick.settled_at,
     }
 
 
@@ -300,8 +360,16 @@ class PublicSummaryView(APIView):
     def get(self, request):
         window_days = 90
         since = timezone.localdate() - timedelta(days=window_days)
-        queryset = Pick.objects.filter(match_date__gte=since)
-        return Response(_performance_summary(queryset, window_days))
+        picks = Pick.objects.filter(
+            Q(match_date__gte=since)
+            | Q(match_date__isnull=True, run__target_date__gte=since)
+        ).select_related("run").order_by(
+            "-match_date",
+            "-run__target_date",
+            "-created_at",
+            "-id",
+        )
+        return Response(_performance_summary(_dedupe_latest_public_picks(picks), window_days))
 
 
 class DailyPicksView(APIView):
@@ -422,7 +490,7 @@ class PublicRecordView(APIView):
 
     @extend_schema(
         summary="Public audited pick record",
-        description="Returns settled and pending picks for the requested audit window.",
+        description="Returns a deduplicated public audit table for the requested window. Each record is the latest posted copy for a date, fixture and market.",
         tags=["Public Record"],
         parameters=[RecordQuerySerializer],
         responses={200: RecordResponseSerializer},
@@ -432,14 +500,20 @@ class PublicRecordView(APIView):
         query.is_valid(raise_exception=True)
         window_days = query.validated_data["days"]
         since = timezone.localdate() - timedelta(days=window_days)
-        picks = Pick.objects.filter(
+        picks_queryset = Pick.objects.filter(
             Q(match_date__gte=since)
             | Q(match_date__isnull=True, run__target_date__gte=since)
-        ).order_by("-match_date", "-run__target_date", "-confidence")
+        ).select_related("run").order_by(
+            "-match_date",
+            "-run__target_date",
+            "-created_at",
+            "-id",
+        )
+        picks = _dedupe_latest_public_picks(picks_queryset)
         return Response(
             {
                 "summary": _performance_summary(picks, window_days),
-                "picks": PickSerializer(picks, many=True).data,
+                "records": [_public_record_pick_payload(pick) for pick in picks],
             }
         )
 

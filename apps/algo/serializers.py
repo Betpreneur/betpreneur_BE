@@ -175,9 +175,30 @@ class TopPickResponseSerializer(serializers.Serializer):
     pick = PickSerializer(allow_null=True)
 
 
+class PublicRecordPickSerializer(serializers.Serializer):
+    id = serializers.IntegerField()
+    posted_at = serializers.DateTimeField()
+    match_date = serializers.DateField()
+    fixture = serializers.CharField()
+    home_team = serializers.CharField(allow_blank=True)
+    away_team = serializers.CharField(allow_blank=True)
+    league = serializers.CharField(allow_blank=True)
+    kickoff = serializers.CharField(allow_blank=True)
+    tier = serializers.CharField()
+    market = serializers.CharField()
+    pick = serializers.CharField()
+    confidence = serializers.IntegerField()
+    odds = serializers.DecimalField(max_digits=8, decimal_places=2)
+    stake = serializers.DecimalField(max_digits=12, decimal_places=2, allow_null=True)
+    status = serializers.CharField()
+    score = serializers.CharField(allow_blank=True)
+    pnl = serializers.DecimalField(max_digits=12, decimal_places=2, allow_null=True)
+    settled_at = serializers.DateTimeField(allow_null=True)
+
+
 class RecordResponseSerializer(serializers.Serializer):
     summary = PublicSummarySerializer()
-    picks = PickSerializer(many=True)
+    records = PublicRecordPickSerializer(many=True)
 
 
 class PickBackSerializer(serializers.ModelSerializer):
