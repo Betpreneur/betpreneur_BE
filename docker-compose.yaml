@@ -53,8 +53,8 @@ services:
       DB_ENGINE: django.db.backends.postgresql
       DB_NAME: ${DB_NAME:-postgres}
       DB_USER: ${DB_USER:-postgres}
-      DB_HOST: db
-      DB_PORT: 5432
+      DB_HOST: ${DB_HOST:-db}
+      DB_PORT: ${DB_PORT:-5432}
       # DB_PASSWORD set via.docker/env below
 
       # External APIs (set in .env)
@@ -126,8 +126,8 @@ services:
       DB_ENGINE: django.db.backends.postgresql
       DB_NAME: ${DB_NAME:-postgres}
       DB_USER: ${DB_USER:-postgres}
-      DB_HOST: db
-      DB_PORT: 5432
+      DB_HOST: ${DB_HOST:-db}
+      DB_PORT: ${DB_PORT:-5432}
       APS_KEY: ${APS_KEY:-}
       APS_MAX_FIXTURES: ${APS_MAX_FIXTURES:-90}
       KEY_FILE: ${KEY_FILE:-}
@@ -169,8 +169,8 @@ services:
       DB_ENGINE: django.db.backends.postgresql
       DB_NAME: ${DB_NAME:-postgres}
       DB_USER: ${DB_USER:-postgres}
-      DB_HOST: db
-      DB_PORT: 5432
+      DB_HOST: ${DB_HOST:-db}
+      DB_PORT: ${DB_PORT:-5432}
       APS_KEY: ${APS_KEY:-}
       APS_MAX_FIXTURES: ${APS_MAX_FIXTURES:-90}
       CELERY_BROKER_URL: ${CELERY_BROKER_URL:?Set CELERY_BROKER_URL to your Coolify Redis URL}
