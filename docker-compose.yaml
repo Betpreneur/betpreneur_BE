@@ -97,8 +97,8 @@ services:
       TZ: ${TZ:-Africa/Lagos}
 
       # Celery
-      CELERY_BROKER_URL: ${CELERY_BROKER_URL:-redis://redis:6379/0}
-      CELERY_RESULT_BACKEND: ${CELERY_RESULT_BACKEND:-redis://redis:6379/0}
+      CELERY_BROKER_URL: ${CELERY_BROKER_URL:-redis://default:L0M9a9g1qEmdtU4u0bHa89m39HHMdnEZ7cTqFZIPqvzTRivuT479VmdPP1KudD13@yw0ckows0k84ocscw88gscws:6379/0}
+      CELERY_RESULT_BACKEND: ${CELERY_RESULT_BACKEND:-redis://default:L0M9a9g1qEmdtU4u0bHa89m39HHMdnEZ7cTqFZIPqvzTRivuT479VmdPP1KudD13@yw0ckows0k84ocscw88gscws:6379/0}
       ALGO_GENERATE_HOUR: ${ALGO_GENERATE_HOUR:-0}
       ALGO_GENERATE_MINUTE: ${ALGO_GENERATE_MINUTE:-5}
       ALGO_SETTLE_HOUR: ${ALGO_SETTLE_HOUR:-6}
@@ -114,7 +114,6 @@ services:
       redis:
         condition: service_healthy
     volumes:
-      - ./staticfiles:/home/appuser/staticfiles
       - ./media:/home/appuser/media
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/api/health/"]
@@ -155,8 +154,8 @@ services:
       EMAIL_RECIPIENT: ${EMAIL_RECIPIENT:-}
       GEMINI_API_KEY: ${GEMINI_API_KEY:-}
       GEMINI_MODEL: ${GEMINI_MODEL:-gemini-2.5-flash}
-      CELERY_BROKER_URL: ${CELERY_BROKER_URL:-redis://redis:6379/0}
-      CELERY_RESULT_BACKEND: ${CELERY_RESULT_BACKEND:-redis://redis:6379/0}
+      CELERY_BROKER_URL: ${CELERY_BROKER_URL:-redis://default:L0M9a9g1qEmdtU4u0bHa89m39HHMdnEZ7cTqFZIPqvzTRivuT479VmdPP1KudD13@yw0ckows0k84ocscw88gscws:6379/0}
+      CELERY_RESULT_BACKEND: ${CELERY_RESULT_BACKEND:-redis://default:L0M9a9g1qEmdtU4u0bHa89m39HHMdnEZ7cTqFZIPqvzTRivuT479VmdPP1KudD13@yw0ckows0k84ocscw88gscws:6379/0}
       TZ: ${TZ:-Africa/Lagos}
     env_file:
       - .env
@@ -166,7 +165,6 @@ services:
       redis:
         condition: service_healthy
     volumes:
-      - ./staticfiles:/home/appuser/staticfiles
       - ./media:/home/appuser/media
     networks:
       - betpreneur_network
@@ -195,8 +193,8 @@ services:
       DB_PORT: 5432
       APS_KEY: ${APS_KEY:-}
       APS_MAX_FIXTURES: ${APS_MAX_FIXTURES:-90}
-      CELERY_BROKER_URL: ${CELERY_BROKER_URL:-redis://redis:6379/0}
-      CELERY_RESULT_BACKEND: ${CELERY_RESULT_BACKEND:-redis://redis:6379/0}
+      CELERY_BROKER_URL: ${CELERY_BROKER_URL:-redis://default:L0M9a9g1qEmdtU4u0bHa89m39HHMdnEZ7cTqFZIPqvzTRivuT479VmdPP1KudD13@yw0ckows0k84ocscw88gscws:6379/0}
+      CELERY_RESULT_BACKEND: ${CELERY_RESULT_BACKEND:-redis://default:L0M9a9g1qEmdtU4u0bHa89m39HHMdnEZ7cTqFZIPqvzTRivuT479VmdPP1KudD13@yw0ckows0k84ocscw88gscws:6379/0}
       ALGO_GENERATE_HOUR: ${ALGO_GENERATE_HOUR:-0}
       ALGO_GENERATE_MINUTE: ${ALGO_GENERATE_MINUTE:-5}
       ALGO_SETTLE_HOUR: ${ALGO_SETTLE_HOUR:-6}
@@ -270,8 +268,6 @@ volumes:
     name: betnehmer_postgres_data
   redis_data:
     name: betpreneur_redis_data
-  staticfiles:
-    name: betpreneur_staticfiles
   media:
     name: betpreneur_media
 

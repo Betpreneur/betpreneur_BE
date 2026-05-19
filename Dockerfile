@@ -68,7 +68,7 @@ WORKDIR /home/appuser
 COPY --chown=appuser:appuser . .
 
 # Create cache directory for pip
-RUN mkdir -p /home/appuser/.cache/pip
+RUN mkdir -p /home/appuser/.cache/pip /home/appuser/staticfiles /home/appuser/media
 
 
 # ------------------------------
