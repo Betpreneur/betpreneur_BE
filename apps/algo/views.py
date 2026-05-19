@@ -103,6 +103,7 @@ def _daily_picks_payload(target_date, request=None):
     }
     fixtures = {}
     for item in fixture_summaries.values():
+        markets = item.get("markets") or []
         fixtures[item.get("match_id")] = {
             "fixture": item.get("fixture", ""),
             "home_team": item.get("home_team", ""),
@@ -113,6 +114,7 @@ def _daily_picks_payload(target_date, request=None):
             "market_count": item.get("market_count", 0),
             "markets_70_plus": item.get("markets_70_plus", 0),
             "markets_65_plus": item.get("markets_65_plus", 0),
+            "markets": markets,
             "picks": [],
         }
 
@@ -129,12 +131,24 @@ def _daily_picks_payload(target_date, request=None):
                 "market_count": 0,
                 "markets_70_plus": 0,
                 "markets_65_plus": 0,
+                "markets": [],
                 "picks": [],
             }
         data = PickSerializer(pick).data
         data["backed_by_me"] = pick.id in backed_ids
         data["backed_count"] = pick.backs.count()
         fixtures[key]["picks"].append(data)
+        for market in fixtures[key]["markets"]:
+            if market.get("market") == pick.market:
+                market["selected"] = True
+                market["selected_pick_id"] = pick.id
+                market["selected_tier"] = pick.tier
+
+    for fixture in fixtures.values():
+        for market in fixture["markets"]:
+            market.setdefault("selected", False)
+            market.setdefault("selected_pick_id", None)
+            market.setdefault("selected_tier", "")
 
     return {
         "date": target_date,

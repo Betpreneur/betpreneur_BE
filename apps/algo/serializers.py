@@ -133,6 +133,19 @@ class DailyPicksSummarySerializer(serializers.Serializer):
     markets_65_plus = serializers.IntegerField()
 
 
+class FixtureMarketSerializer(serializers.Serializer):
+    market = serializers.CharField()
+    meaning = serializers.CharField(allow_blank=True)
+    confidence = serializers.IntegerField()
+    odds = serializers.FloatField()
+    ev = serializers.FloatField()
+    proven = serializers.BooleanField()
+    eligible = serializers.BooleanField()
+    selected = serializers.BooleanField(required=False)
+    selected_pick_id = serializers.IntegerField(required=False, allow_null=True)
+    selected_tier = serializers.CharField(required=False, allow_blank=True)
+
+
 class FixturePickGroupSerializer(serializers.Serializer):
     fixture = serializers.CharField()
     home_team = serializers.CharField(allow_blank=True)
@@ -143,6 +156,7 @@ class FixturePickGroupSerializer(serializers.Serializer):
     market_count = serializers.IntegerField()
     markets_70_plus = serializers.IntegerField()
     markets_65_plus = serializers.IntegerField()
+    markets = FixtureMarketSerializer(many=True)
     picks = PickSerializer(many=True)
 
 

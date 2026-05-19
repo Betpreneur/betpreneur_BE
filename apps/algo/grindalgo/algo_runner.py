@@ -670,9 +670,28 @@ def serialize_selected_picks(bankers, value_gems, wild_cards, target_date, bankr
             })
     return picks
 
-def serialize_fixture_summaries(scored_fxs, all_confs):
+def serialize_fixture_markets(confs, real_odds=None):
+    markets = []
+    real_odds = real_odds or {}
+    for market, confidence in sorted(confs.items(), key=lambda item: item[1], reverse=True):
+        key = ODDS_KEYS_MAP.get(market)
+        odds = (real_odds.get(key) if key else None) or est_odds(confidence)
+        ev = round((confidence / 100) * odds - 1, 3)
+        markets.append({
+            "market": market,
+            "meaning": MARKET_MEANINGS.get(market, ""),
+            "confidence": confidence,
+            "odds": odds,
+            "ev": ev,
+            "proven": market in PROVEN_MARKETS,
+            "eligible": confidence >= WILD_MIN and odds >= MIN_ODDS,
+        })
+    return markets
+
+def serialize_fixture_summaries(scored_fxs, all_confs, odds_list=None):
     summaries = []
-    for fx, confs in zip(scored_fxs, all_confs):
+    odds_list = odds_list or [{} for _ in scored_fxs]
+    for fx, confs, real_odds in zip(scored_fxs, all_confs, odds_list):
         summaries.append({
             "fixture": fx.get("fixture", ""),
             "home_team": fx.get("hname", ""),
@@ -683,6 +702,7 @@ def serialize_fixture_summaries(scored_fxs, all_confs):
             "market_count": len(confs),
             "markets_70_plus": sum(1 for value in confs.values() if value >= 70),
             "markets_65_plus": sum(1 for value in confs.values() if value >= 65),
+            "markets": serialize_fixture_markets(confs, real_odds),
         })
     return summaries
 
@@ -1411,7 +1431,7 @@ def run_daily_algo():
               "market_count":sum(len(confs) for confs in all_confs),
               "markets_70_plus":sum(1 for confs in all_confs for value in confs.values() if value >= 70),
               "markets_65_plus":sum(1 for confs in all_confs for value in confs.values() if value >= 65),
-              "fixture_summaries":serialize_fixture_summaries(scored_fxs, all_confs),
+              "fixture_summaries":serialize_fixture_summaries(scored_fxs, all_confs, odds_list),
               "bankers":len(bankers or []),"value_gems":len(value_gems or []),
               "wild_cards":len(wild_cards or []),"bankroll":bankroll,
               "selected_picks": serialize_selected_picks(
