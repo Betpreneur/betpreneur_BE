@@ -5,6 +5,7 @@ from decimal import Decimal
 
 import requests
 from django.conf import settings
+from django.db.models import Q
 from django.utils import timezone
 
 from .models import AlgoRun, Pick
@@ -198,7 +199,11 @@ class AlgoRunnerService:
             if ((fixture.get("fixture") or {}).get("status") or {}).get("short") in {"FT", "AET", "PEN"}
         }
 
-        picks = Pick.objects.filter(match_date=target_date, status=Pick.Status.PENDING)
+        picks = Pick.objects.filter(
+            Q(match_date=target_date)
+            | Q(match_date__isnull=True, run__target_date=target_date),
+            status=Pick.Status.PENDING,
+        )
         updated = 0
         total_pnl = 0
         settled = []

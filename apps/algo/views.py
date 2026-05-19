@@ -418,7 +418,10 @@ class PublicRecordView(APIView):
         query.is_valid(raise_exception=True)
         window_days = query.validated_data["days"]
         since = timezone.localdate() - timedelta(days=window_days)
-        picks = Pick.objects.filter(match_date__gte=since).order_by("-match_date", "-confidence")
+        picks = Pick.objects.filter(
+            Q(match_date__gte=since)
+            | Q(match_date__isnull=True, run__target_date__gte=since)
+        ).order_by("-match_date", "-run__target_date", "-confidence")
         return Response(
             {
                 "summary": _performance_summary(picks, window_days),
