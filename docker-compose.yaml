@@ -55,8 +55,8 @@ services:
       target: production
     container_name: betpreneur_backend
     restart: unless-stopped
-    ports:
-      - "${APP_PORT:-8000}:8000"
+    expose:
+      - "8000"
     environment:
       # Django
       DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY:-change-me-in-production}
