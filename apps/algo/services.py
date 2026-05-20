@@ -1,4 +1,6 @@
 import os
+import json
+from collections import defaultdict
 from contextlib import contextmanager
 from datetime import timedelta
 from decimal import Decimal
@@ -81,6 +83,7 @@ class AlgoRunnerService:
                     model_verdict=item.get("model_verdict", ""),
                     home_recent_form=item.get("home_recent_form", {}),
                     away_recent_form=item.get("away_recent_form", {}),
+                    risk_flags=item.get("risk_flags", []),
                     confidence=item.get("confidence") or 0,
                     odds=item.get("odds") or 0,
                     ev=item.get("ev") or 0,
@@ -112,6 +115,57 @@ class AlgoRunnerService:
         if settled_picks:
             result["database_updated_count"] = updated
 
+    def _performance_profile(self):
+        picks = (
+            Pick.objects.filter(status__in=[Pick.Status.WIN, Pick.Status.LOSS])
+            .select_related("run")
+            .order_by("-match_date", "-run__target_date", "-created_at", "-id")
+        )
+        latest = {}
+        for pick in picks:
+            key = (
+                pick.match_date or pick.run.target_date,
+                str(pick.match_id or "").strip(),
+                pick.fixture,
+                pick.market,
+            )
+            if key not in latest:
+                latest[key] = pick
+
+        market_stats = defaultdict(lambda: {"count": 0, "wins": 0, "losses": 0, "stake": 0.0, "pnl": 0.0})
+        league_market_stats = defaultdict(lambda: {"count": 0, "wins": 0, "losses": 0, "stake": 0.0, "pnl": 0.0})
+
+        for pick in latest.values():
+            keys = [pick.market, f"{pick.league}::{pick.market}"]
+            stat_groups = [market_stats[keys[0]], league_market_stats[keys[1]]]
+            for stats in stat_groups:
+                stats["count"] += 1
+                if pick.status == Pick.Status.WIN:
+                    stats["wins"] += 1
+                else:
+                    stats["losses"] += 1
+                stats["stake"] += float(pick.stake or 0)
+                stats["pnl"] += float(pick.pnl or 0)
+
+        def finalize(group):
+            payload = {}
+            for key, stats in group.items():
+                settled = stats["wins"] + stats["losses"]
+                stake = stats["stake"]
+                payload[key] = {
+                    "count": stats["count"],
+                    "wins": stats["wins"],
+                    "losses": stats["losses"],
+                    "hit_rate": round((stats["wins"] / settled) * 100, 1) if settled else 0.0,
+                    "roi_flat": round((stats["pnl"] / stake) * 100, 1) if stake else 0.0,
+                }
+            return payload
+
+        return {
+            "markets": finalize(market_stats),
+            "league_markets": finalize(league_market_stats),
+        }
+
     def _api_football_headers(self):
         api_key = self._runner_env().get("APS_KEY")
         if not api_key:
@@ -136,8 +190,40 @@ class AlgoRunnerService:
                 return (event.get("team") or {}).get("name")
         return None
 
+    def _fixture_corner_total(self, fixture_id):
+        if not hasattr(self, "_corner_total_cache"):
+            self._corner_total_cache = {}
+        if fixture_id in self._corner_total_cache:
+            return self._corner_total_cache[fixture_id]
+        stats = self._api_football_get("/fixtures/statistics", {"fixture": fixture_id})
+        total = 0
+        found = False
+        for team_stats in stats:
+            for item in team_stats.get("statistics", []) or []:
+                if str(item.get("type", "")).lower() == "corner kicks":
+                    try:
+                        total += int(item.get("value") or 0)
+                        found = True
+                    except (TypeError, ValueError):
+                        continue
+        value = total if found else None
+        self._corner_total_cache[fixture_id] = value
+        return value
+
     def _check_market(self, pick, home_goals, away_goals, home_team=None, away_team=None, first_scorer=None):
         market = pick.market
+        if market.startswith("Corners Over ") or market.startswith("Corners Under "):
+            corner_total = self._fixture_corner_total(pick.match_id)
+            if corner_total is None:
+                return None
+            try:
+                line = float(market.rsplit(" ", 1)[-1])
+            except (TypeError, ValueError):
+                return None
+            if market.startswith("Corners Over "):
+                return corner_total > line
+            return corner_total < line
+
         if market == "DNB Home":
             if home_goals == away_goals:
                 return None
@@ -239,7 +325,11 @@ class AlgoRunnerService:
                 pick.pnl = -stake
 
             pick.score = f"{home_goals}-{away_goals}"
-            pick.result = pick.score
+            if pick.market.startswith("Corners "):
+                corner_total = self._fixture_corner_total(pick.match_id)
+                pick.result = f"{corner_total} corners" if corner_total is not None else pick.score
+            else:
+                pick.result = pick.score
             pick.settled_at = timezone.now()
             pick.save(update_fields=["status", "pnl", "score", "result", "settled_at"])
 
@@ -268,7 +358,10 @@ class AlgoRunnerService:
         algo_run.started_at = timezone.now()
         algo_run.save(update_fields=["status", "started_at", "updated_at"])
 
-        env = self._runner_env({"OVERRIDE_DATE": algo_run.target_date.isoformat()})
+        env = self._runner_env({
+            "OVERRIDE_DATE": algo_run.target_date.isoformat(),
+            "ALGO_PERFORMANCE_PROFILE": json.dumps(self._performance_profile()),
+        })
         try:
             with temporary_env(env):
                 from .grindalgo.algo_runner import run_daily_algo

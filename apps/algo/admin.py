@@ -1,8 +1,11 @@
 from django.contrib import admin
 from django.contrib import messages
+from django.template.response import TemplateResponse
+from django.urls import path
 from django.utils import timezone
 
 from .models import AlgoRun, Pick, PickBack
+from .performance import performance_dashboard
 from .tasks import generate_daily_picks, run_monthly_auditor, settle_daily_results
 
 
@@ -79,6 +82,7 @@ def queue_auditor(modeladmin, request, queryset):
 
 @admin.register(AlgoRun)
 class AlgoRunAdmin(admin.ModelAdmin):
+    change_list_template = "admin/algo/algorun/change_list.html"
     date_hierarchy = "target_date"
     list_display = (
         "id",
@@ -127,6 +131,32 @@ class AlgoRunAdmin(admin.ModelAdmin):
         ("Timestamps", {"fields": ("created_at", "updated_at"), "classes": ("collapse",)}),
     )
     inlines = [PickInline]
+
+    def get_urls(self):
+        urls = super().get_urls()
+        custom_urls = [
+            path(
+                "performance/",
+                self.admin_site.admin_view(self.performance_view),
+                name="algo_algorun_performance",
+            ),
+        ]
+        return custom_urls + urls
+
+    def performance_view(self, request):
+        try:
+            days = int(request.GET.get("days", 90))
+        except (TypeError, ValueError):
+            days = 90
+        days = max(1, min(days, 365))
+        context = {
+            **self.admin_site.each_context(request),
+            "title": "Algo Performance",
+            "dashboard": performance_dashboard(days=days),
+            "days": days,
+            "opts": self.model._meta,
+        }
+        return TemplateResponse(request, "admin/algo/algorun/performance.html", context)
 
 
 @admin.register(Pick)

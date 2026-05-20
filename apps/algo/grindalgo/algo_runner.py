@@ -11,6 +11,7 @@
 
 import os
 import time
+import json
 import logging
 import requests
 import unicodedata
@@ -43,6 +44,27 @@ DRIVE_FOLDER    = os.environ.get("DRIVE_FOLDER",    "GrindAlgo Reports")
 EMAIL_RECIPIENT = os.environ.get("EMAIL_RECIPIENT",  "")
 
 FLAT_STAKE_PCT = 0.10  # Allocates exactly 10% of bankroll to ALL picks
+
+
+def _env_bool(name, default=False):
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _env_float(name, default):
+    try:
+        return float(os.environ.get(name, default))
+    except (TypeError, ValueError):
+        return default
+
+
+def _env_int(name, default):
+    try:
+        return int(os.environ.get(name, default))
+    except (TypeError, ValueError):
+        return default
 
 # ── API-FOOTBALL TRACKED LEAGUES ─────────────────────────────────
 APS_TRACKED_LEAGUES = {
@@ -81,6 +103,15 @@ MARKET_MEANINGS = {
     "AH Home +0.5":"Home win or draw (+0.5)","AH Away +0.5":"Away win or draw (+0.5)",
     "First to Score H":"Home team scores first","First to Score A":"Away team scores first",
 }
+
+def market_meaning(market):
+    if market.startswith("Corners Over "):
+        line = market.rsplit(" ", 1)[-1]
+        return f"Match to finish with more than {line} total corners"
+    if market.startswith("Corners Under "):
+        line = market.rsplit(" ", 1)[-1]
+        return f"Match to finish with fewer than {line} total corners"
+    return MARKET_MEANINGS.get(market, "")
 
 # ── HELPERS ───────────────────────────────────────────────────────
 def _to_wat(utc_str):
@@ -251,6 +282,98 @@ def parse_aps_h2h(h2h_list, hname):
     if not games: return {"games":5,"t1w":2,"o25":3,"btts":2}
     return {"games":games,"t1w":t1w,"o25":o25,"btts":btts}
 
+def _stat_value(statistics, stat_type):
+    stat_type = normalize(stat_type)
+    for item in statistics or []:
+        if normalize(item.get("type", "")) == stat_type:
+            value = item.get("value")
+            try:
+                return float(value or 0)
+            except (TypeError, ValueError):
+                return 0.0
+    return 0.0
+
+_corner_profile_cache = {}
+_fixture_stats_cache = {}
+
+def fetch_fixture_statistics(fixture_id):
+    if fixture_id in _fixture_stats_cache:
+        return _fixture_stats_cache[fixture_id]
+    try:
+        stats = aps_get("/fixtures/statistics", {"fixture": fixture_id}, timeout=15)
+        time.sleep(0.15)
+    except Exception as exc:
+        log.warning("Fixture statistics %s: %s", fixture_id, exc)
+        stats = []
+    _fixture_stats_cache[fixture_id] = stats
+    return stats
+
+def _team_corners_from_stats(stats, team_id):
+    for row in stats or []:
+        if ((row.get("team") or {}).get("id")) == team_id:
+            return _stat_value(row.get("statistics", []), "Corner Kicks")
+    return None
+
+def fetch_team_corner_profile(team_id, lookback=8):
+    if team_id in _corner_profile_cache:
+        return _corner_profile_cache[team_id]
+
+    samples = []
+    try:
+        fixtures = aps_get("/fixtures", {"team": team_id, "last": lookback}, timeout=15)
+        time.sleep(0.15)
+    except Exception as exc:
+        log.warning("Team corner fixtures %s: %s", team_id, exc)
+        fixtures = []
+
+    for fixture in fixtures:
+        status = ((fixture.get("fixture") or {}).get("status") or {}).get("short")
+        if status not in {"FT", "AET", "PEN"}:
+            continue
+        fixture_id = (fixture.get("fixture") or {}).get("id")
+        if not fixture_id:
+            continue
+        stats = fetch_fixture_statistics(fixture_id)
+        own = _team_corners_from_stats(stats, team_id)
+        if own is None:
+            continue
+        total = 0.0
+        for row in stats or []:
+            total += _stat_value(row.get("statistics", []), "Corner Kicks")
+        if total <= 0:
+            continue
+        samples.append({"own": own, "against": max(total - own, 0), "total": total})
+
+    if samples:
+        profile = {
+            "games": len(samples),
+            "avg_for": round(sum(item["own"] for item in samples) / len(samples), 2),
+            "avg_against": round(sum(item["against"] for item in samples) / len(samples), 2),
+            "avg_total": round(sum(item["total"] for item in samples) / len(samples), 2),
+        }
+    else:
+        profile = {"games": 0, "avg_for": 4.5, "avg_against": 4.5, "avg_total": 9.0}
+
+    _corner_profile_cache[team_id] = profile
+    return profile
+
+def build_corner_profile(fx):
+    home = fetch_team_corner_profile(fx.get("hid"))
+    away = fetch_team_corner_profile(fx.get("aid"))
+    games = min(home.get("games", 0), away.get("games", 0))
+    expected_total = (
+        home.get("avg_for", 4.5)
+        + away.get("avg_for", 4.5)
+        + home.get("avg_against", 4.5)
+        + away.get("avg_against", 4.5)
+    ) / 2
+    return {
+        "games": games,
+        "home": home,
+        "away": away,
+        "expected_total": round(expected_total, 2),
+    }
+
 # ── 19-PARAMETER CONFIDENCE SCORER ───────────────────────────────
 CONF_DEFLATOR = 0.84
 W = {"f1":8,"f2":10,"f3":12,"f4":8,"f5":6,"f6":8,"f7":12,"f8":5,"f9":8,
@@ -258,7 +381,36 @@ W = {"f1":8,"f2":10,"f3":12,"f4":8,"f5":6,"f6":8,"f7":12,"f8":5,"f9":8,
      "f18":8,"f19":7}
 MAX_W = sum(W.values())
 
-def score_fixture(hf, af, h2h, real_odds, api_preds=None):
+def score_corner_markets(real_odds, corner_profile=None):
+    corner_profile = corner_profile or {}
+    expected_total = float(corner_profile.get("expected_total") or 9.0)
+    games = int(corner_profile.get("games") or 0)
+    scores = {}
+
+    for market in real_odds:
+        if not market.startswith("Corners Over ") and not market.startswith("Corners Under "):
+            continue
+        try:
+            line = float(market.rsplit(" ", 1)[-1])
+        except (TypeError, ValueError):
+            continue
+
+        diff = expected_total - line
+        if market.startswith("Corners Over "):
+            confidence = 50 + (diff * 8)
+        else:
+            confidence = 50 + (-diff * 8)
+
+        if games < 4:
+            confidence = confidence * 0.82 + 50 * 0.18
+        elif games < 7:
+            confidence = confidence * 0.9 + 50 * 0.1
+
+        scores[market] = round(max(25, min(82, confidence)))
+
+    return scores
+
+def score_fixture(hf, af, h2h, real_odds, api_preds=None, corner_profile=None):
     def sf(v,strong,mod,w):
         return w if v>=strong else round(w*0.67) if v>=mod else round(w*0.33)
 
@@ -391,7 +543,7 @@ def score_fixture(hf, af, h2h, real_odds, api_preds=None):
     fts_h = min(83,round(hf["avg_scored"]/ta*100*1.12+6))
     fts_a = min(50,max(10,round(af["avg_scored"]/ta*100*0.70-8)))
 
-    return {
+    scores = {
         "Home Win":hc,"Away Win":ac,"Draw":max(5,100-hc-ac),
         "Over 1.5":o15,"Under 1.5":100-o15,
         "Over 2.5":o25,"Under 2.5":100-o25,
@@ -405,6 +557,8 @@ def score_fixture(hf, af, h2h, real_odds, api_preds=None):
         "AH Away +0.5":min(95,ac+max(5,100-hc-ac)),
         "First to Score H":fts_h,"First to Score A":fts_a,
     }
+    scores.update(score_corner_markets(real_odds, corner_profile))
+    return scores
 
 # ── API-FOOTBALL ODDS FETCH ───────────────────────────────────────
 _odds_cache = {}
@@ -421,6 +575,14 @@ def _remember_odd(odds, key, value):
         return
     if key not in odds or odd > odds[key]:
         odds[key] = odd
+
+def _parse_line(label, prefix):
+    if not label.startswith(prefix):
+        return None
+    try:
+        return float(label.replace(prefix, "", 1).strip())
+    except (TypeError, ValueError):
+        return None
 
 def get_api_football_odds(fixture_id):
     if fixture_id in _odds_cache:
@@ -442,7 +604,14 @@ def get_api_football_odds(fixture_id):
                     label = normalize(value.get("value", ""))
                     odd = value.get("odd")
 
-                    if bet_name in ("match winner", "fulltime result", "1x2"):
+                    if "corner" in bet_name and ("over under" in bet_name or "over/under" in bet_name):
+                        over_line = _parse_line(label, "over ")
+                        under_line = _parse_line(label, "under ")
+                        if over_line is not None:
+                            _remember_odd(odds, f"Corners Over {over_line:g}", odd)
+                        elif under_line is not None:
+                            _remember_odd(odds, f"Corners Under {under_line:g}", odd)
+                    elif bet_name in ("match winner", "fulltime result", "1x2"):
                         if label in ("home", "1"):
                             _remember_odd(odds, "hw", odd)
                         elif label in ("away", "2"):
@@ -501,6 +670,109 @@ ODDS_KEYS_MAP = {
 
 def est_odds(c): return round(1/max(c/100,0.05)*1.05,2)
 
+def algo_min_ev():
+    return _env_float("ALGO_MIN_EV", 0.02)
+
+def algo_min_market_sample():
+    return _env_int("ALGO_MIN_MARKET_SAMPLE", 15)
+
+def algo_max_daily_picks():
+    return _env_int("ALGO_MAX_DAILY_PICKS", TARGET_MAX)
+
+def require_real_odds():
+    return _env_bool("ALGO_REQUIRE_REAL_ODDS", False)
+
+def load_performance_profile():
+    raw = os.environ.get("ALGO_PERFORMANCE_PROFILE", "")
+    if not raw:
+        return {"markets": {}, "league_markets": {}}
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        log.warning("ALGO_PERFORMANCE_PROFILE is not valid JSON")
+        return {"markets": {}, "league_markets": {}}
+    return {
+        "markets": data.get("markets", {}) or {},
+        "league_markets": data.get("league_markets", {}) or {},
+    }
+
+def market_profile(profile, market, league=None):
+    league_key = f"{league}::{market}" if league else ""
+    return (
+        profile.get("league_markets", {}).get(league_key)
+        or profile.get("markets", {}).get(market)
+        or {}
+    )
+
+def calibrate_confidence(raw_conf, profile_data):
+    count = int(profile_data.get("count") or 0)
+    if count < algo_min_market_sample():
+        return raw_conf
+
+    hit_rate = float(profile_data.get("hit_rate") or 0)
+    roi_flat = float(profile_data.get("roi_flat") or 0)
+    adjustment = 0
+
+    if roi_flat < -10:
+        adjustment -= 8
+    elif roi_flat < 0:
+        adjustment -= 4
+    elif roi_flat > 8 and hit_rate >= 58:
+        adjustment += 3
+
+    if hit_rate and hit_rate < max(45, raw_conf - 18):
+        adjustment -= 5
+
+    return max(1, min(95, round(raw_conf + adjustment)))
+
+def candidate_risk_flags(raw_conf, conf, market, odds, odds_is_real, ev, profile_data):
+    flags = []
+    count = int(profile_data.get("count") or 0)
+    hit_rate = float(profile_data.get("hit_rate") or 0)
+    roi_flat = float(profile_data.get("roi_flat") or 0)
+
+    if not odds_is_real:
+        flags.append("estimated_odds")
+    if count < algo_min_market_sample():
+        flags.append("limited_market_history")
+    elif roi_flat < 0:
+        flags.append("negative_market_roi")
+    if count >= algo_min_market_sample() and hit_rate and hit_rate < 50:
+        flags.append("low_market_hit_rate")
+    if conf < raw_conf:
+        flags.append("confidence_calibrated_down")
+    if ev < algo_min_ev():
+        flags.append("thin_edge")
+    if conf < market_threshold(market):
+        flags.append("below_market_threshold")
+
+    return flags
+
+def market_threshold(market):
+    if market.startswith("Corners "):
+        return _env_int("ALGO_CORNER_MIN_CONFIDENCE", 68)
+    return MARKET_THRESHOLDS.get(market, WILD_MIN)
+
+def passes_publish_gate(candidate):
+    if require_real_odds() and not candidate["odds_is_real"]:
+        return False
+    if candidate["conf"] < WILD_MIN:
+        return False
+    if candidate["conf"] < market_threshold(candidate["market"]):
+        return False
+    if candidate["odds"] < MIN_ODDS:
+        return False
+    if candidate["ev"] < algo_min_ev():
+        return False
+
+    profile_data = candidate.get("market_profile", {})
+    if int(profile_data.get("count") or 0) >= algo_min_market_sample():
+        if float(profile_data.get("roi_flat") or 0) < -12:
+            return False
+        if float(profile_data.get("hit_rate") or 0) < 45:
+            return False
+    return True
+
 def recent_form_summary(form):
     games = max(form.get("games", 0), 1)
     return {
@@ -515,42 +787,67 @@ def recent_form_summary(form):
     }
 
 def pick_reasoning(pick):
+    edge_note = "real market odds" if pick.get("odds_is_real") else "estimated odds"
+    if pick.get("market", "").startswith("Corners "):
+        profile = pick.get("corner_profile") or {}
+        return (
+            f"{pick.get('market')} rates at {pick.get('conf')}% confidence with "
+            f"{pick.get('odds')} odds and {pick.get('ev'):+.3f} expected value. "
+            f"The corner model projects about {profile.get('expected_total', 'unknown')} total corners "
+            f"from recent team corner trends using {edge_note}."
+        )
     return (
         f"{pick.get('market')} rates at {pick.get('conf')}% confidence with "
         f"{pick.get('odds')} odds and {pick.get('ev'):+.3f} expected value. "
-        f"The model prefers this market from the available fixture markets."
+        f"The model prefers this market from the available fixture markets using {edge_note}."
     )
 
 def pick_verdict(pick):
     tier = pick.get("tier") or "pick"
+    flags = pick.get("risk_flags") or []
+    if "negative_market_roi" in flags or "low_market_hit_rate" in flags:
+        return f"{tier.replace('_', ' ').title()} passed today, but historical market risk is flagged."
     if pick.get("proven"):
         return f"{tier.replace('_', ' ').title()} backed by a proven market profile."
     return f"{tier.replace('_', ' ').title()} selected for positive value and confidence."
 
 def select_picks(all_confs, scored_fxs, odds_list):
     pool=[]
+    profile = load_performance_profile()
     for fx,confs,real_odds in zip(scored_fxs,all_confs,odds_list):
         for market,conf in confs.items():
-            if conf<WILD_MIN: continue
             key  = ODDS_KEYS_MAP.get(market)
-            odds = (real_odds.get(key) if key else None) or est_odds(conf)
-            if odds<MIN_ODDS: continue
-            ev = round((conf/100)*odds-1,3)
-            pool.append({"fixture":fx["fixture"],"league":fx["league"],
-                         "code":fx.get("code","?"),"kickoff":fx["kickoff"],
-                         "home_team":fx.get("hname",""),"away_team":fx.get("aname",""),
-                         "market":market,"meaning":MARKET_MEANINGS.get(market,""),
-                         "conf":conf,"odds":odds,"ev":ev,
-                         "proven":market in PROVEN_MARKETS,
-                         "hname":fx["hname"],"aname":fx["aname"],
-                         "match_id":fx.get("match_id"),
-                         "source":fx.get("source","?"),
-                         "home_recent_form":fx.get("home_recent_form",{}),
-                         "away_recent_form":fx.get("away_recent_form",{})})
+            real_odd = (real_odds.get(key) if key else None) or real_odds.get(market)
+            odds_is_real = bool(real_odd)
+            profile_data = market_profile(profile, market, fx.get("league"))
+            calibrated_conf = calibrate_confidence(conf, profile_data)
+            odds = real_odd or est_odds(calibrated_conf)
+            ev = round((calibrated_conf/100)*odds-1,3)
+            candidate = {
+                "fixture":fx["fixture"],"league":fx["league"],
+                "code":fx.get("code","?"),"kickoff":fx["kickoff"],
+                "home_team":fx.get("hname",""),"away_team":fx.get("aname",""),
+                "market":market,"meaning":market_meaning(market),
+                "raw_conf":conf,"conf":calibrated_conf,"odds":odds,"ev":ev,
+                "odds_is_real":odds_is_real,
+                "proven":market in PROVEN_MARKETS,
+                "hname":fx["hname"],"aname":fx["aname"],
+                "match_id":fx.get("match_id"),
+                "source":fx.get("source","?"),
+                "home_recent_form":fx.get("home_recent_form",{}),
+                "away_recent_form":fx.get("away_recent_form",{}),
+                "corner_profile":fx.get("corner_profile",{}),
+                "market_profile":profile_data,
+            }
+            candidate["risk_flags"] = candidate_risk_flags(
+                conf, calibrated_conf, market, odds, odds_is_real, ev, profile_data
+            )
+            if passes_publish_gate(candidate):
+                pool.append(candidate)
 
     # ── BANKERS: up to MAX_BANKERS, one per fixture, proven markets ──
     banker_cands = sorted([p for p in pool if p["proven"] and p["conf"]>=BANKER_MIN and 1.25<=p["odds"]<=3.50],
-                          key=lambda x:(x["conf"],x["ev"]),reverse=True)
+                          key=lambda x:(x["conf"],x["ev"],x["odds_is_real"]),reverse=True)
     bankers=[]; used_b=set()
     for p in banker_cands:
         if p["fixture"] not in used_b:
@@ -558,9 +855,12 @@ def select_picks(all_confs, scored_fxs, odds_list):
         if len(bankers)>=MAX_BANKERS: break
 
     # ── VALUE GEMS: up to MAX_VALUE_GEMS, one per fixture, EV-ranked ──
-    value_cands = sorted([p for p in pool if p["conf"]>=VALUE_MIN and p["ev"]>0
+    value_cands = sorted([p for p in pool if (
+                              p["conf"] >= VALUE_MIN
+                              or (p["market"].startswith("Corners ") and p["conf"] >= market_threshold(p["market"]))
+                          ) and p["ev"]>0
                           and 1.35<=p["odds"]<=3.50 and p["fixture"] not in used_b],
-                         key=lambda x:x["ev"],reverse=True)
+                         key=lambda x:(x["ev"],x["conf"],x["odds_is_real"]),reverse=True)
     seen_v=set(); value_gems=[]
     for p in value_cands:
         if p["fixture"] not in seen_v:
@@ -571,30 +871,20 @@ def select_picks(all_confs, scored_fxs, odds_list):
     used_all = used_b | seen_v
     wild_cands = sorted([p for p in pool if WILD_MIN<=p["conf"]<VALUE_MIN
                          and p["odds"]>=2.00 and p["ev"]>0 and p["fixture"] not in used_all],
-                        key=lambda x:x["ev"],reverse=True)
+                        key=lambda x:(x["ev"],x["conf"],x["odds_is_real"]),reverse=True)
     seen_w=set(); wild_cards=[]
     for p in wild_cands:
         if p["fixture"] not in seen_w:
             seen_w.add(p["fixture"]); wild_cards.append(p)
         if len(wild_cards)>=MAX_WILD_CARDS: break
 
-    # ── FILL UP: if no wild cards, expand bankers & value gems to hit TARGET ──
-    total = len(bankers)+len(value_gems)+len(wild_cards)
-    if total < TARGET_MIN and not wild_cards:
-        used_all2 = used_b | seen_v
-        # more bankers (relax to conf>=68)
-        for p in sorted([p for p in pool if p["proven"] and p["conf"]>=68 and 1.25<=p["odds"]<=4.00
-                         and p["fixture"] not in used_all2],key=lambda x:(x["conf"],x["ev"]),reverse=True):
-            if p["fixture"] not in used_all2:
-                bankers.append(p); used_all2.add(p["fixture"])
-            if len(bankers)>=MAX_BANKERS+1 or len(bankers)+len(value_gems)>=TARGET_MAX: break
-        # more value gems (slightly relax EV threshold)
-        for p in sorted([p for p in pool if p["conf"]>=68 and p["ev"]>-0.02
-                         and 1.30<=p["odds"]<=4.00 and p["fixture"] not in used_all2],
-                        key=lambda x:x["ev"],reverse=True):
-            if p["fixture"] not in used_all2:
-                value_gems.append(p); used_all2.add(p["fixture"])
-            if len(bankers)+len(value_gems)>=TARGET_MAX: break
+    max_daily = max(1, algo_max_daily_picks())
+    selected = bankers + value_gems + wild_cards
+    if len(selected) > max_daily:
+        keep = set(id(p) for p in sorted(selected, key=lambda x: (x["conf"], x["ev"]), reverse=True)[:max_daily])
+        bankers = [p for p in bankers if id(p) in keep]
+        value_gems = [p for p in value_gems if id(p) in keep]
+        wild_cards = [p for p in wild_cards if id(p) in keep]
 
     log.info(f"Picks selected — Bankers:{len(bankers)} ValueGems:{len(value_gems)} WildCards:{len(wild_cards)}")
     for tier, selected in (("banker", bankers), ("value_gem", value_gems), ("wild_card", wild_cards)):
@@ -662,6 +952,7 @@ def serialize_selected_picks(bankers, value_gems, wild_cards, target_date, bankr
                 "model_verdict": pick.get("model_verdict", ""),
                 "home_recent_form": pick.get("home_recent_form", {}),
                 "away_recent_form": pick.get("away_recent_form", {}),
+                "risk_flags": pick.get("risk_flags", []),
                 "confidence": pick.get("conf", 0),
                 "odds": pick.get("odds", 0),
                 "ev": pick.get("ev", 0),
@@ -670,21 +961,38 @@ def serialize_selected_picks(bankers, value_gems, wild_cards, target_date, bankr
             })
     return picks
 
-def serialize_fixture_markets(confs, real_odds=None):
+def serialize_fixture_markets(confs, real_odds=None, league=None):
     markets = []
     real_odds = real_odds or {}
+    profile = load_performance_profile()
     for market, confidence in sorted(confs.items(), key=lambda item: item[1], reverse=True):
         key = ODDS_KEYS_MAP.get(market)
-        odds = (real_odds.get(key) if key else None) or est_odds(confidence)
-        ev = round((confidence / 100) * odds - 1, 3)
+        real_odd = (real_odds.get(key) if key else None) or real_odds.get(market)
+        profile_data = market_profile(profile, market, league)
+        calibrated_confidence = calibrate_confidence(confidence, profile_data)
+        odds = real_odd or est_odds(calibrated_confidence)
+        ev = round((calibrated_confidence / 100) * odds - 1, 3)
+        odds_is_real = bool(real_odd)
         markets.append({
             "market": market,
-            "meaning": MARKET_MEANINGS.get(market, ""),
-            "confidence": confidence,
+            "meaning": market_meaning(market),
+            "raw_confidence": confidence,
+            "confidence": calibrated_confidence,
             "odds": odds,
             "ev": ev,
+            "odds_source": "api_football" if odds_is_real else "estimated",
             "proven": market in PROVEN_MARKETS,
-            "eligible": confidence >= WILD_MIN and odds >= MIN_ODDS,
+            "eligible": passes_publish_gate({
+                "market": market,
+                "conf": calibrated_confidence,
+                "odds": odds,
+                "ev": ev,
+                "odds_is_real": odds_is_real,
+                "market_profile": profile_data,
+            }),
+            "risk_flags": candidate_risk_flags(
+                confidence, calibrated_confidence, market, odds, odds_is_real, ev, profile_data
+            ),
         })
     return markets
 
@@ -702,7 +1010,8 @@ def serialize_fixture_summaries(scored_fxs, all_confs, odds_list=None):
             "market_count": len(confs),
             "markets_70_plus": sum(1 for value in confs.values() if value >= 70),
             "markets_65_plus": sum(1 for value in confs.values() if value >= 65),
-            "markets": serialize_fixture_markets(confs, real_odds),
+            "corner_profile": fx.get("corner_profile", {}),
+            "markets": serialize_fixture_markets(confs, real_odds, fx.get("league")),
         })
     return summaries
 
@@ -1200,7 +1509,7 @@ def generate_and_upload_pdf(drive, bankers, value_gems, wild_cards,
                 for j in range(2):
                     if i + j < len(items):
                         m, c = items[i+j]
-                        thresh = MARKET_THRESHOLDS.get(m, 68)
+                        thresh = market_threshold(m)
                         qual   = "✔ " if c >= thresh else ""
                         bar    = "█" * (c // 10) + "░" * (10 - c // 10)
                         sty    = sMktGreen if c >= thresh else sMktDark
@@ -1396,7 +1705,17 @@ def run_daily_algo():
             fx["home_recent_form"] = recent_form_summary(hf)
             fx["away_recent_form"] = recent_form_summary(af)
             real_odds = get_api_football_odds(fx["aps_id"])
-            confs = score_fixture(hf,af,h2h,real_odds,api_preds=pred_data)
+            corner_odds_available = any(key.startswith("Corners ") for key in real_odds)
+            corner_profile = build_corner_profile(fx) if corner_odds_available else {}
+            fx["corner_profile"] = corner_profile
+            confs = score_fixture(
+                hf,
+                af,
+                h2h,
+                real_odds,
+                api_preds=pred_data,
+                corner_profile=corner_profile,
+            )
             all_confs.append(confs); scored_fxs.append(fx); odds_list.append(real_odds)
             log.info("    APS scored OK")
         except Exception as e:
@@ -1428,6 +1747,8 @@ def run_daily_algo():
     result = {"status":"success","date":target_date,
               "fd_fixtures":0,"aps_fixtures":len(fixtures),
               "total_scored":len(all_confs),"picks_count":picks_count,
+              "no_bet": picks_count == 0,
+              "publish_policy":"strict_edge_only",
               "market_count":sum(len(confs) for confs in all_confs),
               "markets_70_plus":sum(1 for confs in all_confs for value in confs.values() if value >= 70),
               "markets_65_plus":sum(1 for confs in all_confs for value in confs.values() if value >= 65),

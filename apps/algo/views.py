@@ -135,6 +135,8 @@ def _daily_picks_payload(target_date, request=None):
         return {
             "date": target_date,
             "published": False,
+            "no_bet": False,
+            "message": "Picks have not been published for this date.",
             "run_id": None,
             "posted_at": None,
             "summary": {
@@ -174,6 +176,7 @@ def _daily_picks_payload(target_date, request=None):
             "market_count": item.get("market_count", 0),
             "markets_70_plus": item.get("markets_70_plus", 0),
             "markets_65_plus": item.get("markets_65_plus", 0),
+            "corner_profile": item.get("corner_profile", {}),
             "markets": markets,
             "picks": [],
         }
@@ -191,6 +194,7 @@ def _daily_picks_payload(target_date, request=None):
                 "market_count": 0,
                 "markets_70_plus": 0,
                 "markets_65_plus": 0,
+                "corner_profile": {},
                 "markets": [],
                 "picks": [],
             }
@@ -212,7 +216,13 @@ def _daily_picks_payload(target_date, request=None):
 
     return {
         "date": target_date,
-        "published": True,
+        "published": bool(picks),
+        "no_bet": not bool(picks),
+        "message": (
+            "Published picks are available."
+            if picks
+            else "No bet today. The model scored the fixtures but did not find an edge strong enough to publish."
+        ),
         "run_id": algo_run.id,
         "posted_at": algo_run.created_at,
         "summary": {

@@ -132,6 +132,11 @@ GRIND_ALGO = {
     "SHEET_NAME": config("SHEET_NAME", default="GrindAlgo Tracker"),
     "DRIVE_FOLDER": config("DRIVE_FOLDER", default="GrindAlgo Reports"),
     "EMAIL_RECIPIENT": config("EMAIL_RECIPIENT", default=""),
+    "ALGO_MIN_EV": config("ALGO_MIN_EV", default="0.02"),
+    "ALGO_MIN_MARKET_SAMPLE": config("ALGO_MIN_MARKET_SAMPLE", default="15"),
+    "ALGO_MAX_DAILY_PICKS": config("ALGO_MAX_DAILY_PICKS", default="15"),
+    "ALGO_REQUIRE_REAL_ODDS": config("ALGO_REQUIRE_REAL_ODDS", default="False"),
+    "ALGO_CORNER_MIN_CONFIDENCE": config("ALGO_CORNER_MIN_CONFIDENCE", default="68"),
 }
 
 # Auth settings

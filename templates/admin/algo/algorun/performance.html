@@ -1,0 +1,94 @@
+{% extends "admin/base_site.html" %}
+
+{% block extrastyle %}
+  {{ block.super }}
+  <style>
+    .algo-dashboard { margin-top: 18px; }
+    .algo-kpis {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+      gap: 12px;
+      margin: 16px 0 24px;
+    }
+    .algo-kpi {
+      border: 1px solid var(--hairline-color);
+      border-radius: 6px;
+      padding: 12px;
+      background: var(--body-bg);
+    }
+    .algo-kpi strong {
+      display: block;
+      font-size: 20px;
+      line-height: 1.2;
+      color: var(--body-fg);
+    }
+    .algo-kpi span {
+      display: block;
+      margin-top: 4px;
+      color: var(--body-quiet-color);
+    }
+    .algo-controls {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin: 12px 0 18px;
+    }
+    .algo-controls input {
+      width: 80px;
+    }
+    .algo-section {
+      margin: 24px 0;
+    }
+    .algo-section h2 {
+      margin-bottom: 10px;
+    }
+    .algo-table {
+      width: 100%;
+    }
+    .algo-good {
+      color: #0b7a3b;
+      font-weight: 600;
+    }
+    .algo-bad {
+      color: #b3261e;
+      font-weight: 600;
+    }
+    .algo-muted {
+      color: var(--body-quiet-color);
+    }
+  </style>
+{% endblock %}
+
+{% block breadcrumbs %}
+  <div class="breadcrumbs">
+    <a href="{% url 'admin:index' %}">Home</a>
+    &rsaquo; <a href="{% url 'admin:app_list' app_label=opts.app_label %}">{{ opts.app_config.verbose_name }}</a>
+    &rsaquo; <a href="{% url 'admin:algo_algorun_changelist' %}">Algo runs</a>
+    &rsaquo; Performance
+  </div>
+{% endblock %}
+
+{% block content %}
+  <div id="content-main" class="algo-dashboard">
+    <form method="get" class="algo-controls">
+      <label for="id_days">Window days</label>
+      <input id="id_days" type="number" name="days" min="1" max="365" value="{{ days }}">
+      <input type="submit" value="Apply">
+    </form>
+
+    <div class="algo-kpis">
+      <div class="algo-kpi"><strong>{{ dashboard.overall.count }}</strong><span>Picks settled</span></div>
+      <div class="algo-kpi"><strong>{{ dashboard.overall.hit_rate }}%</strong><span>Hit rate</span></div>
+      <div class="algo-kpi"><strong class="{% if dashboard.overall.roi_flat >= 0 %}algo-good{% else %}algo-bad{% endif %}">{{ dashboard.overall.roi_flat }}%</strong><span>ROI flat</span></div>
+      <div class="algo-kpi"><strong>{{ dashboard.overall.wins }} / {{ dashboard.overall.losses }}</strong><span>Wins / losses</span></div>
+      <div class="algo-kpi"><strong>{{ dashboard.overall.avg_confidence }}%</strong><span>Avg confidence</span></div>
+      <div class="algo-kpi"><strong>{{ dashboard.overall.avg_odds }}</strong><span>Avg odds</span></div>
+    </div>
+
+    {% include "admin/algo/algorun/performance_table.html" with title="By Market" rows=dashboard.markets %}
+    {% include "admin/algo/algorun/performance_table.html" with title="By Confidence Band" rows=dashboard.confidence_bands %}
+    {% include "admin/algo/algorun/performance_table.html" with title="By Odds Band" rows=dashboard.odds_bands %}
+    {% include "admin/algo/algorun/performance_table.html" with title="By League" rows=dashboard.leagues %}
+    {% include "admin/algo/algorun/performance_table.html" with title="By League + Market" rows=dashboard.league_markets %}
+  </div>
+{% endblock %}

@@ -1,0 +1,37 @@
+<section class="algo-section">
+  <h2>{{ title }}</h2>
+  {% if rows %}
+    <table class="algo-table">
+      <thead>
+        <tr>
+          <th scope="col">Segment</th>
+          <th scope="col">Settled</th>
+          <th scope="col">Wins</th>
+          <th scope="col">Losses</th>
+          <th scope="col">Hit Rate</th>
+          <th scope="col">ROI</th>
+          <th scope="col">P&L</th>
+          <th scope="col">Avg Conf.</th>
+          <th scope="col">Avg Odds</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for row in rows %}
+          <tr>
+            <th scope="row">{{ row.label }}</th>
+            <td>{{ row.count }}</td>
+            <td>{{ row.wins }}</td>
+            <td>{{ row.losses }}</td>
+            <td>{{ row.hit_rate }}%</td>
+            <td class="{% if row.roi_flat >= 0 %}algo-good{% else %}algo-bad{% endif %}">{{ row.roi_flat }}%</td>
+            <td class="{% if row.pnl >= 0 %}algo-good{% else %}algo-bad{% endif %}">{{ row.pnl }}</td>
+            <td>{{ row.avg_confidence }}%</td>
+            <td>{{ row.avg_odds }}</td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  {% else %}
+    <p class="algo-muted">No settled picks in this window yet.</p>
+  {% endif %}
+</section>
