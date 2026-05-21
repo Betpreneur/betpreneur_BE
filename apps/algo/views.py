@@ -214,6 +214,8 @@ def _daily_picks_payload(target_date, request=None):
             market.setdefault("selected_pick_id", None)
             market.setdefault("selected_tier", "")
 
+    published_fixtures = [fixture for fixture in fixtures.values() if fixture["picks"]]
+
     return {
         "date": target_date,
         "published": bool(picks),
@@ -226,7 +228,7 @@ def _daily_picks_payload(target_date, request=None):
         "run_id": algo_run.id,
         "posted_at": algo_run.created_at,
         "summary": {
-            "fixture_count": algo_run.total_scored,
+            "fixture_count": len(published_fixtures),
             "market_count": (algo_run.result or {}).get("market_count", 0),
             "selected_pick_count": len(picks),
             "picks_70_plus": sum(1 for pick in picks if pick.confidence >= 70),
@@ -234,7 +236,7 @@ def _daily_picks_payload(target_date, request=None):
             "markets_70_plus": (algo_run.result or {}).get("markets_70_plus", 0),
             "markets_65_plus": (algo_run.result or {}).get("markets_65_plus", 0),
         },
-        "fixtures": list(fixtures.values()),
+        "fixtures": published_fixtures,
     }
 
 
