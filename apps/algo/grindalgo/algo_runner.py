@@ -123,7 +123,7 @@ def _to_wat(utc_str):
         return utc_str
 
 def normalize(name):
-    return ''.join(c for c in unicodedata.normalize('NFD', name)
+    return ''.join(c for c in unicodedata.normalize('NFD', str(name or ""))
                    if unicodedata.category(c) != 'Mn').lower()
 
 def fuzzy(a, b, n=4):
@@ -757,7 +757,7 @@ def candidate_risk_flags(raw_conf, conf, market, odds, odds_is_real, ev, profile
         flags.append("low_market_hit_rate")
     if conf < raw_conf:
         flags.append("confidence_calibrated_down")
-    if ev < algo_min_ev():
+    if ev is not None and ev < algo_min_ev():
         flags.append("thin_edge")
     if conf < market_threshold(market):
         flags.append("below_market_threshold")
@@ -778,7 +778,7 @@ def passes_publish_gate(candidate):
         return False
     if candidate["odds"] < MIN_ODDS:
         return False
-    if candidate["ev"] < algo_min_ev():
+    if candidate["ev"] is None or candidate["ev"] < algo_min_ev():
         return False
 
     profile_data = candidate.get("market_profile", {})
