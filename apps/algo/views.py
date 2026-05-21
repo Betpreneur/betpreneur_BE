@@ -15,6 +15,14 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from .models import AlgoRun, Pick, PickBack
+from .performance import (
+    add_pick,
+    confidence_band,
+    empty_stats,
+    finalize_stats,
+    latest_audited_picks,
+    odds_band,
+)
 from .serializers import (
     AlgoRunCreateSerializer,
     AlgoRunSerializer,
@@ -23,6 +31,7 @@ from .serializers import (
     DailyPicksResponseSerializer,
     PickSerializer,
     PickBackResponseSerializer,
+    PickDetailResponseSerializer,
     PublicSummarySerializer,
     RecordResponseSerializer,
     RecordQuerySerializer,
@@ -35,6 +44,7 @@ from .tasks import generate_daily_picks, run_monthly_auditor, settle_daily_resul
 
 
 SETTLED_PICK_STATUSES = [Pick.Status.WIN, Pick.Status.LOSS, Pick.Status.VOID]
+PICK_DETAIL_HISTORY_DAYS = 90
 
 
 def _performance_summary(queryset, window_days):
@@ -130,6 +140,160 @@ def _latest_successful_run(target_date):
         .order_by("-created_at")
         .first()
     )
+
+
+def _pick_identity_key(pick):
+    return (
+        pick.match_date or pick.run.target_date,
+        str(pick.match_id or "").strip(),
+        pick.fixture,
+        pick.market,
+    )
+
+
+def _fixture_summary_for_pick(pick):
+    for item in (pick.run.result or {}).get("fixture_summaries", []):
+        if str(item.get("match_id")) == str(pick.match_id):
+            return item
+    return {}
+
+
+def _market_sort_value(market):
+    return (
+        1 if market.get("selected") else 0,
+        1 if market.get("eligible") else 0,
+        market.get("confidence") or 0,
+        market.get("ev") if market.get("ev") is not None else -999,
+        market.get("odds") or 0,
+    )
+
+
+def _markets_for_pick_detail(pick, fixture_summary):
+    markets = []
+    selected_market = None
+    for market in fixture_summary.get("markets") or []:
+        payload = dict(market)
+        is_selected = payload.get("market") == pick.market
+        payload["selected"] = is_selected
+        payload["selected_pick_id"] = pick.id if is_selected else payload.get("selected_pick_id")
+        payload["selected_tier"] = pick.tier if is_selected else payload.get("selected_tier", "")
+        markets.append(payload)
+        if is_selected:
+            selected_market = payload
+
+    if selected_market is None:
+        selected_market = {
+            "market": pick.market,
+            "meaning": pick.meaning,
+            "confidence": pick.confidence,
+            "raw_confidence": pick.confidence,
+            "odds": float(pick.odds),
+            "ev": float(pick.ev),
+            "odds_source": pick.source,
+            "proven": False,
+            "eligible": True,
+            "risk_flags": pick.risk_flags,
+            "selected": True,
+            "selected_pick_id": pick.id,
+            "selected_tier": pick.tier,
+        }
+        markets.append(selected_market)
+
+    ranked = sorted(markets, key=_market_sort_value, reverse=True)
+    alternatives = [market for market in ranked if not market.get("selected")][:10]
+    return selected_market, alternatives
+
+
+def _stats_for_picks(picks):
+    stats = empty_stats()
+    for pick in picks:
+        add_pick(stats, pick)
+    return finalize_stats(stats)
+
+
+def _pick_performance_slices(pick, days=PICK_DETAIL_HISTORY_DAYS):
+    history = [
+        item
+        for item in latest_audited_picks(days=days)
+        if _pick_identity_key(item) != _pick_identity_key(pick)
+    ]
+    pick_confidence_band = confidence_band(pick.confidence)
+    pick_odds_band = odds_band(pick.odds)
+    league_market = [
+        item for item in history
+        if item.league == pick.league and item.market == pick.market
+    ]
+    return {
+        "days": days,
+        "overall": _stats_for_picks(history),
+        "same_market": _stats_for_picks([item for item in history if item.market == pick.market]),
+        "same_league": _stats_for_picks([item for item in history if item.league == pick.league]),
+        "same_league_market": _stats_for_picks(league_market),
+        "same_tier": _stats_for_picks([item for item in history if item.tier == pick.tier]),
+        "same_confidence_band": {
+            "label": pick_confidence_band,
+            **_stats_for_picks([item for item in history if confidence_band(item.confidence) == pick_confidence_band]),
+        },
+        "same_odds_band": {
+            "label": pick_odds_band,
+            **_stats_for_picks([item for item in history if odds_band(item.odds) == pick_odds_band]),
+        },
+    }
+
+
+def _pick_detail_payload(pick, request=None):
+    fixture_summary = _fixture_summary_for_pick(pick)
+    selected_market, alternatives = _markets_for_pick_detail(pick, fixture_summary)
+    run_picks = list(pick.run.picks.all().order_by("-confidence", "-ev", "kickoff", "id"))
+    rank_on_day = next((index + 1 for index, item in enumerate(run_picks) if item.id == pick.id), None)
+    pick_data = PickSerializer(pick, context={"request": request}).data
+
+    return {
+        "date": pick.match_date or pick.run.target_date,
+        "published": True,
+        "run_id": pick.run_id,
+        "posted_at": pick.created_at,
+        "pick": pick_data,
+        "fixture": {
+            "fixture": pick.fixture,
+            "home_team": pick.home_team,
+            "away_team": pick.away_team,
+            "league": pick.league,
+            "kickoff": pick.kickoff,
+            "match_id": pick.match_id,
+            "market_count": fixture_summary.get("market_count", len(fixture_summary.get("markets") or [])),
+            "markets_70_plus": fixture_summary.get("markets_70_plus", 0),
+            "markets_65_plus": fixture_summary.get("markets_65_plus", 0),
+            "corner_profile": fixture_summary.get("corner_profile", {}),
+        },
+        "market": {
+            "selected": selected_market,
+            "alternatives": alternatives,
+            "eligible_count": sum(1 for market in fixture_summary.get("markets") or [] if market.get("eligible")),
+        },
+        "selection": {
+            "rank_on_day": rank_on_day,
+            "total_picks_on_day": len(run_picks),
+            "is_top_pick": rank_on_day == 1,
+            "tier": pick.tier,
+            "confidence_band": confidence_band(pick.confidence),
+            "odds_band": odds_band(pick.odds),
+            "confidence": pick.confidence,
+            "odds": float(pick.odds),
+            "ev": float(pick.ev),
+            "stake": float(pick.stake) if pick.stake is not None else None,
+            "status": pick.status,
+        },
+        "model_summary": {
+            "meaning": pick.meaning,
+            "reasoning": pick.reasoning,
+            "model_verdict": pick.model_verdict,
+            "risk_flags": pick.risk_flags,
+            "home_recent_form": pick.home_recent_form,
+            "away_recent_form": pick.away_recent_form,
+        },
+        "performance": _pick_performance_slices(pick),
+    }
 
 
 def _daily_picks_payload(target_date, request=None):
@@ -439,6 +603,24 @@ class TopPickView(APIView):
                 "pick": pick_data,
             }
         )
+
+
+class PickDetailView(APIView):
+    permission_classes = [IsAuthenticated]
+    serializer_class = PickDetailResponseSerializer
+
+    @extend_schema(
+        summary="Pick detail",
+        description="Authenticated user endpoint. Returns one published pick with fixture context, market context, model summary, and historical performance slices.",
+        tags=["Picks"],
+        responses={200: PickDetailResponseSerializer},
+    )
+    def get(self, request, pick_id):
+        pick = get_object_or_404(
+            Pick.objects.select_related("run").prefetch_related("backs", "run__picks"),
+            id=pick_id,
+        )
+        return Response(_pick_detail_payload(pick, request))
 
 
 class DailyPicksDownloadView(APIView):

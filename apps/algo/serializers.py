@@ -181,6 +181,19 @@ class TopPickResponseSerializer(serializers.Serializer):
     pick = PickSerializer(allow_null=True)
 
 
+class PickDetailResponseSerializer(serializers.Serializer):
+    date = serializers.DateField()
+    published = serializers.BooleanField()
+    run_id = serializers.IntegerField(allow_null=True)
+    posted_at = serializers.DateTimeField(allow_null=True)
+    pick = PickSerializer()
+    fixture = serializers.JSONField()
+    market = serializers.JSONField()
+    selection = serializers.JSONField()
+    model_summary = serializers.JSONField()
+    performance = serializers.JSONField()
+
+
 class PublicRecordPickSerializer(serializers.Serializer):
     id = serializers.IntegerField()
     posted_at = serializers.DateTimeField()

@@ -229,18 +229,117 @@ def _default_form():
             "btts_count":4,"over25_count":3,"clean_sheets":2,
             "games":8,"streak":0,"attack_str":0.5,"defence_str":0.5}
 
+def _percent_to_ratio(value, default=0.5):
+    try:
+        return float(str(value).replace("%", "")) / 100
+    except (TypeError, ValueError):
+        return default
+
+def _result_code_for_team(match, team_id):
+    teams = match.get("teams", {}) or {}
+    goals = match.get("goals", {}) or {}
+    home = teams.get("home", {}) or {}
+    away = teams.get("away", {}) or {}
+    home_goals = goals.get("home")
+    away_goals = goals.get("away")
+    if home_goals is None or away_goals is None:
+        return None
+    is_home = home.get("id") == team_id
+    is_away = away.get("id") == team_id
+    if not is_home and not is_away:
+        return None
+    scored = home_goals if is_home else away_goals
+    conceded = away_goals if is_home else home_goals
+    if scored > conceded:
+        return "W"
+    if scored < conceded:
+        return "L"
+    return "D"
+
+def fetch_team_recent_form(team_id, lookback=8):
+    if not team_id:
+        return None
+    if team_id in _form_cache:
+        return _form_cache[team_id]
+
+    matches = []
+    try:
+        matches = aps_get("/fixtures", {"team": team_id, "last": lookback}, timeout=15)
+        time.sleep(0.15)
+    except Exception as exc:
+        log.warning("Team recent form %s: %s", team_id, exc)
+
+    samples = []
+    for match in matches or []:
+        status = ((match.get("fixture") or {}).get("status") or {}).get("short")
+        if status not in {"FT", "AET", "PEN"}:
+            continue
+        teams = match.get("teams", {}) or {}
+        goals = match.get("goals", {}) or {}
+        home = teams.get("home", {}) or {}
+        away = teams.get("away", {}) or {}
+        home_goals = goals.get("home")
+        away_goals = goals.get("away")
+        if home_goals is None or away_goals is None:
+            continue
+        is_home = home.get("id") == team_id
+        is_away = away.get("id") == team_id
+        if not is_home and not is_away:
+            continue
+        scored = home_goals if is_home else away_goals
+        conceded = away_goals if is_home else home_goals
+        result = _result_code_for_team(match, team_id)
+        if result is None:
+            continue
+        samples.append({
+            "scored": scored,
+            "conceded": conceded,
+            "result": result,
+        })
+
+    if not samples:
+        return None
+
+    games = len(samples)
+    form_str = "".join(item["result"] for item in samples)
+    streak = 0
+    for result in reversed(form_str):
+        if result == form_str[-1]:
+            streak += 1
+        else:
+            break
+    if form_str[-1] == "L":
+        streak = -streak
+
+    form = {
+        "wins": sum(1 for item in samples if item["result"] == "W"),
+        "avg_scored": round(sum(item["scored"] for item in samples) / games, 2),
+        "avg_conceded": round(sum(item["conceded"] for item in samples) / games, 2),
+        "btts_count": sum(1 for item in samples if item["scored"] > 0 and item["conceded"] > 0),
+        "over25_count": sum(1 for item in samples if item["scored"] + item["conceded"] > 2),
+        "clean_sheets": sum(1 for item in samples if item["conceded"] == 0),
+        "games": games,
+        "streak": streak,
+        "attack_str": 0.5,
+        "defence_str": 0.5,
+    }
+    _form_cache[team_id] = form
+    return form
+
 # ── MAP API-FOOTBALL PREDICTIONS -> FORM METRICS ─────────────────
 def map_aps_to_form(team_pred, comp_side):
     if not team_pred: return _default_form()
     last_5   = team_pred.get("last_5",{}) or {}
-    form_str = (last_5.get("form") or "WDWDW")[:5]
-    games    = max(len(form_str),5)
-    wins     = form_str.count("W")
+    form_str = "".join(ch for ch in str(last_5.get("form") or "") if ch in {"W", "D", "L"})[:5]
+    fallback = _default_form()
+    games    = len(form_str) or 5
+    wins     = form_str.count("W") if form_str else fallback["wins"]
     streak   = 0
-    for r_ in reversed(form_str):
-        if r_==form_str[-1]: streak+=1
-        else: break
-    if form_str and form_str[-1]=="L": streak=-streak
+    if form_str:
+        for r_ in reversed(form_str):
+            if r_==form_str[-1]: streak+=1
+            else: break
+        if form_str[-1]=="L": streak=-streak
 
     goals_data   = last_5.get("goals",{}) or {}
     avg_scored   = float((goals_data.get("for",{}) or {}).get("average") or 1.4)
@@ -1765,11 +1864,16 @@ def run_daily_algo():
                           "def":comparison.get("def",{}).get("home","50%")}
                 a_comp = {"att":comparison.get("att",{}).get("away","50%"),
                           "def":comparison.get("def",{}).get("away","50%")}
-                hf = map_aps_to_form(teams_data.get("home"),h_comp)
-                af = map_aps_to_form(teams_data.get("away"),a_comp)
+                hf = fetch_team_recent_form(fx.get("hid")) or map_aps_to_form(teams_data.get("home"),h_comp)
+                af = fetch_team_recent_form(fx.get("aid")) or map_aps_to_form(teams_data.get("away"),a_comp)
+                hf["attack_str"] = _percent_to_ratio(h_comp.get("att"), hf.get("attack_str", 0.5))
+                af["attack_str"] = _percent_to_ratio(a_comp.get("att"), af.get("attack_str", 0.5))
+                hf["defence_str"] = _percent_to_ratio(h_comp.get("def"), hf.get("defence_str", 0.5))
+                af["defence_str"] = _percent_to_ratio(a_comp.get("def"), af.get("defence_str", 0.5))
                 h2h = parse_aps_h2h(pred_data.get("h2h",[]),fx["hname"])
             else:
-                hf=_default_form(); af=_default_form()
+                hf=fetch_team_recent_form(fx.get("hid")) or _default_form()
+                af=fetch_team_recent_form(fx.get("aid")) or _default_form()
                 h2h={"games":5,"t1w":2,"o25":3,"btts":2}
             fx["home_recent_form"] = recent_form_summary(hf)
             fx["away_recent_form"] = recent_form_summary(af)
