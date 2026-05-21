@@ -358,6 +358,7 @@ class AlgoRunViewSet(viewsets.ReadOnlyModelViewSet):
 
 
 class PublicSummaryView(APIView):
+    authentication_classes = []
     permission_classes = [AllowAny]
     serializer_class = PublicSummarySerializer
 
@@ -495,6 +496,7 @@ class BackPickView(APIView):
 
 
 class PublicRecordView(APIView):
+    authentication_classes = []
     permission_classes = [AllowAny]
     serializer_class = RecordResponseSerializer
 
