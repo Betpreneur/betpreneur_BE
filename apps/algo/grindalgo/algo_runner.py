@@ -386,9 +386,15 @@ W = {"f1":8,"f2":10,"f3":12,"f4":8,"f5":6,"f6":8,"f7":12,"f8":5,"f9":8,
 MAX_W = sum(W.values())
 
 def score_corner_markets(real_odds, corner_profile=None):
+    if not algo_enable_corners():
+        return {}
+
     corner_profile = corner_profile or {}
     expected_total = float(corner_profile.get("expected_total") or 9.0)
     games = int(corner_profile.get("games") or 0)
+    if games < algo_corner_min_profile_games():
+        return {}
+
     scores = {}
 
     for market in real_odds:
@@ -397,6 +403,9 @@ def score_corner_markets(real_odds, corner_profile=None):
         try:
             line = float(market.rsplit(" ", 1)[-1])
         except (TypeError, ValueError):
+            continue
+        odd = real_odds.get(market)
+        if not corner_market_allowed(market, odd, corner_profile):
             continue
 
         diff = expected_total - line
@@ -696,6 +705,41 @@ def require_real_odds():
 def allow_estimated_picks():
     return _env_bool("ALGO_ALLOW_ESTIMATED_PICKS", False)
 
+def algo_enable_corners():
+    return _env_bool("ALGO_ENABLE_CORNERS", True)
+
+def algo_corner_min_line():
+    return _env_float("ALGO_CORNER_MIN_LINE", 7.5)
+
+def algo_corner_max_odds():
+    return _env_float("ALGO_CORNER_MAX_ODDS", 3.5)
+
+def algo_corner_min_profile_games():
+    return _env_int("ALGO_CORNER_MIN_PROFILE_GAMES", 6)
+
+def corner_line(market):
+    if not market.startswith("Corners "):
+        return None
+    try:
+        return float(market.rsplit(" ", 1)[-1])
+    except (TypeError, ValueError):
+        return None
+
+def corner_market_allowed(market, odds, corner_profile=None):
+    line = corner_line(market)
+    if line is None:
+        return True
+    if not algo_enable_corners():
+        return False
+    if line < algo_corner_min_line():
+        return False
+    if odds is None or odds < MIN_ODDS or odds > algo_corner_max_odds():
+        return False
+    profile_games = int((corner_profile or {}).get("games") or 0)
+    if profile_games < algo_corner_min_profile_games():
+        return False
+    return True
+
 def load_performance_profile():
     raw = os.environ.get("ALGO_PERFORMANCE_PROFILE", "")
     if not raw:
@@ -770,6 +814,10 @@ def market_threshold(market):
     return MARKET_THRESHOLDS.get(market, WILD_MIN)
 
 def passes_publish_gate(candidate):
+    if candidate["market"].startswith("Corners ") and not corner_market_allowed(
+        candidate["market"], candidate.get("odds"), candidate.get("corner_profile")
+    ):
+        return False
     if (require_real_odds() or not allow_estimated_picks()) and not candidate["odds_is_real"]:
         return False
     if candidate["conf"] < WILD_MIN:
@@ -978,7 +1026,7 @@ def serialize_selected_picks(bankers, value_gems, wild_cards, target_date, bankr
             })
     return picks
 
-def serialize_fixture_markets(confs, real_odds=None, league=None):
+def serialize_fixture_markets(confs, real_odds=None, league=None, corner_profile=None):
     markets = []
     real_odds = real_odds or {}
     profile = load_performance_profile()
@@ -1006,6 +1054,7 @@ def serialize_fixture_markets(confs, real_odds=None, league=None):
                 "ev": ev,
                 "odds_is_real": odds_is_real,
                 "market_profile": profile_data,
+                "corner_profile": corner_profile or {},
             }),
             "risk_flags": candidate_risk_flags(
                 confidence, calibrated_confidence, market, odds, odds_is_real, ev, profile_data
@@ -1028,7 +1077,9 @@ def serialize_fixture_summaries(scored_fxs, all_confs, odds_list=None):
             "markets_70_plus": sum(1 for value in confs.values() if value >= 70),
             "markets_65_plus": sum(1 for value in confs.values() if value >= 65),
             "corner_profile": fx.get("corner_profile", {}),
-            "markets": serialize_fixture_markets(confs, real_odds, fx.get("league")),
+            "markets": serialize_fixture_markets(
+                confs, real_odds, fx.get("league"), fx.get("corner_profile", {})
+            ),
         })
     return summaries
 

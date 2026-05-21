@@ -138,6 +138,10 @@ GRIND_ALGO = {
     "ALGO_REQUIRE_REAL_ODDS": config("ALGO_REQUIRE_REAL_ODDS", default="False"),
     "ALGO_ALLOW_ESTIMATED_PICKS": config("ALGO_ALLOW_ESTIMATED_PICKS", default="False"),
     "ALGO_CORNER_MIN_CONFIDENCE": config("ALGO_CORNER_MIN_CONFIDENCE", default="68"),
+    "ALGO_ENABLE_CORNERS": config("ALGO_ENABLE_CORNERS", default="True"),
+    "ALGO_CORNER_MIN_LINE": config("ALGO_CORNER_MIN_LINE", default="7.5"),
+    "ALGO_CORNER_MAX_ODDS": config("ALGO_CORNER_MAX_ODDS", default="3.5"),
+    "ALGO_CORNER_MIN_PROFILE_GAMES": config("ALGO_CORNER_MIN_PROFILE_GAMES", default="6"),
 }
 
 # Auth settings
