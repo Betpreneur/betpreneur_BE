@@ -34,6 +34,9 @@ from .serializers import (
 from .tasks import generate_daily_picks, run_monthly_auditor, settle_daily_results
 
 
+SETTLED_PICK_STATUSES = [Pick.Status.WIN, Pick.Status.LOSS, Pick.Status.VOID]
+
+
 def _performance_summary(queryset, window_days):
     if not hasattr(queryset, "aggregate"):
         return _performance_summary_from_picks(queryset, window_days)
@@ -373,9 +376,12 @@ class PublicSummaryView(APIView):
     def get(self, request):
         window_days = 90
         since = timezone.localdate() - timedelta(days=window_days)
+        today = timezone.localdate()
         picks = Pick.objects.filter(
-            Q(match_date__gte=since)
-            | Q(match_date__isnull=True, run__target_date__gte=since)
+            status__in=SETTLED_PICK_STATUSES,
+        ).filter(
+            Q(match_date__gte=since, match_date__lte=today)
+            | Q(match_date__isnull=True, run__target_date__gte=since, run__target_date__lte=today)
         ).select_related("run").order_by(
             "-match_date",
             "-run__target_date",
@@ -514,9 +520,12 @@ class PublicRecordView(APIView):
         query.is_valid(raise_exception=True)
         window_days = query.validated_data["days"]
         since = timezone.localdate() - timedelta(days=window_days)
+        today = timezone.localdate()
         picks_queryset = Pick.objects.filter(
-            Q(match_date__gte=since)
-            | Q(match_date__isnull=True, run__target_date__gte=since)
+            status__in=SETTLED_PICK_STATUSES,
+        ).filter(
+            Q(match_date__gte=since, match_date__lte=today)
+            | Q(match_date__isnull=True, run__target_date__gte=since, run__target_date__lte=today)
         ).select_related("run").order_by(
             "-match_date",
             "-run__target_date",
