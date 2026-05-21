@@ -6,6 +6,8 @@ from .models import AlgoRun, Pick, PickBack
 class PickSerializer(serializers.ModelSerializer):
     backed_count = serializers.SerializerMethodField()
     backed_by_me = serializers.SerializerMethodField()
+    selection_profile = serializers.SerializerMethodField()
+    risk_level = serializers.SerializerMethodField()
 
     class Meta:
         model = Pick
@@ -26,6 +28,8 @@ class PickSerializer(serializers.ModelSerializer):
             "home_recent_form",
             "away_recent_form",
             "risk_flags",
+            "selection_profile",
+            "risk_level",
             "confidence",
             "odds",
             "ev",
@@ -49,6 +53,24 @@ class PickSerializer(serializers.ModelSerializer):
         if not request or not request.user.is_authenticated:
             return False
         return obj.backs.filter(user=request.user).exists()
+
+    def get_selection_profile(self, obj) -> str:
+        for flag in obj.risk_flags or []:
+            if str(flag).startswith("profile:"):
+                return str(flag).split(":", 1)[1]
+        return ""
+
+    def get_risk_level(self, obj) -> str:
+        profile = self.get_selection_profile(obj)
+        if obj.tier == Pick.Tier.BANKER:
+            return "low"
+        if obj.tier == Pick.Tier.VALUE_GEM:
+            return "medium"
+        if profile == "lean":
+            return "moderate"
+        if profile == "high_upside":
+            return "high"
+        return "medium"
 
 
 class AlgoRunSerializer(serializers.ModelSerializer):

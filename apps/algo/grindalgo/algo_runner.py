@@ -776,9 +776,9 @@ MARKET_THRESHOLDS = {
     "Home CS":65,"Away CS":72,"AH Home +0.5":58,"AH Away +0.5":78,
     "First to Score H":55,"First to Score A":85,
 }
-MIN_ODDS=1.25; BANKER_MIN=72; VALUE_MIN=70; WILD_MIN=65
+MIN_ODDS=1.25; BANKER_MIN=76; VALUE_MIN=70; WILD_MIN=65
 # Scale targets: aim for 10–15 picks on a busy fixture day
-MAX_BANKERS=3; MAX_VALUE_GEMS=8; MAX_WILD_CARDS=5
+MAX_BANKERS=3; MAX_VALUE_GEMS=7; MAX_WILD_CARDS=10
 TARGET_MIN=10; TARGET_MAX=15
 ODDS_KEYS_MAP = {
     "Home Win":"hw","Away Win":"aw","Draw":"d","Over 1.5":"o15",
@@ -936,6 +936,80 @@ def passes_publish_gate(candidate):
             return False
     return True
 
+def _market_history_is_bad(profile_data):
+    count = int(profile_data.get("count") or 0)
+    if count < algo_min_market_sample():
+        return False
+    return (
+        float(profile_data.get("roi_flat") or 0) < 0
+        or float(profile_data.get("hit_rate") or 0) < 50
+    )
+
+def _has_severe_risk(candidate):
+    flags = set(candidate.get("risk_flags") or [])
+    return bool(flags & {"no_real_odds", "negative_market_roi", "low_market_hit_rate", "thin_edge"})
+
+def _form_games(candidate):
+    home_games = int((candidate.get("home_recent_form") or {}).get("games") or 0)
+    away_games = int((candidate.get("away_recent_form") or {}).get("games") or 0)
+    return min(home_games, away_games)
+
+def _banker_quality(candidate):
+    if not candidate.get("proven"):
+        return False
+    if not candidate.get("odds_is_real"):
+        return False
+    if candidate.get("conf", 0) < BANKER_MIN:
+        return False
+    if not (1.25 <= candidate.get("odds", 0) <= 1.85):
+        return False
+    if (candidate.get("ev") or 0) < max(algo_min_ev(), 0.03):
+        return False
+    if _has_severe_risk(candidate):
+        return False
+    if _market_history_is_bad(candidate.get("market_profile") or {}):
+        return False
+    if _form_games(candidate) < 5:
+        return False
+    return True
+
+def _value_gem_quality(candidate):
+    if not candidate.get("odds_is_real"):
+        return False
+    if candidate.get("conf", 0) < VALUE_MIN:
+        return False
+    if not (1.35 <= candidate.get("odds", 0) <= 3.50):
+        return False
+    if (candidate.get("ev") or 0) < max(algo_min_ev(), 0.04):
+        return False
+    if _has_severe_risk(candidate):
+        return False
+    if _market_history_is_bad(candidate.get("market_profile") or {}):
+        return False
+    return True
+
+def _wild_profile(candidate):
+    if not candidate.get("odds_is_real"):
+        return ""
+    if _has_severe_risk(candidate):
+        return ""
+    ev = candidate.get("ev") or 0
+    conf = candidate.get("conf", 0)
+    odds = candidate.get("odds", 0)
+    if conf >= 68 and odds <= 2.20 and ev >= algo_min_ev():
+        return "lean"
+    if conf >= WILD_MIN and odds >= 2.00 and ev >= max(algo_min_ev(), 0.03):
+        return "high_upside"
+    return ""
+
+def _tag_profile(candidate, profile_name):
+    flags = list(candidate.get("risk_flags") or [])
+    flags = [flag for flag in flags if not str(flag).startswith("profile:")]
+    flags.append(f"profile:{profile_name}")
+    candidate["risk_flags"] = flags
+    candidate["selection_profile"] = profile_name
+    return candidate
+
 def recent_form_summary(form):
     games = max(form.get("games", 0), 1)
     return {
@@ -969,8 +1043,13 @@ def pick_reasoning(pick):
 def pick_verdict(pick):
     tier = pick.get("tier") or "pick"
     flags = pick.get("risk_flags") or []
+    profile_name = pick.get("selection_profile", "")
     if "negative_market_roi" in flags or "low_market_hit_rate" in flags:
         return f"{tier.replace('_', ' ').title()} passed today, but historical market risk is flagged."
+    if tier == "wild_card" and profile_name == "lean":
+        return "Wild Card marked as a lean: extra playable volume with moderate risk."
+    if tier == "wild_card" and profile_name == "high_upside":
+        return "Wild Card selected for controlled upside at bigger odds."
     if pick.get("proven"):
         return f"{tier.replace('_', ' ').title()} backed by a proven market profile."
     return f"{tier.replace('_', ' ').title()} selected for positive value and confidence."
@@ -1009,33 +1088,44 @@ def select_picks(all_confs, scored_fxs, odds_list):
             if passes_publish_gate(candidate):
                 pool.append(candidate)
 
-    # ── BANKERS: up to MAX_BANKERS, one per fixture, proven markets ──
-    banker_cands = sorted([p for p in pool if p["proven"] and p["conf"]>=BANKER_MIN and 1.25<=p["odds"]<=3.50],
-                          key=lambda x:(x["conf"],x["ev"] or 0,x["odds_is_real"]),reverse=True)
+    # ── BANKERS: reliability first — proven, real-priced, low-volatility markets ──
+    banker_cands = sorted(
+        [_tag_profile(p, "reliability") for p in pool if _banker_quality(p)],
+        key=lambda x:(x["conf"],x["ev"] or 0,-x["odds"]),
+        reverse=True,
+    )
     bankers=[]; used_b=set()
     for p in banker_cands:
         if p["fixture"] not in used_b:
             bankers.append(p); used_b.add(p["fixture"])
         if len(bankers)>=MAX_BANKERS: break
 
-    # ── VALUE GEMS: up to MAX_VALUE_GEMS, one per fixture, EV-ranked ──
-    value_cands = sorted([p for p in pool if (
-                              p["conf"] >= VALUE_MIN
-                              or (p["market"].startswith("Corners ") and p["conf"] >= market_threshold(p["market"]))
-                          ) and (p["ev"] or 0)>0
-                          and 1.35<=p["odds"]<=3.50 and p["fixture"] not in used_b],
-                         key=lambda x:(x["ev"] or 0,x["conf"],x["odds_is_real"]),reverse=True)
+    # ── VALUE GEMS: mispricing first — strong EV while keeping reliability filters ──
+    value_cands = sorted(
+        [_tag_profile(p, "mispriced_value") for p in pool if _value_gem_quality(p) and p["fixture"] not in used_b],
+        key=lambda x:(x["ev"] or 0,x["conf"],x["odds"]),
+        reverse=True,
+    )
     seen_v=set(); value_gems=[]
     for p in value_cands:
         if p["fixture"] not in seen_v:
             seen_v.add(p["fixture"]); value_gems.append(p)
         if len(value_gems)>=MAX_VALUE_GEMS: break
 
-    # ── WILD CARDS: up to MAX_WILD_CARDS, higher-odds speculative picks ──
+    # ── WILD CARDS: volume bucket. Internally split into lean vs high-upside profiles ──
     used_all = used_b | seen_v
-    wild_cands = sorted([p for p in pool if WILD_MIN<=p["conf"]<VALUE_MIN
-                         and p["odds"]>=2.00 and (p["ev"] or 0)>0 and p["fixture"] not in used_all],
-                        key=lambda x:(x["ev"] or 0,x["conf"],x["odds_is_real"]),reverse=True)
+    wild_pool = []
+    for p in pool:
+        if p["fixture"] in used_all:
+            continue
+        profile_name = _wild_profile(p)
+        if profile_name:
+            wild_pool.append(_tag_profile(p, profile_name))
+    wild_cands = sorted(
+        wild_pool,
+        key=lambda x:(x.get("selection_profile") == "lean", x["conf"], x["ev"] or 0, -x["odds"]),
+        reverse=True,
+    )
     seen_w=set(); wild_cards=[]
     for p in wild_cands:
         if p["fixture"] not in seen_w:

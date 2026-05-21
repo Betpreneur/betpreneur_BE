@@ -211,6 +211,13 @@ def _stats_for_picks(picks):
     return finalize_stats(stats)
 
 
+def _selection_profile_from_flags(flags):
+    for flag in flags or []:
+        if str(flag).startswith("profile:"):
+            return str(flag).split(":", 1)[1]
+    return ""
+
+
 def _pick_performance_slices(pick, days=PICK_DETAIL_HISTORY_DAYS):
     history = [
         item
@@ -247,6 +254,7 @@ def _pick_detail_payload(pick, request=None):
     run_picks = list(pick.run.picks.all().order_by("-confidence", "-ev", "kickoff", "id"))
     rank_on_day = next((index + 1 for index, item in enumerate(run_picks) if item.id == pick.id), None)
     pick_data = PickSerializer(pick, context={"request": request}).data
+    selection_profile = _selection_profile_from_flags(pick.risk_flags)
 
     return {
         "date": pick.match_date or pick.run.target_date,
@@ -276,6 +284,8 @@ def _pick_detail_payload(pick, request=None):
             "total_picks_on_day": len(run_picks),
             "is_top_pick": rank_on_day == 1,
             "tier": pick.tier,
+            "selection_profile": selection_profile,
+            "risk_level": pick_data.get("risk_level", ""),
             "confidence_band": confidence_band(pick.confidence),
             "odds_band": odds_band(pick.odds),
             "confidence": pick.confidence,
