@@ -130,10 +130,14 @@ def fuzzy(a, b, n=4):
     a, b = normalize(a), normalize(b)
     return a[:n] in b or b[:n] in a
 
+def api_sports_key():
+    return os.environ.get("APS_KEY") or os.environ.get("API_SPORTS_KEY") or APS_KEY
+
 def aps_get(path, params=None, timeout=20):
-    if not APS_KEY:
+    aps_key = api_sports_key()
+    if not aps_key:
         raise RuntimeError("APS_KEY is not configured")
-    headers = {"x-apisports-key": APS_KEY}
+    headers = {"x-apisports-key": aps_key}
     response = requests.get(f"{APS_BASE}{path}", headers=headers, params=params or {}, timeout=timeout)
     if response.status_code != 200:
         log.warning("API-Football %s failed: %s %s", path, response.status_code, response.text[:300])
@@ -599,26 +603,33 @@ def get_api_football_odds(fixture_id):
     for item in response:
         for bookmaker in item.get("bookmakers", []) or []:
             for bet in bookmaker.get("bets", []) or []:
+                bet_id = bet.get("id")
                 bet_name = normalize(bet.get("name", ""))
                 for value in bet.get("values", []) or []:
                     label = normalize(value.get("value", ""))
                     odd = value.get("odd")
 
-                    if "corner" in bet_name and ("over under" in bet_name or "over/under" in bet_name):
+                    if bet_id == 45 or ("corner" in bet_name and ("over under" in bet_name or "over/under" in bet_name)):
                         over_line = _parse_line(label, "over ")
                         under_line = _parse_line(label, "under ")
                         if over_line is not None:
                             _remember_odd(odds, f"Corners Over {over_line:g}", odd)
                         elif under_line is not None:
                             _remember_odd(odds, f"Corners Under {under_line:g}", odd)
-                    elif bet_name in ("match winner", "fulltime result", "1x2"):
+                    elif bet_id == 1 or bet_name in ("match winner", "fulltime result", "1x2"):
                         if label in ("home", "1"):
                             _remember_odd(odds, "hw", odd)
                         elif label in ("away", "2"):
                             _remember_odd(odds, "aw", odd)
                         elif label in ("draw", "x"):
                             _remember_odd(odds, "d", odd)
-                    elif "goals over/under" in bet_name or "over/under" in bet_name:
+                    elif bet_id == 5 or (
+                        ("goals over/under" in bet_name or bet_name == "goal line")
+                        and "first half" not in bet_name
+                        and "1st half" not in bet_name
+                        and "second half" not in bet_name
+                        and "2nd half" not in bet_name
+                    ):
                         if "over 1.5" in label:
                             _remember_odd(odds, "o15", odd)
                         elif "under 1.5" in label:
@@ -631,12 +642,12 @@ def get_api_football_odds(fixture_id):
                             _remember_odd(odds, "o35", odd)
                         elif "under 3.5" in label:
                             _remember_odd(odds, "u35", odd)
-                    elif "both teams score" in bet_name:
+                    elif bet_id == 8 or bet_name in ("both teams score", "both teams to score"):
                         if label == "yes":
                             _remember_odd(odds, "btts_yes", odd)
                         elif label == "no":
                             _remember_odd(odds, "btts_no", odd)
-                    elif "double chance" in bet_name:
+                    elif bet_id == 12 or bet_name == "double chance":
                         if label in ("home/draw", "1x"):
                             _remember_odd(odds, "1x", odd)
                         elif label in ("draw/away", "x2"):
@@ -681,6 +692,9 @@ def algo_max_daily_picks():
 
 def require_real_odds():
     return _env_bool("ALGO_REQUIRE_REAL_ODDS", False)
+
+def allow_estimated_picks():
+    return _env_bool("ALGO_ALLOW_ESTIMATED_PICKS", False)
 
 def load_performance_profile():
     raw = os.environ.get("ALGO_PERFORMANCE_PROFILE", "")
@@ -733,6 +747,8 @@ def candidate_risk_flags(raw_conf, conf, market, odds, odds_is_real, ev, profile
 
     if not odds_is_real:
         flags.append("estimated_odds")
+        if not allow_estimated_picks():
+            flags.append("no_real_odds")
     if count < algo_min_market_sample():
         flags.append("limited_market_history")
     elif roi_flat < 0:
@@ -754,7 +770,7 @@ def market_threshold(market):
     return MARKET_THRESHOLDS.get(market, WILD_MIN)
 
 def passes_publish_gate(candidate):
-    if require_real_odds() and not candidate["odds_is_real"]:
+    if (require_real_odds() or not allow_estimated_picks()) and not candidate["odds_is_real"]:
         return False
     if candidate["conf"] < WILD_MIN:
         return False
@@ -788,17 +804,18 @@ def recent_form_summary(form):
 
 def pick_reasoning(pick):
     edge_note = "real market odds" if pick.get("odds_is_real") else "estimated odds"
+    ev_text = f"{pick.get('ev'):+.3f} expected value" if pick.get("ev") is not None else "unpriced expected value"
     if pick.get("market", "").startswith("Corners "):
         profile = pick.get("corner_profile") or {}
         return (
             f"{pick.get('market')} rates at {pick.get('conf')}% confidence with "
-            f"{pick.get('odds')} odds and {pick.get('ev'):+.3f} expected value. "
+            f"{pick.get('odds')} odds and {ev_text}. "
             f"The corner model projects about {profile.get('expected_total', 'unknown')} total corners "
             f"from recent team corner trends using {edge_note}."
         )
     return (
         f"{pick.get('market')} rates at {pick.get('conf')}% confidence with "
-        f"{pick.get('odds')} odds and {pick.get('ev'):+.3f} expected value. "
+        f"{pick.get('odds')} odds and {ev_text}. "
         f"The model prefers this market from the available fixture markets using {edge_note}."
     )
 
@@ -822,7 +839,7 @@ def select_picks(all_confs, scored_fxs, odds_list):
             profile_data = market_profile(profile, market, fx.get("league"))
             calibrated_conf = calibrate_confidence(conf, profile_data)
             odds = real_odd or est_odds(calibrated_conf)
-            ev = round((calibrated_conf/100)*odds-1,3)
+            ev = round((calibrated_conf/100)*odds-1,3) if odds_is_real else None
             candidate = {
                 "fixture":fx["fixture"],"league":fx["league"],
                 "code":fx.get("code","?"),"kickoff":fx["kickoff"],
@@ -847,7 +864,7 @@ def select_picks(all_confs, scored_fxs, odds_list):
 
     # ── BANKERS: up to MAX_BANKERS, one per fixture, proven markets ──
     banker_cands = sorted([p for p in pool if p["proven"] and p["conf"]>=BANKER_MIN and 1.25<=p["odds"]<=3.50],
-                          key=lambda x:(x["conf"],x["ev"],x["odds_is_real"]),reverse=True)
+                          key=lambda x:(x["conf"],x["ev"] or 0,x["odds_is_real"]),reverse=True)
     bankers=[]; used_b=set()
     for p in banker_cands:
         if p["fixture"] not in used_b:
@@ -858,9 +875,9 @@ def select_picks(all_confs, scored_fxs, odds_list):
     value_cands = sorted([p for p in pool if (
                               p["conf"] >= VALUE_MIN
                               or (p["market"].startswith("Corners ") and p["conf"] >= market_threshold(p["market"]))
-                          ) and p["ev"]>0
+                          ) and (p["ev"] or 0)>0
                           and 1.35<=p["odds"]<=3.50 and p["fixture"] not in used_b],
-                         key=lambda x:(x["ev"],x["conf"],x["odds_is_real"]),reverse=True)
+                         key=lambda x:(x["ev"] or 0,x["conf"],x["odds_is_real"]),reverse=True)
     seen_v=set(); value_gems=[]
     for p in value_cands:
         if p["fixture"] not in seen_v:
@@ -870,8 +887,8 @@ def select_picks(all_confs, scored_fxs, odds_list):
     # ── WILD CARDS: up to MAX_WILD_CARDS, higher-odds speculative picks ──
     used_all = used_b | seen_v
     wild_cands = sorted([p for p in pool if WILD_MIN<=p["conf"]<VALUE_MIN
-                         and p["odds"]>=2.00 and p["ev"]>0 and p["fixture"] not in used_all],
-                        key=lambda x:(x["ev"],x["conf"],x["odds_is_real"]),reverse=True)
+                         and p["odds"]>=2.00 and (p["ev"] or 0)>0 and p["fixture"] not in used_all],
+                        key=lambda x:(x["ev"] or 0,x["conf"],x["odds_is_real"]),reverse=True)
     seen_w=set(); wild_cards=[]
     for p in wild_cands:
         if p["fixture"] not in seen_w:
@@ -881,7 +898,7 @@ def select_picks(all_confs, scored_fxs, odds_list):
     max_daily = max(1, algo_max_daily_picks())
     selected = bankers + value_gems + wild_cards
     if len(selected) > max_daily:
-        keep = set(id(p) for p in sorted(selected, key=lambda x: (x["conf"], x["ev"]), reverse=True)[:max_daily])
+        keep = set(id(p) for p in sorted(selected, key=lambda x: (x["conf"], x["ev"] or 0), reverse=True)[:max_daily])
         bankers = [p for p in bankers if id(p) in keep]
         value_gems = [p for p in value_gems if id(p) in keep]
         wild_cards = [p for p in wild_cards if id(p) in keep]
@@ -922,7 +939,7 @@ def record_to_sheets(sheets, bankers, value_gems, wild_cards, target_date, bankr
         src = "FD" if pick.get("source")=="fd" else "APS"
         rows.append([target_date,pick["fixture"],pick["league"],pick["kickoff"],
                      tier_label,pick["market"],pick["meaning"],
-                     f"{pick['conf']}%",pick["odds"],f"{pick['ev']:+.3f}",
+                     f"{pick['conf']}%",pick["odds"],f"{pick['ev']:+.3f}" if pick.get("ev") is not None else "",
                      stake,remaining,"PENDING","","","","",src])
     ws.append_rows(rows)
     log.info(f"Recorded {len(rows)} picks")
@@ -971,8 +988,8 @@ def serialize_fixture_markets(confs, real_odds=None, league=None):
         profile_data = market_profile(profile, market, league)
         calibrated_confidence = calibrate_confidence(confidence, profile_data)
         odds = real_odd or est_odds(calibrated_confidence)
-        ev = round((calibrated_confidence / 100) * odds - 1, 3)
         odds_is_real = bool(real_odd)
+        ev = round((calibrated_confidence / 100) * odds - 1, 3) if odds_is_real else None
         markets.append({
             "market": market,
             "meaning": market_meaning(market),
@@ -1143,7 +1160,8 @@ def generate_and_upload_pdf(drive, bankers, value_gems, wild_cards,
         stake = round(max(100, bankroll * pct / 100), 2)
         src_tag = pick.get("source","?").upper()
         ev_val  = pick.get("ev", 0)
-        ev_col  = "#00b894" if ev_val >= 0 else "#dc2626"
+        ev_col  = "#00b894" if (ev_val or 0) >= 0 else "#dc2626"
+        ev_label = f"{ev_val:+.3f}" if ev_val is not None else "N/A"
 
         # Header row
         hdr_row = [[
@@ -1161,7 +1179,7 @@ def generate_and_upload_pdf(drive, bankers, value_gems, wild_cards,
             Paragraph(
                 f"Confidence: <b>{pick['conf']}%</b>  |  "
                 f"Odds: <b>{pick['odds']}</b>  |  "
-                f"EV: <font color='{ev_col}'><b>{ev_val:+.3f}</b></font>",
+                f"EV: <font color='{ev_col}'><b>{ev_label}</b></font>",
                 sCardBd),
             Paragraph(f"Stake: <b>N{stake:,.0f}</b>  ({pct}% bankroll)", sCardBd),
         ]]
@@ -1435,7 +1453,7 @@ def generate_and_upload_pdf(drive, bankers, value_gems, wild_cards,
                     p["market"],
                     f"{p['conf']}%",
                     str(p["odds"]),
-                    f"{p.get('ev',0):+.3f}",
+                    f"{p.get('ev'):+.3f}" if p.get("ev") is not None else "",
                     f"N{stake:,.0f}",
                 ])
         srows.append(["", "", "", "", "", "", "TOTAL EXPOSURE", f"N{total_stake:,.0f}"])
