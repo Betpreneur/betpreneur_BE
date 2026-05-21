@@ -73,6 +73,11 @@ DATABASES = {
     }
 }
 
+if DATABASES["default"]["ENGINE"] == "django.db.backends.postgresql":
+    DATABASES["default"]["OPTIONS"] = {
+        "connect_timeout": config("DB_CONNECT_TIMEOUT", default=10, cast=int),
+    }
+
 AUTH_USER_MODEL = "accounts.User"
 
 AUTH_PASSWORD_VALIDATORS = [
