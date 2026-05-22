@@ -10,8 +10,10 @@ services:
   # ------------------------------
   db:
     image: postgres:16-alpine
-    container_name: betpreneur_db
     restart: unless-stopped
+    profiles:
+      - local-db
+      - dev
     environment:
       POSTGRES_DB: ${DB_NAME:-postgres}
       POSTGRES_USER: ${DB_USER:-postgres}
@@ -35,10 +37,7 @@ services:
       context: .
       dockerfile: Dockerfile
       target: production
-    container_name: betpreneur_backend
     restart: unless-stopped
-    ports:
-      - "${BACKEND_HOST_PORT:-18000}:8000"
     expose:
       - "8000"
     environment:
@@ -48,6 +47,9 @@ services:
       DJANGO_ALLOWED_HOSTS: ${DJANGO_ALLOWED_HOSTS:-backend.betpreneur.ng,localhost,127.0.0.1}
       DJANGO_SETTINGS_MODULE: config.settings
       CSRF_TRUSTED_ORIGINS: ${CSRF_TRUSTED_ORIGINS:-}
+      WEB_CONCURRENCY: ${WEB_CONCURRENCY:-2}
+      WEB_THREADS: ${WEB_THREADS:-2}
+      GUNICORN_TIMEOUT: ${GUNICORN_TIMEOUT:-120}
 
       # Database
       DB_ENGINE: django.db.backends.postgresql
@@ -103,17 +105,14 @@ services:
       ALGO_CORNER_MIN_PROFILE_GAMES: ${ALGO_CORNER_MIN_PROFILE_GAMES:-6}
     env_file:
       - .env
-    depends_on:
-      db:
-        condition: service_healthy
     volumes:
       - ./media:/home/appuser/media
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/api/health/"]
-      interval: 30s
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/api/health/"]
+      interval: 20s
       timeout: 10s
-      retries: 3
-      start_period: 40s
+      retries: 6
+      start_period: 90s
     networks:
       - betpreneur_network
 
@@ -125,7 +124,6 @@ services:
       context: .
       dockerfile: Dockerfile
       target: production
-    container_name: betpreneur_celery_worker
     restart: unless-stopped
     command: celery -A config worker --loglevel=info --concurrency=${CELERY_WORKER_CONCURRENCY:-2}
     environment:
@@ -164,9 +162,6 @@ services:
       TZ: ${TZ:-Africa/Lagos}
     env_file:
       - .env
-    depends_on:
-      db:
-        condition: service_healthy
     volumes:
       - ./media:/home/appuser/media
     networks:
@@ -180,7 +175,6 @@ services:
       context: .
       dockerfile: Dockerfile
       target: production
-    container_name: betpreneur_celery_beat
     restart: unless-stopped
     command: celery -A config beat --loglevel=info --schedule=/tmp/celerybeat-schedule
     environment:
@@ -220,9 +214,6 @@ services:
       TZ: ${TZ:-Africa/Lagos}
     env_file:
       - .env
-    depends_on:
-      db:
-        condition: service_healthy
     networks:
       - betpreneur_network
 
@@ -251,7 +242,6 @@ services:
   # ------------------------------
   adminer:
     image: adminer:4.8.1
-    container_name: betpreneur_adminer
     restart: unless-stopped
     ports:
       - "8080:8080"
