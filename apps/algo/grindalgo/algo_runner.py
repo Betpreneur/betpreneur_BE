@@ -978,7 +978,11 @@ def _value_gem_quality(candidate):
         return False
     if candidate.get("conf", 0) < VALUE_MIN:
         return False
-    if not (1.35 <= candidate.get("odds", 0) <= 3.50):
+    odds = candidate.get("odds", 0)
+    conf = candidate.get("conf", 0)
+    short_odds_value = conf >= 78 and 1.25 <= odds < 1.35
+    standard_value = 1.35 <= odds <= 3.50
+    if not (short_odds_value or standard_value):
         return False
     if (candidate.get("ev") or 0) < max(algo_min_ev(), 0.04):
         return False
@@ -996,9 +1000,9 @@ def _wild_profile(candidate):
     ev = candidate.get("ev") or 0
     conf = candidate.get("conf", 0)
     odds = candidate.get("odds", 0)
-    if conf >= 68 and odds <= 2.20 and ev >= algo_min_ev():
+    if WILD_MIN <= conf < VALUE_MIN and odds <= 2.20 and ev >= algo_min_ev():
         return "lean"
-    if conf >= WILD_MIN and odds >= 2.00 and ev >= max(algo_min_ev(), 0.03):
+    if WILD_MIN <= conf < VALUE_MIN and odds >= 2.00 and ev >= max(algo_min_ev(), 0.03):
         return "high_upside"
     return ""
 

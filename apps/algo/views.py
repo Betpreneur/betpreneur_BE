@@ -45,6 +45,11 @@ from .tasks import generate_daily_picks, run_monthly_auditor, settle_daily_resul
 
 SETTLED_PICK_STATUSES = [Pick.Status.WIN, Pick.Status.LOSS, Pick.Status.VOID]
 PICK_DETAIL_HISTORY_DAYS = 90
+PICK_TIER_RANK = {
+    Pick.Tier.BANKER: 3,
+    Pick.Tier.VALUE_GEM: 2,
+    Pick.Tier.WILD_CARD: 1,
+}
 
 
 def _performance_summary(queryset, window_days):
@@ -139,6 +144,15 @@ def _latest_successful_run(target_date):
         .prefetch_related("picks")
         .order_by("-created_at")
         .first()
+    )
+
+
+def _top_pick_sort_key(pick):
+    return (
+        PICK_TIER_RANK.get(pick.tier, 0),
+        pick.confidence or 0,
+        float(pick.ev or 0),
+        float(pick.odds or 0),
     )
 
 
@@ -601,7 +615,8 @@ class TopPickView(APIView):
         algo_run = _latest_successful_run(target_date)
         pick = None
         if algo_run:
-            pick = algo_run.picks.order_by("-confidence", "-ev").first()
+            picks = list(algo_run.picks.all())
+            pick = max(picks, key=_top_pick_sort_key) if picks else None
         pick_data = PickSerializer(pick).data if pick else None
         if pick_data:
             pick_data["backed_by_me"] = PickBack.objects.filter(pick=pick, user=request.user).exists()
