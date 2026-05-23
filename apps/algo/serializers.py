@@ -4,6 +4,8 @@ from .models import AlgoRun, Pick, PickBack
 
 
 class PickSerializer(serializers.ModelSerializer):
+    tier = serializers.SerializerMethodField()
+    model_verdict = serializers.SerializerMethodField()
     backed_count = serializers.SerializerMethodField()
     backed_by_me = serializers.SerializerMethodField()
     selection_profile = serializers.SerializerMethodField()
@@ -54,20 +56,38 @@ class PickSerializer(serializers.ModelSerializer):
             return False
         return obj.backs.filter(user=request.user).exists()
 
+    def get_tier(self, obj) -> str:
+        if obj.tier != Pick.Tier.WILD_CARD:
+            return obj.tier
+        try:
+            odds = float(obj.odds or 0)
+        except (TypeError, ValueError):
+            odds = 0
+        confidence = obj.confidence or 0
+        if 60 <= confidence < 70 and odds > 2.0:
+            return obj.tier
+        return Pick.Tier.VALUE_GEM
+
     def get_selection_profile(self, obj) -> str:
+        if obj.tier == Pick.Tier.WILD_CARD and self.get_tier(obj) != Pick.Tier.WILD_CARD:
+            return "mispriced_value"
         for flag in obj.risk_flags or []:
             if str(flag).startswith("profile:"):
                 return str(flag).split(":", 1)[1]
         return ""
 
+    def get_model_verdict(self, obj) -> str:
+        if obj.tier == Pick.Tier.WILD_CARD and self.get_tier(obj) != Pick.Tier.WILD_CARD:
+            return "Value Gem selected for positive value and confidence."
+        return obj.model_verdict
+
     def get_risk_level(self, obj) -> str:
         profile = self.get_selection_profile(obj)
-        if obj.tier == Pick.Tier.BANKER:
+        tier = self.get_tier(obj)
+        if tier == Pick.Tier.BANKER:
             return "low"
-        if obj.tier == Pick.Tier.VALUE_GEM:
+        if tier == Pick.Tier.VALUE_GEM:
             return "medium"
-        if profile == "lean":
-            return "moderate"
         if profile == "high_upside":
             return "high"
         return "medium"

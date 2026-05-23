@@ -776,7 +776,7 @@ MARKET_THRESHOLDS = {
     "Home CS":65,"Away CS":72,"AH Home +0.5":58,"AH Away +0.5":78,
     "First to Score H":55,"First to Score A":85,
 }
-MIN_ODDS=1.25; BANKER_MIN=76; VALUE_MIN=70; WILD_MIN=65
+MIN_ODDS=1.25; BANKER_MIN=76; VALUE_MIN=70; WILD_MIN=60
 # Scale targets: aim for 10–15 picks on a busy fixture day
 MAX_BANKERS=3; MAX_VALUE_GEMS=7; MAX_WILD_CARDS=10
 TARGET_MIN=10; TARGET_MAX=15
@@ -1000,9 +1000,7 @@ def _wild_profile(candidate):
     ev = candidate.get("ev") or 0
     conf = candidate.get("conf", 0)
     odds = candidate.get("odds", 0)
-    if WILD_MIN <= conf < VALUE_MIN and odds <= 2.20 and ev >= algo_min_ev():
-        return "lean"
-    if WILD_MIN <= conf < VALUE_MIN and odds >= 2.00 and ev >= max(algo_min_ev(), 0.03):
+    if WILD_MIN <= conf < VALUE_MIN and odds > 2.00 and ev >= max(algo_min_ev(), 0.03):
         return "high_upside"
     return ""
 
@@ -1266,6 +1264,8 @@ def serialize_fixture_summaries(scored_fxs, all_confs, odds_list=None):
             "league": fx.get("league", ""),
             "kickoff": fx.get("kickoff", ""),
             "match_id": str(fx.get("match_id") or ""),
+            "home_recent_form": fx.get("home_recent_form", {}),
+            "away_recent_form": fx.get("away_recent_form", {}),
             "market_count": len(confs),
             "markets_70_plus": sum(1 for value in confs.values() if value >= 70),
             "markets_65_plus": sum(1 for value in confs.values() if value >= 65),

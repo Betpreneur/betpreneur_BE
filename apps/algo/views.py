@@ -1,5 +1,6 @@
 from datetime import timedelta
 import csv
+import logging
 
 from celery.result import AsyncResult
 from django.http import HttpResponse
@@ -43,6 +44,7 @@ from .serializers import (
 from .tasks import generate_daily_picks, run_monthly_auditor, settle_daily_results
 
 
+log = logging.getLogger(__name__)
 SETTLED_PICK_STATUSES = [Pick.Status.WIN, Pick.Status.LOSS, Pick.Status.VOID]
 PICK_DETAIL_HISTORY_DAYS = 90
 PICK_TIER_RANK = {
@@ -50,6 +52,20 @@ PICK_TIER_RANK = {
     Pick.Tier.VALUE_GEM: 2,
     Pick.Tier.WILD_CARD: 1,
 }
+
+
+def _is_valid_wild_card(pick):
+    try:
+        odds = float(pick.odds or 0)
+    except (TypeError, ValueError):
+        odds = 0
+    return 60 <= (pick.confidence or 0) < 70 and odds > 2.0
+
+
+def _effective_pick_tier(pick):
+    if pick.tier == Pick.Tier.WILD_CARD and not _is_valid_wild_card(pick):
+        return Pick.Tier.VALUE_GEM
+    return pick.tier
 
 
 def _performance_summary(queryset, window_days):
@@ -149,7 +165,7 @@ def _latest_successful_run(target_date):
 
 def _top_pick_sort_key(pick):
     return (
-        PICK_TIER_RANK.get(pick.tier, 0),
+        PICK_TIER_RANK.get(_effective_pick_tier(pick), 0),
         pick.confidence or 0,
         float(pick.ev or 0),
         float(pick.odds or 0),
@@ -225,11 +241,58 @@ def _stats_for_picks(picks):
     return finalize_stats(stats)
 
 
-def _selection_profile_from_flags(flags):
-    for flag in flags or []:
-        if str(flag).startswith("profile:"):
-            return str(flag).split(":", 1)[1]
-    return ""
+def _form_has_games(form):
+    return int((form or {}).get("games") or 0) > 0
+
+
+def _fresh_recent_forms_for_pick(pick, fixture_summary=None):
+    fixture_summary = fixture_summary or {}
+    home_form = pick.home_recent_form or fixture_summary.get("home_recent_form") or {}
+    away_form = pick.away_recent_form or fixture_summary.get("away_recent_form") or {}
+
+    if not _form_has_games(home_form):
+        home_form = fixture_summary.get("home_recent_form") or home_form
+    if not _form_has_games(away_form):
+        away_form = fixture_summary.get("away_recent_form") or away_form
+
+    needs_home = not _form_has_games(home_form)
+    needs_away = not _form_has_games(away_form)
+    if (needs_home or needs_away) and pick.match_id:
+        try:
+            from .grindalgo.algo_runner import (
+                aps_get,
+                fetch_team_recent_form,
+                recent_form_summary,
+            )
+
+            matches = aps_get("/fixtures", {"id": pick.match_id}, timeout=12)
+            match = matches[0] if matches else {}
+            teams = match.get("teams", {}) or {}
+            home_id = (teams.get("home") or {}).get("id")
+            away_id = (teams.get("away") or {}).get("id")
+            if needs_home and home_id:
+                fresh = fetch_team_recent_form(home_id)
+                if fresh:
+                    home_form = recent_form_summary(fresh)
+            if needs_away and away_id:
+                fresh = fetch_team_recent_form(away_id)
+                if fresh:
+                    away_form = recent_form_summary(fresh)
+        except Exception as exc:
+            log.warning("Could not refresh recent form for pick %s: %s", pick.id, exc)
+
+    update_fields = []
+    if _form_has_games(home_form) and home_form != pick.home_recent_form:
+        pick.home_recent_form = home_form
+        update_fields.append("home_recent_form")
+    if _form_has_games(away_form) and away_form != pick.away_recent_form:
+        pick.away_recent_form = away_form
+        update_fields.append("away_recent_form")
+    if update_fields:
+        Pick.objects.filter(id=pick.id).update(
+            **{field: getattr(pick, field) for field in update_fields}
+        )
+    return home_form, away_form
 
 
 def _pick_performance_slices(pick, days=PICK_DETAIL_HISTORY_DAYS):
@@ -265,10 +328,12 @@ def _pick_performance_slices(pick, days=PICK_DETAIL_HISTORY_DAYS):
 def _pick_detail_payload(pick, request=None):
     fixture_summary = _fixture_summary_for_pick(pick)
     selected_market, alternatives = _markets_for_pick_detail(pick, fixture_summary)
-    run_picks = list(pick.run.picks.all().order_by("-confidence", "-ev", "kickoff", "id"))
+    home_form, away_form = _fresh_recent_forms_for_pick(pick, fixture_summary)
+    run_picks = sorted(list(pick.run.picks.all()), key=_top_pick_sort_key, reverse=True)
     rank_on_day = next((index + 1 for index, item in enumerate(run_picks) if item.id == pick.id), None)
     pick_data = PickSerializer(pick, context={"request": request}).data
-    selection_profile = _selection_profile_from_flags(pick.risk_flags)
+    effective_tier = _effective_pick_tier(pick)
+    selected_market["selected_tier"] = effective_tier
 
     return {
         "date": pick.match_date or pick.run.target_date,
@@ -297,8 +362,8 @@ def _pick_detail_payload(pick, request=None):
             "rank_on_day": rank_on_day,
             "total_picks_on_day": len(run_picks),
             "is_top_pick": rank_on_day == 1,
-            "tier": pick.tier,
-            "selection_profile": selection_profile,
+            "tier": effective_tier,
+            "selection_profile": pick_data.get("selection_profile", ""),
             "risk_level": pick_data.get("risk_level", ""),
             "confidence_band": confidence_band(pick.confidence),
             "odds_band": odds_band(pick.odds),
@@ -311,10 +376,10 @@ def _pick_detail_payload(pick, request=None):
         "model_summary": {
             "meaning": pick.meaning,
             "reasoning": pick.reasoning,
-            "model_verdict": pick.model_verdict,
+            "model_verdict": pick_data.get("model_verdict", pick.model_verdict),
             "risk_flags": pick.risk_flags,
-            "home_recent_form": pick.home_recent_form,
-            "away_recent_form": pick.away_recent_form,
+            "home_recent_form": home_form,
+            "away_recent_form": away_form,
         },
         "performance": _pick_performance_slices(pick),
     }
@@ -342,7 +407,7 @@ def _daily_picks_payload(target_date, request=None):
             "fixtures": [],
         }
 
-    picks = list(algo_run.picks.all().order_by("kickoff", "-confidence", "-ev"))
+    picks = sorted(list(algo_run.picks.all()), key=_top_pick_sort_key, reverse=True)
     backed_ids = set()
     if request and request.user.is_authenticated:
         backed_ids = set(
@@ -397,7 +462,7 @@ def _daily_picks_payload(target_date, request=None):
             if market.get("market") == pick.market:
                 market["selected"] = True
                 market["selected_pick_id"] = pick.id
-                market["selected_tier"] = pick.tier
+                market["selected_tier"] = data["tier"]
 
     for fixture in fixtures.values():
         for market in fixture["markets"]:
@@ -405,7 +470,13 @@ def _daily_picks_payload(target_date, request=None):
             market.setdefault("selected_pick_id", None)
             market.setdefault("selected_tier", "")
 
-    published_fixtures = [fixture for fixture in fixtures.values() if fixture["picks"]]
+    published_fixtures = sorted(
+        [fixture for fixture in fixtures.values() if fixture["picks"]],
+        key=lambda fixture: _top_pick_sort_key(
+            next(pick for pick in picks if str(pick.match_id) == str(fixture["match_id"]))
+        ),
+        reverse=True,
+    )
 
     return {
         "date": target_date,
@@ -603,7 +674,7 @@ class TopPickView(APIView):
 
     @extend_schema(
         summary="Top pick of the day",
-        description="Authenticated user endpoint. Returns the highest-confidence published pick for the requested matchday.",
+        description="Authenticated user endpoint. Returns the highest-ranked published pick for the requested matchday.",
         tags=["Picks"],
         parameters=[DailyPicksQuerySerializer],
         responses={200: TopPickResponseSerializer},
