@@ -23,15 +23,6 @@ services:
       GUNICORN_TIMEOUT: ${GUNICORN_TIMEOUT:-120}
     volumes:
       - media:/home/appuser/media
-    command: >
-      sh -c "python manage.py migrate --noinput &&
-             python manage.py collectstatic --noinput &&
-             gunicorn config.asgi:application
-             --bind 0.0.0.0:8000
-             --workers ${WEB_CONCURRENCY:-2}
-             --threads ${WEB_THREADS:-2}
-             --worker-class uvicorn.workers.UvicornWorker
-             --timeout ${GUNICORN_TIMEOUT:-120}"
     networks:
       - betpreneur_network
 
