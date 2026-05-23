@@ -477,6 +477,7 @@ def _daily_picks_payload(target_date, request=None):
         ),
         reverse=True,
     )
+    top_pick = picks[0] if picks else None
 
     return {
         "date": target_date,
@@ -493,6 +494,10 @@ def _daily_picks_payload(target_date, request=None):
             "fixture_count": len(published_fixtures),
             "market_count": (algo_run.result or {}).get("market_count", 0),
             "selected_pick_count": len(picks),
+            "top_pick_id": top_pick.id if top_pick else None,
+            "banker_count": sum(1 for pick in picks if _effective_pick_tier(pick) == Pick.Tier.BANKER),
+            "value_gem_count": sum(1 for pick in picks if _effective_pick_tier(pick) == Pick.Tier.VALUE_GEM),
+            "wild_card_count": sum(1 for pick in picks if _effective_pick_tier(pick) == Pick.Tier.WILD_CARD),
             "picks_70_plus": sum(1 for pick in picks if pick.confidence >= 70),
             "picks_65_plus": sum(1 for pick in picks if pick.confidence >= 65),
             "markets_70_plus": (algo_run.result or {}).get("markets_70_plus", 0),

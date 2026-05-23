@@ -14,6 +14,7 @@ import time
 import json
 import logging
 import requests
+import re
 import unicodedata
 from datetime import datetime, timedelta, timezone
 
@@ -1025,21 +1026,65 @@ def recent_form_summary(form):
         "streak": form.get("streak", 0),
     }
 
+def _percent(value):
+    try:
+        return f"{float(value):.1f}%"
+    except (TypeError, ValueError):
+        return "unknown"
+
+def _format_form_line(label, form):
+    form = form or {}
+    games = form.get("games") or 0
+    if not games:
+        return f"{label}: recent form unavailable"
+    return (
+        f"{label}: {form.get('wins', 0)} wins/{games}, "
+        f"{form.get('avg_scored', 0)} scored and {form.get('avg_conceded', 0)} conceded per match, "
+        f"BTTS {_percent(form.get('btts_rate'))}, over 2.5 {_percent(form.get('over25_rate'))}, "
+        f"{form.get('clean_sheets', 0)} clean sheets"
+    )
+
+def _market_evidence(pick):
+    market = pick.get("market", "")
+    home = pick.get("home_recent_form") or {}
+    away = pick.get("away_recent_form") or {}
+    if market.startswith("Corners "):
+        profile = pick.get("corner_profile") or {}
+        home_corners = (profile.get("home") or {})
+        away_corners = (profile.get("away") or {})
+        expected = profile.get("expected_total", "unknown")
+        return (
+            f"The corner profile projects around {expected} total corners. "
+            f"{pick.get('home_team') or pick.get('hname')}: {home_corners.get('avg_for', 'unknown')} for, "
+            f"{home_corners.get('avg_against', 'unknown')} against; "
+            f"{pick.get('away_team') or pick.get('aname')}: {away_corners.get('avg_for', 'unknown')} for, "
+            f"{away_corners.get('avg_against', 'unknown')} against."
+        )
+    if market.startswith("Under"):
+        return (
+            f"The goal profile leans controlled: {_format_form_line('Home', home)}. "
+            f"{_format_form_line('Away', away)}."
+        )
+    if market.startswith("Over") or "BTTS" in market or market.startswith("GG"):
+        return (
+            f"The attacking profile supports goals: {_format_form_line('Home', home)}. "
+            f"{_format_form_line('Away', away)}."
+        )
+    if market.startswith("DC:") or market.endswith("Win") or market.startswith("AH ") or market.startswith("DNB"):
+        return (
+            f"The result market is backed by match-state protection and recent team balance: "
+            f"{_format_form_line('Home', home)}. {_format_form_line('Away', away)}."
+        )
+    return f"Recent team context: {_format_form_line('Home', home)}. {_format_form_line('Away', away)}."
+
 def pick_reasoning(pick):
     edge_note = "real market odds" if pick.get("odds_is_real") else "estimated odds"
     ev_text = f"{pick.get('ev'):+.3f} expected value" if pick.get("ev") is not None else "unpriced expected value"
-    if pick.get("market", "").startswith("Corners "):
-        profile = pick.get("corner_profile") or {}
-        return (
-            f"{pick.get('market')} rates at {pick.get('conf')}% confidence with "
-            f"{pick.get('odds')} odds and {ev_text}. "
-            f"The corner model projects about {profile.get('expected_total', 'unknown')} total corners "
-            f"from recent team corner trends using {edge_note}."
-        )
     return (
         f"{pick.get('market')} rates at {pick.get('conf')}% confidence with "
         f"{pick.get('odds')} odds and {ev_text}. "
-        f"The model prefers this market from the available fixture markets using {edge_note}."
+        f"{_market_evidence(pick)} "
+        f"Pricing is based on {edge_note}."
     )
 
 def pick_verdict(pick):
@@ -1055,6 +1100,108 @@ def pick_verdict(pick):
     if pick.get("proven"):
         return f"{tier.replace('_', ' ').title()} backed by a proven market profile."
     return f"{tier.replace('_', ' ').title()} selected for positive value and confidence."
+
+def llm_reasoning_enabled():
+    api_key = os.environ.get("MINIMAX_API_KEY", "").strip()
+    configured = os.environ.get("ALGO_LLM_REASONING_ENABLED")
+    if configured is None or configured == "":
+        return bool(api_key)
+    return str(configured).strip().lower() in {"1", "true", "yes", "on"}
+
+def _strip_llm_thinking(content):
+    return re.sub(r"<think>.*?</think>", "", content or "", flags=re.DOTALL | re.IGNORECASE).strip()
+
+def _compact_pick_for_llm(pick):
+    return {
+        "fixture": pick.get("fixture"),
+        "league": pick.get("league"),
+        "kickoff": pick.get("kickoff"),
+        "tier": pick.get("tier"),
+        "market": pick.get("market"),
+        "meaning": pick.get("meaning"),
+        "confidence": pick.get("conf"),
+        "odds": pick.get("odds"),
+        "ev": pick.get("ev"),
+        "proven_market": pick.get("proven"),
+        "risk_flags": pick.get("risk_flags") or [],
+        "selection_profile": pick.get("selection_profile"),
+        "home_recent_form": pick.get("home_recent_form") or {},
+        "away_recent_form": pick.get("away_recent_form") or {},
+        "corner_profile": pick.get("corner_profile") or {},
+        "fallback_reasoning": pick.get("reasoning", ""),
+        "fallback_verdict": pick.get("model_verdict", ""),
+    }
+
+def _parse_llm_json(content):
+    cleaned = _strip_llm_thinking(content)
+    try:
+        return json.loads(cleaned)
+    except json.JSONDecodeError:
+        match = re.search(r"\{.*\}", cleaned, flags=re.DOTALL)
+        if not match:
+            raise
+        return json.loads(match.group(0))
+
+def _call_minimax_pick_writer(pick):
+    api_key = os.environ.get("MINIMAX_API_KEY", "").strip()
+    if not api_key:
+        return None
+    base_url = os.environ.get("MINIMAX_BASE_URL", "https://api.minimax.io/v1").rstrip("/")
+    model = os.environ.get("MINIMAX_MODEL", "MiniMax-M2.7-highspeed")
+    payload = {
+        "model": model,
+        "temperature": 0.35,
+        "top_p": 0.9,
+        "max_completion_tokens": 420,
+        "messages": [
+            {
+                "role": "system",
+                "content": (
+                    "You write concise betting-pick explanations for a football analytics product. "
+                    "Use only the supplied data. Do not promise a win, do not invent injuries, odds movement, "
+                    "lineups, news, standings, or head-to-head facts. Mention uncertainty naturally. "
+                    "Return strict JSON with keys reasoning and model_verdict only."
+                ),
+            },
+            {
+                "role": "user",
+                "content": (
+                    "Rewrite this selected pick into a more substantive customer-facing explanation.\n"
+                    "reasoning: 2-3 sentences, specific to the market, form, confidence, EV, odds, and risk flags.\n"
+                    "model_verdict: 1 short sentence, no hype.\n"
+                    f"Data:\n{json.dumps(_compact_pick_for_llm(pick), ensure_ascii=True)}"
+                ),
+            },
+        ],
+    }
+    response = requests.post(
+        f"{base_url}/chat/completions",
+        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+        json=payload,
+        timeout=20,
+    )
+    response.raise_for_status()
+    message = ((response.json().get("choices") or [{}])[0].get("message") or {})
+    parsed = _parse_llm_json(message.get("content", ""))
+    reasoning = str(parsed.get("reasoning", "")).strip()
+    verdict = str(parsed.get("model_verdict", "")).strip()
+    if len(reasoning) < 40 or len(verdict) < 10:
+        return None
+    return {"reasoning": reasoning[:900], "model_verdict": verdict[:280]}
+
+def enhance_pick_explanations_with_llm(picks):
+    if not llm_reasoning_enabled():
+        return
+    for pick in picks:
+        try:
+            generated = _call_minimax_pick_writer(pick)
+        except Exception as exc:
+            log.warning("LLM pick explanation skipped for %s: %s", pick.get("fixture"), exc)
+            continue
+        if not generated:
+            continue
+        pick["reasoning"] = generated["reasoning"]
+        pick["model_verdict"] = generated["model_verdict"]
 
 def select_picks(all_confs, scored_fxs, odds_list):
     pool=[]
@@ -1148,6 +1295,7 @@ def select_picks(all_confs, scored_fxs, odds_list):
             pick["tier"] = tier
             pick["reasoning"] = pick_reasoning(pick)
             pick["model_verdict"] = pick_verdict(pick)
+    enhance_pick_explanations_with_llm(bankers + value_gems + wild_cards)
     return bankers, value_gems, wild_cards
 
 # ── RECORD TO SHEETS ──────────────────────────────────────────────
