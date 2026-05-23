@@ -5,303 +5,74 @@
 # ================================================================
 
 services:
-  # ------------------------------
-  # PostgreSQL Database
-  # ------------------------------
-  db:
-    image: postgres:16-alpine
-    restart: unless-stopped
-    profiles:
-      - local-db
-      - dev
-    environment:
-      POSTGRES_DB: ${DB_NAME:-postgres}
-      POSTGRES_USER: ${DB_USER:-postgres}
-      POSTGRES_PASSWORD: ${DB_PASSWORD:-postgres}
-      POSTGRES_HOST_AUTH_METHOD: md5
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-postgres}"]
-      interval: 5s
-      timeout: 5s
-      retries: 5
-    networks:
-      - betpreneur_network
-
-  # ------------------------------
-  # Backend Application
-  # ------------------------------
   backend:
     build:
       context: .
       dockerfile: Dockerfile
       target: production
     restart: unless-stopped
+    ports:
+      - "8000:8000"
     expose:
       - "8000"
+    env_file:
+      - .env
     environment:
-      # Django
-      DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY:-change-me-in-production}
-      DJANGO_DEBUG: ${DJANGO_DEBUG:-False}
-      DJANGO_ALLOWED_HOSTS: ${DJANGO_ALLOWED_HOSTS:-backend.betpreneur.ng,localhost,127.0.0.1}
       DJANGO_SETTINGS_MODULE: config.settings
-      CSRF_TRUSTED_ORIGINS: ${CSRF_TRUSTED_ORIGINS:-}
+      TZ: Africa/Lagos
       WEB_CONCURRENCY: ${WEB_CONCURRENCY:-2}
       WEB_THREADS: ${WEB_THREADS:-2}
       GUNICORN_TIMEOUT: ${GUNICORN_TIMEOUT:-120}
-
-      # Database
-      DB_ENGINE: django.db.backends.postgresql
-      DB_NAME: ${DB_NAME:-postgres}
-      DB_USER: ${DB_USER:-postgres}
-      DB_PASSWORD: ${DB_PASSWORD:-postgres}
-      DB_HOST: ${DB_HOST:-db}
-      DB_PORT: ${DB_PORT:-5432}
-      DB_CONNECT_TIMEOUT: ${DB_CONNECT_TIMEOUT:-10}
-
-      # External APIs (set in .env)
-      APS_KEY: ${APS_KEY:-}
-      APS_MAX_FIXTURES: ${APS_MAX_FIXTURES:-90}
-      MINIMAX_API_KEY: ${MINIMAX_API_KEY:-}
-      MINIMAX_BASE_URL: ${MINIMAX_BASE_URL:-https://api.minimax.io/v1}
-      MINIMAX_MODEL: ${MINIMAX_MODEL:-MiniMax-M2.7-highspeed}
-      ALGO_LLM_REASONING_ENABLED: ${ALGO_LLM_REASONING_ENABLED:-}
-      RESEND_API_KEY: ${RESEND_API_KEY:-}
-      RESEND_FROM_NAME: ${RESEND_FROM_NAME:-Betpreneur}
-      RESEND_FROM_EMAIL_PREFIX: ${RESEND_FROM_EMAIL_PREFIX:-support}
-      RESEND_FROM_EMAIL_DOMAIN: ${RESEND_FROM_EMAIL_DOMAIN:-betpreneur.ng}
-      RESEND_FROM_EMAIL: ${RESEND_FROM_EMAIL:-support@betpreneur.ng}
-
-      # Google Drive
-      KEY_FILE: ${KEY_FILE:-}
-      SHEET_NAME: ${SHEET_NAME:-GrindAlgo Tracker}
-      DRIVE_FOLDER: ${DRIVE_FOLDER:-GrindAlgo Reports}
-
-      # Frontend
-      FRONTEND_URL: ${FRONTEND_URL:-https://tanstack-start-app.betpreneur.workers.dev,https://betpreneur.ng,https://www.betpreneur.ng,https://betpreneur.lovable.app,https://betprenuer.lovable.app,http://localhost:3000}
-
-      # CORS
-      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-https://tanstack-start-app.betpreneur.workers.dev,https://betpreneur.ng,https://www.betpreneur.ng,https://betpreneur.lovable.app,https://betprenuer.lovable.app,http://localhost:3000}
-
-      # Timezone
-      TZ: ${TZ:-Africa/Lagos}
-
-      # Celery
-      CELERY_BROKER_URL: ${CELERY_BROKER_URL:?Set CELERY_BROKER_URL to your Coolify Redis URL}
-      CELERY_RESULT_BACKEND: ${CELERY_RESULT_BACKEND:?Set CELERY_RESULT_BACKEND to your Coolify Redis URL}
-      ALGO_GENERATE_HOUR: ${ALGO_GENERATE_HOUR:-0}
-      ALGO_GENERATE_MINUTE: ${ALGO_GENERATE_MINUTE:-5}
-      ALGO_SETTLE_HOUR: ${ALGO_SETTLE_HOUR:-6}
-      ALGO_SETTLE_MINUTE: ${ALGO_SETTLE_MINUTE:-30}
-      ALGO_AUDITOR_DAY: ${ALGO_AUDITOR_DAY:-1}
-      ALGO_AUDITOR_HOUR: ${ALGO_AUDITOR_HOUR:-8}
-      ALGO_AUDITOR_MINUTE: ${ALGO_AUDITOR_MINUTE:-0}
-      ALGO_MIN_EV: ${ALGO_MIN_EV:-0.02}
-      ALGO_MIN_MARKET_SAMPLE: ${ALGO_MIN_MARKET_SAMPLE:-15}
-      ALGO_MAX_DAILY_PICKS: ${ALGO_MAX_DAILY_PICKS:-15}
-      ALGO_REQUIRE_REAL_ODDS: ${ALGO_REQUIRE_REAL_ODDS:-False}
-      ALGO_ALLOW_ESTIMATED_PICKS: ${ALGO_ALLOW_ESTIMATED_PICKS:-False}
-      ALGO_CORNER_MIN_CONFIDENCE: ${ALGO_CORNER_MIN_CONFIDENCE:-68}
-      ALGO_ENABLE_CORNERS: ${ALGO_ENABLE_CORNERS:-True}
-      ALGO_CORNER_MIN_LINE: ${ALGO_CORNER_MIN_LINE:-7.5}
-      ALGO_CORNER_MAX_ODDS: ${ALGO_CORNER_MAX_ODDS:-3.5}
-      ALGO_CORNER_MIN_PROFILE_GAMES: ${ALGO_CORNER_MIN_PROFILE_GAMES:-6}
-    env_file:
-      - .env
     volumes:
-      - ./media:/home/appuser/media
-    healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/api/health/"]
-      interval: 20s
-      timeout: 10s
-      retries: 6
-      start_period: 90s
+      - media:/home/appuser/media
+    command: >
+      sh -c "python manage.py migrate --noinput &&
+             python manage.py collectstatic --noinput &&
+             gunicorn config.asgi:application
+             --bind 0.0.0.0:8000
+             --workers ${WEB_CONCURRENCY:-2}
+             --threads ${WEB_THREADS:-2}
+             --worker-class uvicorn.workers.UvicornWorker
+             --timeout ${GUNICORN_TIMEOUT:-120}"
     networks:
       - betpreneur_network
 
-  # ------------------------------
-  # Celery Worker
-  # ------------------------------
   celery-worker:
     build:
       context: .
       dockerfile: Dockerfile
       target: production
     restart: unless-stopped
-    command: celery -A config worker --loglevel=info --concurrency=${CELERY_WORKER_CONCURRENCY:-2}
-    environment:
-      DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY:-change-me-in-production}
-      DJANGO_DEBUG: ${DJANGO_DEBUG:-False}
-      DJANGO_ALLOWED_HOSTS: ${DJANGO_ALLOWED_HOSTS:-backend.betpreneur.ng,localhost,127.0.0.1}
-      DJANGO_SETTINGS_MODULE: config.settings
-      CSRF_TRUSTED_ORIGINS: ${CSRF_TRUSTED_ORIGINS:-}
-      DB_ENGINE: django.db.backends.postgresql
-      DB_NAME: ${DB_NAME:-postgres}
-      DB_USER: ${DB_USER:-postgres}
-      DB_PASSWORD: ${DB_PASSWORD:-postgres}
-      DB_HOST: ${DB_HOST:-db}
-      DB_PORT: ${DB_PORT:-5432}
-      DB_CONNECT_TIMEOUT: ${DB_CONNECT_TIMEOUT:-10}
-      APS_KEY: ${APS_KEY:-}
-      APS_MAX_FIXTURES: ${APS_MAX_FIXTURES:-90}
-      MINIMAX_API_KEY: ${MINIMAX_API_KEY:-}
-      MINIMAX_BASE_URL: ${MINIMAX_BASE_URL:-https://api.minimax.io/v1}
-      MINIMAX_MODEL: ${MINIMAX_MODEL:-MiniMax-M2.7-highspeed}
-      ALGO_LLM_REASONING_ENABLED: ${ALGO_LLM_REASONING_ENABLED:-}
-      KEY_FILE: ${KEY_FILE:-}
-      SHEET_NAME: ${SHEET_NAME:-GrindAlgo Tracker}
-      DRIVE_FOLDER: ${DRIVE_FOLDER:-GrindAlgo Reports}
-      EMAIL_RECIPIENT: ${EMAIL_RECIPIENT:-}
-      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
-      GEMINI_MODEL: ${GEMINI_MODEL:-gemini-2.5-flash}
-      CELERY_BROKER_URL: ${CELERY_BROKER_URL:?Set CELERY_BROKER_URL to your Coolify Redis URL}
-      CELERY_RESULT_BACKEND: ${CELERY_RESULT_BACKEND:?Set CELERY_RESULT_BACKEND to your Coolify Redis URL}
-      ALGO_MIN_EV: ${ALGO_MIN_EV:-0.02}
-      ALGO_MIN_MARKET_SAMPLE: ${ALGO_MIN_MARKET_SAMPLE:-15}
-      ALGO_MAX_DAILY_PICKS: ${ALGO_MAX_DAILY_PICKS:-15}
-      ALGO_REQUIRE_REAL_ODDS: ${ALGO_REQUIRE_REAL_ODDS:-False}
-      ALGO_ALLOW_ESTIMATED_PICKS: ${ALGO_ALLOW_ESTIMATED_PICKS:-False}
-      ALGO_CORNER_MIN_CONFIDENCE: ${ALGO_CORNER_MIN_CONFIDENCE:-68}
-      ALGO_ENABLE_CORNERS: ${ALGO_ENABLE_CORNERS:-True}
-      ALGO_CORNER_MIN_LINE: ${ALGO_CORNER_MIN_LINE:-7.5}
-      ALGO_CORNER_MAX_ODDS: ${ALGO_CORNER_MAX_ODDS:-3.5}
-      ALGO_CORNER_MIN_PROFILE_GAMES: ${ALGO_CORNER_MIN_PROFILE_GAMES:-6}
-      TZ: ${TZ:-Africa/Lagos}
     env_file:
       - .env
+    environment:
+      DJANGO_SETTINGS_MODULE: config.settings
+      TZ: Africa/Lagos
+    command: celery -A config worker --loglevel=info --concurrency=${CELERY_WORKER_CONCURRENCY:-2}
     volumes:
-      - ./media:/home/appuser/media
+      - media:/home/appuser/media
     networks:
       - betpreneur_network
 
-  # ------------------------------
-  # Celery Beat Scheduler
-  # ------------------------------
   celery-beat:
     build:
       context: .
       dockerfile: Dockerfile
       target: production
     restart: unless-stopped
-    command: celery -A config beat --loglevel=info --schedule=/tmp/celerybeat-schedule
-    environment:
-      DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY:-change-me-in-production}
-      DJANGO_DEBUG: ${DJANGO_DEBUG:-False}
-      DJANGO_ALLOWED_HOSTS: ${DJANGO_ALLOWED_HOSTS:-backend.betpreneur.ng,localhost,127.0.0.1}
-      DJANGO_SETTINGS_MODULE: config.settings
-      CSRF_TRUSTED_ORIGINS: ${CSRF_TRUSTED_ORIGINS:-}
-      DB_ENGINE: django.db.backends.postgresql
-      DB_NAME: ${DB_NAME:-postgres}
-      DB_USER: ${DB_USER:-postgres}
-      DB_PASSWORD: ${DB_PASSWORD:-postgres}
-      DB_HOST: ${DB_HOST:-db}
-      DB_PORT: ${DB_PORT:-5432}
-      DB_CONNECT_TIMEOUT: ${DB_CONNECT_TIMEOUT:-10}
-      APS_KEY: ${APS_KEY:-}
-      APS_MAX_FIXTURES: ${APS_MAX_FIXTURES:-90}
-      MINIMAX_API_KEY: ${MINIMAX_API_KEY:-}
-      MINIMAX_BASE_URL: ${MINIMAX_BASE_URL:-https://api.minimax.io/v1}
-      MINIMAX_MODEL: ${MINIMAX_MODEL:-MiniMax-M2.7-highspeed}
-      ALGO_LLM_REASONING_ENABLED: ${ALGO_LLM_REASONING_ENABLED:-}
-      CELERY_BROKER_URL: ${CELERY_BROKER_URL:?Set CELERY_BROKER_URL to your Coolify Redis URL}
-      CELERY_RESULT_BACKEND: ${CELERY_RESULT_BACKEND:?Set CELERY_RESULT_BACKEND to your Coolify Redis URL}
-      ALGO_GENERATE_HOUR: ${ALGO_GENERATE_HOUR:-0}
-      ALGO_GENERATE_MINUTE: ${ALGO_GENERATE_MINUTE:-5}
-      ALGO_SETTLE_HOUR: ${ALGO_SETTLE_HOUR:-6}
-      ALGO_SETTLE_MINUTE: ${ALGO_SETTLE_MINUTE:-30}
-      ALGO_AUDITOR_DAY: ${ALGO_AUDITOR_DAY:-1}
-      ALGO_AUDITOR_HOUR: ${ALGO_AUDITOR_HOUR:-8}
-      ALGO_AUDITOR_MINUTE: ${ALGO_AUDITOR_MINUTE:-0}
-      ALGO_MIN_EV: ${ALGO_MIN_EV:-0.02}
-      ALGO_MIN_MARKET_SAMPLE: ${ALGO_MIN_MARKET_SAMPLE:-15}
-      ALGO_MAX_DAILY_PICKS: ${ALGO_MAX_DAILY_PICKS:-15}
-      ALGO_REQUIRE_REAL_ODDS: ${ALGO_REQUIRE_REAL_ODDS:-False}
-      ALGO_ALLOW_ESTIMATED_PICKS: ${ALGO_ALLOW_ESTIMATED_PICKS:-False}
-      ALGO_CORNER_MIN_CONFIDENCE: ${ALGO_CORNER_MIN_CONFIDENCE:-68}
-      ALGO_ENABLE_CORNERS: ${ALGO_ENABLE_CORNERS:-True}
-      ALGO_CORNER_MIN_LINE: ${ALGO_CORNER_MIN_LINE:-7.5}
-      ALGO_CORNER_MAX_ODDS: ${ALGO_CORNER_MAX_ODDS:-3.5}
-      ALGO_CORNER_MIN_PROFILE_GAMES: ${ALGO_CORNER_MIN_PROFILE_GAMES:-6}
-      TZ: ${TZ:-Africa/Lagos}
     env_file:
       - .env
+    environment:
+      DJANGO_SETTINGS_MODULE: config.settings
+      TZ: Africa/Lagos
+    command: celery -A config beat --loglevel=info --schedule=/tmp/celerybeat-schedule
     networks:
       - betpreneur_network
 
-  # ------------------------------
-  # Nginx (Reverse Proxy)
-  # ------------------------------
-  # nginx:
-  #   image: nginx:alpine
-  #   container_name: betpreneur_nginx
-  #   restart: unless-stopped
-  #   ports:
-  #     - "80:80"
-  #     - "443:443"
-  #   volumes:
-  #     - ./nginx.conf:/etc/nginx/nginx.conf:ro
-  #     - ./ssl:/etc/nginx/ssl:ro
-  #   depends_on:
-  #     - backend
-  #   networks:
-  #     - betpreneur_network
-  #   profiles:
-  #     - nginx
-
-  # ------------------------------
-  # Adminer (Database GUI - dev only)
-  # ------------------------------
-  adminer:
-    image: adminer:4.8.1
-    restart: unless-stopped
-    ports:
-      - "8080:8080"
-    depends_on:
-      db:
-        condition: service_healthy
-    networks:
-      - betpreneur_network
-    profiles:
-      - dev
-      - tools
-
-
-# ------------------------------
-# Networks
-# ------------------------------
 networks:
   betpreneur_network:
     driver: bridge
 
-
-# ------------------------------
-# Volumes
-# ------------------------------
 volumes:
-  postgres_data:
-    name: betnehmer_postgres_data
   media:
     name: betpreneur_media
-
-
-# ------------------------------
-# Notes
-# ------------------------------
-# Usage:
-#   docker compose up -d              # Start all services
-#   docker compose up -d db           # Start only database
-#   docker compose up -d db backend   # Start database + backend
-#
-# Development:
-#   docker compose --profile dev up -d
-#
-# With nginx:
-#   docker compose --profile nginx up -d
-#
-# View logs:
-#   docker compose logs -f backend
-#
-# Run management commands:
-#   docker compose exec backend python manage.py migrate
-#   docker compose exec backend python manage.py createsuperuser
