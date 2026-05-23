@@ -1160,15 +1160,26 @@ def _minimax_chat_completion(payload, *, retries=2):
             message = ((response.json().get("choices") or [{}])[0].get("message") or {})
             return message.get("content", "")
         last_error = response
+        body = (response.text or "").replace("\n", " ")[:500]
+        request_id = response.headers.get("x-request-id") or response.headers.get("X-Request-Id") or ""
         retry_after = response.headers.get("Retry-After")
         try:
             delay = float(retry_after) if retry_after else 2 + attempt * 3
         except (TypeError, ValueError):
             delay = 2 + attempt * 3
-        log.warning("MiniMax rate limit hit; retrying in %.1fs (attempt %s/%s)", delay, attempt + 1, retries + 1)
+        log.warning(
+            "MiniMax rate limit hit; retrying in %.1fs (attempt %s/%s, retry_after=%s, request_id=%s, body=%s)",
+            delay,
+            attempt + 1,
+            retries + 1,
+            retry_after or "",
+            request_id,
+            body,
+        )
         time.sleep(delay)
     if last_error is not None:
-        last_error.raise_for_status()
+        body = (last_error.text or "").replace("\n", " ")[:800]
+        raise RuntimeError(f"MiniMax 429 after retries: {body}")
     return None
 
 def _call_minimax_pick_batch(picks):
