@@ -11,8 +11,6 @@ services:
       dockerfile: Dockerfile
       target: production
     restart: unless-stopped
-    ports:
-      - "8000:8000"
     expose:
       - "8000"
     env_file:
