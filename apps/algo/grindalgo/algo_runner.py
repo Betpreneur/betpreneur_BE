@@ -1142,17 +1142,50 @@ def _parse_llm_json(content):
             raise
         return json.loads(match.group(0))
 
-def _call_minimax_pick_writer(pick):
+def _minimax_chat_completion(payload, *, retries=2):
     api_key = os.environ.get("MINIMAX_API_KEY", "").strip()
     if not api_key:
         return None
     base_url = os.environ.get("MINIMAX_BASE_URL", "https://api.minimax.io/v1").rstrip("/")
+    last_error = None
+    for attempt in range(retries + 1):
+        response = requests.post(
+            f"{base_url}/chat/completions",
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+            json=payload,
+            timeout=30,
+        )
+        if response.status_code != 429:
+            response.raise_for_status()
+            message = ((response.json().get("choices") or [{}])[0].get("message") or {})
+            return message.get("content", "")
+        last_error = response
+        retry_after = response.headers.get("Retry-After")
+        try:
+            delay = float(retry_after) if retry_after else 2 + attempt * 3
+        except (TypeError, ValueError):
+            delay = 2 + attempt * 3
+        log.warning("MiniMax rate limit hit; retrying in %.1fs (attempt %s/%s)", delay, attempt + 1, retries + 1)
+        time.sleep(delay)
+    if last_error is not None:
+        last_error.raise_for_status()
+    return None
+
+def _call_minimax_pick_batch(picks):
+    api_key = os.environ.get("MINIMAX_API_KEY", "").strip()
+    if not api_key or not picks:
+        return {}
     model = os.environ.get("MINIMAX_MODEL", "MiniMax-M2.7-highspeed")
+    compact_picks = []
+    for index, pick in enumerate(picks):
+        item = _compact_pick_for_llm(pick)
+        item["index"] = index
+        compact_picks.append(item)
     payload = {
         "model": model,
         "temperature": 0.35,
         "top_p": 0.9,
-        "max_completion_tokens": 420,
+        "max_completion_tokens": max(900, min(3600, 320 * len(compact_picks))),
         "messages": [
             {
                 "role": "system",
@@ -1160,48 +1193,57 @@ def _call_minimax_pick_writer(pick):
                     "You write concise betting-pick explanations for a football analytics product. "
                     "Use only the supplied data. Do not promise a win, do not invent injuries, odds movement, "
                     "lineups, news, standings, or head-to-head facts. Mention uncertainty naturally. "
-                    "Return strict JSON with keys reasoning and model_verdict only."
+                    "Return strict JSON only."
                 ),
             },
             {
                 "role": "user",
                 "content": (
-                    "Rewrite this selected pick into a more substantive customer-facing explanation.\n"
-                    "reasoning: 2-3 sentences, specific to the market, form, confidence, EV, odds, and risk flags.\n"
-                    "model_verdict: 1 short sentence, no hype.\n"
-                    f"Data:\n{json.dumps(_compact_pick_for_llm(pick), ensure_ascii=True)}"
+                    "Rewrite each selected pick into a more substantive customer-facing explanation.\n"
+                    "For every input item, return the same index with:\n"
+                    "- reasoning: 2-3 sentences, specific to the market, form, confidence, EV, odds, and risk flags.\n"
+                    "- model_verdict: 1 short sentence, no hype.\n"
+                    "Return JSON shaped exactly as: "
+                    '{"picks":[{"index":0,"reasoning":"...","model_verdict":"..."}]}.\n'
+                    f"Data:\n{json.dumps(compact_picks, ensure_ascii=True)}"
                 ),
             },
         ],
     }
-    response = requests.post(
-        f"{base_url}/chat/completions",
-        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-        json=payload,
-        timeout=20,
-    )
-    response.raise_for_status()
-    message = ((response.json().get("choices") or [{}])[0].get("message") or {})
-    parsed = _parse_llm_json(message.get("content", ""))
-    reasoning = str(parsed.get("reasoning", "")).strip()
-    verdict = str(parsed.get("model_verdict", "")).strip()
-    if len(reasoning) < 40 or len(verdict) < 10:
-        return None
-    return {"reasoning": reasoning[:900], "model_verdict": verdict[:280]}
+    parsed = _parse_llm_json(_minimax_chat_completion(payload) or "")
+    generated_by_index = {}
+    for item in parsed.get("picks", []) or []:
+        try:
+            index = int(item.get("index"))
+        except (TypeError, ValueError):
+            continue
+        reasoning = str(item.get("reasoning", "")).strip()
+        verdict = str(item.get("model_verdict", "")).strip()
+        if len(reasoning) < 40 or len(verdict) < 10:
+            continue
+        generated_by_index[index] = {
+            "reasoning": reasoning[:900],
+            "model_verdict": verdict[:280],
+        }
+    return generated_by_index
 
 def enhance_pick_explanations_with_llm(picks):
     if not llm_reasoning_enabled():
         return
-    for pick in picks:
-        try:
-            generated = _call_minimax_pick_writer(pick)
-        except Exception as exc:
-            log.warning("LLM pick explanation skipped for %s: %s", pick.get("fixture"), exc)
-            continue
+    try:
+        generated_by_index = _call_minimax_pick_batch(picks)
+    except Exception as exc:
+        log.warning("LLM pick explanation batch skipped: %s", exc)
+        return
+    updated = 0
+    for index, pick in enumerate(picks):
+        generated = generated_by_index.get(index)
         if not generated:
             continue
         pick["reasoning"] = generated["reasoning"]
         pick["model_verdict"] = generated["model_verdict"]
+        updated += 1
+    log.info("LLM pick explanations updated %s/%s selected picks", updated, len(picks))
 
 def select_picks(all_confs, scored_fxs, odds_list):
     pool=[]
