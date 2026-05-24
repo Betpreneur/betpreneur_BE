@@ -28,6 +28,8 @@ from .serializers import (
     AlgoRunCreateSerializer,
     AlgoRunSerializer,
     AuditorRunSerializer,
+    BackedPicksQuerySerializer,
+    BackedPicksResponseSerializer,
     DailyPicksQuerySerializer,
     DailyPicksResponseSerializer,
     PickSerializer,
@@ -54,17 +56,14 @@ PICK_TIER_RANK = {
 }
 
 
-def _is_valid_wild_card(pick):
-    try:
-        odds = float(pick.odds or 0)
-    except (TypeError, ValueError):
-        odds = 0
-    return 60 <= (pick.confidence or 0) < 70 and odds > 2.0
-
-
 def _effective_pick_tier(pick):
-    if pick.tier == Pick.Tier.WILD_CARD and not _is_valid_wild_card(pick):
+    confidence = pick.confidence or 0
+    if confidence >= 80:
+        return Pick.Tier.BANKER
+    if 70 <= confidence < 80:
         return Pick.Tier.VALUE_GEM
+    if 60 <= confidence < 70:
+        return Pick.Tier.WILD_CARD
     return pick.tier
 
 
@@ -783,6 +782,36 @@ class BackPickView(APIView):
                 "backed_count": pick.backs.count(),
             },
             status=status.HTTP_201_CREATED if created else status.HTTP_200_OK,
+        )
+
+
+class BackedPicksView(APIView):
+    permission_classes = [IsAuthenticated]
+    serializer_class = BackedPicksResponseSerializer
+
+    @extend_schema(
+        summary="List user backed picks",
+        description="Authenticated user endpoint. Returns picks backed by the current user, with optional match date filtering.",
+        tags=["Picks"],
+        parameters=[BackedPicksQuerySerializer],
+        responses={200: BackedPicksResponseSerializer},
+    )
+    def get(self, request):
+        query = BackedPicksQuerySerializer(data=request.query_params)
+        query.is_valid(raise_exception=True)
+        target_date = query.validated_data.get("date")
+
+        picks = Pick.objects.select_related("run").prefetch_related("backs").filter(backs__user=request.user)
+        if target_date:
+            picks = picks.filter(match_date=target_date)
+        picks = picks.distinct().order_by("-match_date", "kickoff", "-confidence", "-ev")
+
+        return Response(
+            {
+                "date": target_date,
+                "count": picks.count(),
+                "picks": PickSerializer(picks, many=True, context={"request": request}).data,
+            }
         )
 
 

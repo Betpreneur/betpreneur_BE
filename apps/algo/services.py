@@ -132,8 +132,8 @@ class AlgoRunnerService:
             if key not in latest:
                 latest[key] = pick
 
-        market_stats = defaultdict(lambda: {"count": 0, "wins": 0, "losses": 0, "stake": 0.0, "pnl": 0.0})
-        league_market_stats = defaultdict(lambda: {"count": 0, "wins": 0, "losses": 0, "stake": 0.0, "pnl": 0.0})
+        market_stats = defaultdict(lambda: {"count": 0, "wins": 0, "losses": 0, "stake": 0.0, "pnl": 0.0, "confidence_total": 0.0})
+        league_market_stats = defaultdict(lambda: {"count": 0, "wins": 0, "losses": 0, "stake": 0.0, "pnl": 0.0, "confidence_total": 0.0})
 
         for pick in latest.values():
             keys = [pick.market, f"{pick.league}::{pick.market}"]
@@ -146,6 +146,7 @@ class AlgoRunnerService:
                     stats["losses"] += 1
                 stats["stake"] += float(pick.stake or 0)
                 stats["pnl"] += float(pick.pnl or 0)
+                stats["confidence_total"] += float(pick.confidence or 0)
 
         def finalize(group):
             payload = {}
@@ -158,6 +159,7 @@ class AlgoRunnerService:
                     "losses": stats["losses"],
                     "hit_rate": round((stats["wins"] / settled) * 100, 1) if settled else 0.0,
                     "roi_flat": round((stats["pnl"] / stake) * 100, 1) if stake else 0.0,
+                    "avg_confidence": round(stats["confidence_total"] / stats["count"], 1) if stats["count"] else 0.0,
                 }
             return payload
 

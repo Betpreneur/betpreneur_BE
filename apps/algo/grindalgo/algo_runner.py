@@ -202,8 +202,12 @@ def fetch_aps_fixtures(target_date):
             "hid":      f["teams"]["home"]["id"],
             "aid":      f["teams"]["away"]["id"],
             "league":   f["league"]["name"],
+            "country":  f["league"].get("country", ""),
+            "round":    f["league"].get("round", ""),
+            "league_type": f["league"].get("type", ""),
             "code":     str(league_id),
             "kickoff":  _to_wat(f["fixture"].get("date","")),
+            "kickoff_utc": f["fixture"].get("date", ""),
             "match_id": f["fixture"]["id"],
             "source":   "aps",
             "aps_id":   f["fixture"]["id"],
@@ -226,9 +230,10 @@ def fetch_prediction_data(fixture_id):
 _form_cache = {}
 
 def _default_form():
-    return {"wins":3,"avg_scored":1.4,"avg_conceded":1.2,
+    return {"wins":3,"draws":2,"losses":3,"form":"",
+            "avg_scored":1.4,"avg_conceded":1.2,
             "btts_count":4,"over25_count":3,"clean_sheets":2,
-            "games":8,"streak":0,"attack_str":0.5,"defence_str":0.5}
+            "games":8,"scope":"overall","last_played":"","streak":0,"attack_str":0.5,"defence_str":0.5}
 
 def _percent_to_ratio(value, default=0.5):
     try:
@@ -257,15 +262,18 @@ def _result_code_for_team(match, team_id):
         return "L"
     return "D"
 
-def fetch_team_recent_form(team_id, lookback=8):
+def fetch_team_recent_form(team_id, lookback=8, venue=None):
     if not team_id:
         return None
-    if team_id in _form_cache:
-        return _form_cache[team_id]
+    venue = venue if venue in {"home", "away"} else None
+    cache_key = (team_id, lookback, venue)
+    if cache_key in _form_cache:
+        return _form_cache[cache_key]
 
     matches = []
     try:
-        matches = aps_get("/fixtures", {"team": team_id, "last": lookback}, timeout=15)
+        fetch_count = lookback if venue is None else max(lookback * 3, 20)
+        matches = aps_get("/fixtures", {"team": team_id, "last": fetch_count}, timeout=15)
         time.sleep(0.15)
     except Exception as exc:
         log.warning("Team recent form %s: %s", team_id, exc)
@@ -287,6 +295,10 @@ def fetch_team_recent_form(team_id, lookback=8):
         is_away = away.get("id") == team_id
         if not is_home and not is_away:
             continue
+        if venue == "home" and not is_home:
+            continue
+        if venue == "away" and not is_away:
+            continue
         scored = home_goals if is_home else away_goals
         conceded = away_goals if is_home else home_goals
         result = _result_code_for_team(match, team_id)
@@ -296,7 +308,10 @@ def fetch_team_recent_form(team_id, lookback=8):
             "scored": scored,
             "conceded": conceded,
             "result": result,
+            "date": ((match.get("fixture") or {}).get("date") or ""),
         })
+        if len(samples) >= lookback:
+            break
 
     if not samples:
         return None
@@ -314,17 +329,22 @@ def fetch_team_recent_form(team_id, lookback=8):
 
     form = {
         "wins": sum(1 for item in samples if item["result"] == "W"),
+        "draws": sum(1 for item in samples if item["result"] == "D"),
+        "losses": sum(1 for item in samples if item["result"] == "L"),
+        "form": form_str,
         "avg_scored": round(sum(item["scored"] for item in samples) / games, 2),
         "avg_conceded": round(sum(item["conceded"] for item in samples) / games, 2),
         "btts_count": sum(1 for item in samples if item["scored"] > 0 and item["conceded"] > 0),
         "over25_count": sum(1 for item in samples if item["scored"] + item["conceded"] > 2),
         "clean_sheets": sum(1 for item in samples if item["conceded"] == 0),
         "games": games,
+        "scope": venue or "overall",
+        "last_played": samples[0].get("date", ""),
         "streak": streak,
         "attack_str": 0.5,
         "defence_str": 0.5,
     }
-    _form_cache[team_id] = form
+    _form_cache[cache_key] = form
     return form
 
 # ── MAP API-FOOTBALL PREDICTIONS -> FORM METRICS ─────────────────
@@ -335,6 +355,8 @@ def map_aps_to_form(team_pred, comp_side):
     fallback = _default_form()
     games    = len(form_str) or 5
     wins     = form_str.count("W") if form_str else fallback["wins"]
+    draws    = form_str.count("D") if form_str else fallback["draws"]
+    losses   = form_str.count("L") if form_str else fallback["losses"]
     streak   = 0
     if form_str:
         for r_ in reversed(form_str):
@@ -362,29 +384,268 @@ def map_aps_to_form(team_pred, comp_side):
             defence_str = float(str(comp_side.get("def","50%")).replace("%",""))/100
         except Exception: pass
 
-    return {"wins":wins,"avg_scored":avg_scored,"avg_conceded":avg_conceded,
+    return {"wins":wins,"draws":draws,"losses":losses,"form":form_str,
+            "avg_scored":avg_scored,"avg_conceded":avg_conceded,
             "btts_count":btts_count,"over25_count":over25_count,
-            "clean_sheets":clean_sheets,"games":games,"streak":streak,
+            "clean_sheets":clean_sheets,"games":games,"scope":"overall","last_played":"","streak":streak,
             "attack_str":attack_str,"defence_str":defence_str}
 
 def parse_aps_h2h(h2h_list, hname):
     if not h2h_list:
-        return {"games":5,"t1w":2,"o25":3,"btts":2}
-    games=t1w=o25=btts=0
+        return {"games":0,"t1w":0,"t2w":0,"draws":0,"o25":0,"u25":0,"u35":0,"btts":0,"avg_goals":0.0}
+    games=t1w=t2w=draws=o25=u25=u35=btts=goals_total=0
     for m in h2h_list:
         try:
-            hg = m.get("goals",{}).get("home") or 0
-            ag = m.get("goals",{}).get("away") or 0
+            hg = m.get("goals",{}).get("home")
+            ag = m.get("goals",{}).get("away")
             mh = normalize(m.get("teams",{}).get("home",{}).get("name",""))
             if hg is None or ag is None: continue
             games+=1
-            if hg+ag>2: o25+=1
+            total = hg + ag
+            goals_total += total
+            if total>2: o25+=1
+            if total<3: u25+=1
+            if total<4: u35+=1
             if hg>0 and ag>0: btts+=1
-            if fuzzy(hname,mh) and hg>ag: t1w+=1
-            elif not fuzzy(hname,mh) and ag>hg: t1w+=1
+            if hg == ag:
+                draws += 1
+            elif fuzzy(hname,mh):
+                if hg > ag:
+                    t1w += 1
+                else:
+                    t2w += 1
+            elif ag > hg:
+                t1w += 1
+            else:
+                t2w += 1
         except Exception: continue
-    if not games: return {"games":5,"t1w":2,"o25":3,"btts":2}
-    return {"games":games,"t1w":t1w,"o25":o25,"btts":btts}
+    if not games:
+        return {"games":0,"t1w":0,"t2w":0,"draws":0,"o25":0,"u25":0,"u35":0,"btts":0,"avg_goals":0.0}
+    return {
+        "games":games,
+        "t1w":t1w,
+        "t2w":t2w,
+        "draws":draws,
+        "o25":o25,
+        "u25":u25,
+        "u35":u35,
+        "btts":btts,
+        "avg_goals":round(goals_total/games, 2),
+    }
+
+# ── FIXTURE CONTEXT / TEAM NEWS / LEAGUE STRENGTH ────────────────
+LEAGUE_STRENGTH = {
+    "39": 1.16,   # Premier League
+    "140": 1.14,  # La Liga
+    "78": 1.13,   # Bundesliga
+    "135": 1.12,  # Serie A
+    "61": 1.10,   # Ligue 1
+    "2": 1.18,    # UEFA Champions League
+    "3": 1.12,    # UEFA Europa League
+    "848": 1.06,  # UEFA Europa Conference League
+    "71": 0.94,   # Brazil Serie B
+    "253": 0.96,  # MLS
+    "10": 0.82,   # Friendlies
+    "21": 0.82,   # International Friendlies
+}
+
+def league_strength_factor(fx):
+    name = normalize(fx.get("league", ""))
+    if "friendly" in name:
+        return 0.82
+    if "champions league" in name:
+        return 1.18
+    if "europa league" in name:
+        return 1.12
+    return LEAGUE_STRENGTH.get(str(fx.get("code") or ""), 1.0)
+
+def apply_league_strength(form, strength):
+    form = dict(form or {})
+    # Stronger leagues make production more credible; weaker/friendly contexts make it more volatile.
+    form["avg_scored"] = round(float(form.get("avg_scored") or 0) * strength, 2)
+    form["avg_conceded"] = round(float(form.get("avg_conceded") or 0) / max(strength, 0.75), 2)
+    form["league_strength"] = round(strength, 2)
+    return form
+
+def _parse_dt(value):
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+
+def _rest_days(last_played, kickoff):
+    last_dt = _parse_dt(last_played)
+    kick_dt = _parse_dt(kickoff)
+    if not last_dt or not kick_dt:
+        return None
+    return max(0, (kick_dt - last_dt).days)
+
+_standings_cache = {}
+def fetch_league_standings(league_id, season):
+    if not league_id or not season:
+        return {}
+    key = (str(league_id), str(season))
+    if key in _standings_cache:
+        return _standings_cache[key]
+    standings = {}
+    try:
+        response = aps_get("/standings", {"league": league_id, "season": season}, timeout=15)
+        time.sleep(0.15)
+        rows = (((response[0] or {}).get("league") or {}).get("standings") or [[]])[0]
+        total = len(rows)
+        for row in rows:
+            team = row.get("team") or {}
+            team_id = team.get("id")
+            if not team_id:
+                continue
+            standings[team_id] = {
+                "rank": row.get("rank"),
+                "points": row.get("points"),
+                "total": total,
+            }
+    except Exception as exc:
+        log.warning("Standings %s/%s: %s", league_id, season, exc)
+    _standings_cache[key] = standings
+    return standings
+
+_injuries_cache = {}
+_lineups_cache = {}
+
+def fetch_fixture_lineups(fixture_id, home_id=None, away_id=None):
+    if not fixture_id:
+        return {"available": False, "home": {}, "away": {}}
+    if fixture_id in _lineups_cache:
+        return _lineups_cache[fixture_id]
+    payload = {"available": False, "home": {}, "away": {}}
+    try:
+        lineups = aps_get("/fixtures/lineups", {"fixture": fixture_id}, timeout=15)
+        time.sleep(0.15)
+    except Exception as exc:
+        log.warning("Lineups %s: %s", fixture_id, exc)
+        lineups = []
+    if lineups:
+        payload["available"] = True
+    for row in lineups or []:
+        team_id = ((row.get("team") or {}).get("id"))
+        bucket = "home" if team_id == home_id else "away" if team_id == away_id else None
+        if not bucket:
+            continue
+        payload[bucket] = {
+            "formation": row.get("formation", ""),
+            "starter_count": len(row.get("startXI") or []),
+            "substitute_count": len(row.get("substitutes") or []),
+        }
+    _lineups_cache[fixture_id] = payload
+    return payload
+
+def fetch_fixture_team_news(fixture_id, home_id=None, away_id=None):
+    if not fixture_id:
+        return {"available": False, "injuries_available": False, "lineups_available": False, "home": {"injuries": 0}, "away": {"injuries": 0}, "flags": []}
+    if fixture_id in _injuries_cache:
+        return _injuries_cache[fixture_id]
+    news = {"available": False, "injuries_available": False, "lineups_available": False, "home": {"injuries": 0}, "away": {"injuries": 0}, "flags": []}
+    try:
+        injuries = aps_get("/injuries", {"fixture": fixture_id}, timeout=15)
+        time.sleep(0.15)
+    except Exception as exc:
+        log.warning("Injuries %s: %s", fixture_id, exc)
+        injuries = []
+    if injuries:
+        news["available"] = True
+        news["injuries_available"] = True
+    for item in injuries or []:
+        team_id = ((item.get("team") or {}).get("id"))
+        bucket = "home" if team_id == home_id else "away" if team_id == away_id else None
+        if not bucket:
+            continue
+        news[bucket]["injuries"] += 1
+    total_absences = news["home"]["injuries"] + news["away"]["injuries"]
+    if total_absences >= 5:
+        news["flags"].append("team_news_heavy_absences")
+    elif total_absences >= 2:
+        news["flags"].append("team_news_absences")
+    lineups = fetch_fixture_lineups(fixture_id, home_id, away_id)
+    news["lineups_available"] = bool(lineups.get("available"))
+    news["available"] = news["available"] or news["lineups_available"]
+    news["home"].update(lineups.get("home") or {})
+    news["away"].update(lineups.get("away") or {})
+    if not news["lineups_available"]:
+        news["flags"].append("lineups_unavailable")
+    _injuries_cache[fixture_id] = news
+    return news
+
+def _is_knockout_round(round_name):
+    round_name = normalize(round_name)
+    knockout_terms = (
+        "knockout",
+        "playoff",
+        "play-off",
+        "final",
+        "semi",
+        "quarter",
+        "round of",
+        "last 16",
+        "1/8",
+        "1/4",
+        "1/2",
+    )
+    return any(term in round_name for term in knockout_terms)
+
+def build_fixture_context(fx, home_form=None, away_form=None):
+    league = normalize(fx.get("league", ""))
+    round_name = normalize(fx.get("round", ""))
+    league_type = normalize(fx.get("league_type", ""))
+    flags = []
+    knockout_round = _is_knockout_round(round_name)
+    if "cup" in league_type or "cup" in league or knockout_round:
+        flags.append("cup_or_knockout")
+    if "friendly" in league:
+        flags.append("friendly")
+    if "uefa" in league or "champions league" in league or "europa" in league:
+        flags.append("continental")
+    if "continental" in flags and knockout_round:
+        flags.append("continental_knockout")
+    home_rest = _rest_days((home_form or {}).get("last_played"), fx.get("kickoff_utc"))
+    away_rest = _rest_days((away_form or {}).get("last_played"), fx.get("kickoff_utc"))
+    if home_rest is not None and home_rest < 4:
+        flags.append("home_short_rest")
+    if away_rest is not None and away_rest < 4:
+        flags.append("away_short_rest")
+
+    standings = fetch_league_standings(fx.get("code"), fx.get("season"))
+    home_pos = standings.get(fx.get("hid"), {})
+    away_pos = standings.get(fx.get("aid"), {})
+    for label, pos in (("home", home_pos), ("away", away_pos)):
+        rank = int(pos.get("rank") or 0)
+        total = int(pos.get("total") or 0)
+        if rank and total:
+            if rank <= 4:
+                flags.append(f"{label}_top_table")
+            if rank >= max(total - 3, 1):
+                flags.append(f"{label}_relegation_zone")
+    if home_pos and away_pos:
+        total = int(home_pos.get("total") or away_pos.get("total") or 0)
+        hr = int(home_pos.get("rank") or 0)
+        ar = int(away_pos.get("rank") or 0)
+        if total and total * 0.35 < hr < total * 0.75 and total * 0.35 < ar < total * 0.75:
+            flags.append("mid_table_context")
+
+    strength = league_strength_factor(fx)
+    if strength < 0.9:
+        flags.append("lower_strength_or_friendly_league")
+    elif strength > 1.1:
+        flags.append("elite_strength_league")
+    return {
+        "flags": sorted(set(flags)),
+        "league_strength": round(strength, 2),
+        "h2h": {},
+        "home_rest_days": home_rest,
+        "away_rest_days": away_rest,
+        "home_standing": home_pos,
+        "away_standing": away_pos,
+    }
 
 def _stat_value(statistics, stat_type):
     stat_type = normalize(stat_type)
@@ -523,14 +784,21 @@ def score_corner_markets(real_odds, corner_profile=None):
 
     return scores
 
-def score_fixture(hf, af, h2h, real_odds, api_preds=None, corner_profile=None):
+def score_fixture(hf, af, h2h, real_odds, api_preds=None, corner_profile=None, fixture_context=None):
     def sf(v,strong,mod,w):
         return w if v>=strong else round(w*0.67) if v>=mod else round(w*0.33)
 
     diff = hf["avg_scored"] - af["avg_scored"]
-    g    = max(h2h.get("games",1),1)
-    h2w  = h2h.get("t1w",2)/g
-    o25r = h2h.get("o25",3)/g
+    fixture_context = fixture_context or {}
+    context_flags = set(fixture_context.get("flags") or [])
+    g    = max(h2h.get("games",0),0)
+    h2h_games = max(g, 1)
+    h2w  = h2h.get("t1w",0)/h2h_games
+    h2aw = h2h.get("t2w",0)/h2h_games
+    h2d  = h2h.get("draws",0)/h2h_games
+    o25r = h2h.get("o25",0)/h2h_games
+    h2h_available = g >= 2
+    knockout_mode = bool(context_flags & {"continental_knockout", "cup_or_knockout"})
 
     # attack_str/defence_str: 0.0-1.0 (0.5 = average)
     h_atk = hf.get("attack_str",0.5)
@@ -564,11 +832,20 @@ def score_fixture(hf, af, h2h, real_odds, api_preds=None, corner_profile=None):
            sf(1-h_def,0.5,0.4,W["f7"])+sf(af["wins"],3,2,W["f8"])+
            sf(af["wins"],3,2,W["f9"])+sf(kap_a,0.1,0.0,W["f10"])+
            sf(-diff,0.8,0.2,W["f11"])+sf(o25r,0.6,0.4,W["f12"])+
-           sf(2.7,2.7,2.3,W["f13"])+sf((g-h2h.get("t1w",2))/g,0.6,0.4,W["f14"])+
+           sf(2.7,2.7,2.3,W["f13"])+sf(h2aw,0.6,0.4,W["f14"])+
            sf(kap_a,0.1,0.0,W["f15"])+sf(0,2,0,W["f16"])+
            sf(8,3,2,W["f17"])+sf(a_atk-0.5,0.1,0.0,W["f18"])+
            sf(af.get("streak",0),3,1,W["f19"]))
     ac = round(min(95,max(0,(afs/MAX_W)*100*CONF_DEFLATOR)))
+
+    if knockout_mode:
+        # Knockout ties are usually less explained by domestic form; pull result strength toward neutral
+        # and let H2H/market/API signals carry more of the load.
+        hc = round(hc * 0.72 + 50 * 0.28)
+        ac = round(ac * 0.72 + 50 * 0.28)
+        if h2h_available:
+            hc = round(hc * 0.70 + (h2w * 100) * 0.30)
+            ac = round(ac * 0.70 + (h2aw * 100) * 0.30)
 
     # Blend API-Football ML win percent (30% weight)
     if api_preds:
@@ -638,7 +915,14 @@ def score_fixture(hf, af, h2h, real_odds, api_preds=None, corner_profile=None):
     gg = min(95, max(10, round(gg_raw * CONF_DEFLATOR)))
     hcs  = min(80,round(hf["clean_sheets"]/max(hf["games"],1)*100))
     acs  = min(80,round(af["clean_sheets"]/max(af["games"],1)*100))
-    dc12 = min(82,hc+ac)
+    h_draw_rate = hf.get("draws", 0) / max(hf.get("games", 0), 1)
+    a_draw_rate = af.get("draws", 0) / max(af.get("games", 0), 1)
+    recent_draw_conf = round(((h_draw_rate + a_draw_rate) / 2) * 100)
+    if knockout_mode and h2h_available:
+        recent_draw_conf = round(recent_draw_conf * 0.45 + (h2d * 100) * 0.55)
+    residual_draw_conf = max(5, 100 - hc - ac)
+    draw_conf = max(5, min(45, round(residual_draw_conf * 0.65 + recent_draw_conf * 0.35)))
+    dc12 = min(82, max(5, 100 - draw_conf))
 
     def blend_conf(m,o):
         if not o: return m
@@ -657,19 +941,28 @@ def score_fixture(hf, af, h2h, real_odds, api_preds=None, corner_profile=None):
     fts_a = min(50,max(10,round(af["avg_scored"]/ta*100*0.70-8)))
 
     scores = {
-        "Home Win":hc,"Away Win":ac,"Draw":max(5,100-hc-ac),
+        "Home Win":hc,"Away Win":ac,"Draw":draw_conf,
         "Over 1.5":o15,"Under 1.5":100-o15,
         "Over 2.5":o25,"Under 2.5":100-o25,
         "Under 3.5":min(90,100-round(o25*0.55)),
         "GG / BTTS Yes":gg,"GG + Over 2.5":round(gg*o25/100),
-        "DC: 1X":min(95,hc+max(5,100-hc-ac)),
-        "DC: X2":min(95,ac+max(5,100-hc-ac)),
+        "DC: 1X":min(95,hc+draw_conf),
+        "DC: X2":min(95,ac+draw_conf),
         "DC: 12":dc12,"DNB Home":hc,"DNB Away":ac,
         "Home CS":hcs,"Away CS":acs,
-        "AH Home +0.5":min(95,hc+max(5,100-hc-ac)),
-        "AH Away +0.5":min(95,ac+max(5,100-hc-ac)),
+        "AH Home +0.5":min(95,hc+draw_conf),
+        "AH Away +0.5":min(95,ac+draw_conf),
         "First to Score H":fts_h,"First to Score A":fts_a,
     }
+    if knockout_mode:
+        h2_u25 = h2h.get("u25", 0) / h2h_games * 100
+        h2_u35 = h2h.get("u35", 0) / h2h_games * 100
+        if h2h_available:
+            scores["Under 2.5"] = round(scores["Under 2.5"] * 0.55 + h2_u25 * 0.45)
+            scores["Under 3.5"] = round(scores["Under 3.5"] * 0.60 + h2_u35 * 0.40)
+            scores["Over 2.5"] = 100 - scores["Under 2.5"]
+        scores["Over 2.5"] = min(scores["Over 2.5"], 62)
+        scores["Under 3.5"] = min(92, scores["Under 3.5"] + 4)
     scores.update(score_corner_markets(real_odds, corner_profile))
     return scores
 
@@ -686,8 +979,31 @@ def _remember_odd(odds, key, value):
     odd = _decimal_odd(value)
     if not odd:
         return
+    odds.setdefault("_samples", {}).setdefault(key, []).append(odd)
     if key not in odds or odd > odds[key]:
         odds[key] = odd
+
+def _finalize_odds_meta(odds):
+    samples = odds.pop("_samples", {})
+    meta = {}
+    for key, values in samples.items():
+        values = [value for value in values if value]
+        if not values:
+            continue
+        avg = sum(values) / len(values)
+        best = max(values)
+        worst = min(values)
+        meta[key] = {
+            "bookmaker_count": len(values),
+            "best": round(best, 3),
+            "worst": round(worst, 3),
+            "average": round(avg, 3),
+            "spread_pct": round(((best - worst) / avg) * 100, 1) if avg else 0.0,
+            "best_vs_average_pct": round(((best - avg) / avg) * 100, 1) if avg else 0.0,
+        }
+    if meta:
+        odds["_meta"] = meta
+    return odds
 
 def _parse_line(label, prefix):
     if not label.startswith(prefix):
@@ -764,6 +1080,7 @@ def get_api_football_odds(fixture_id):
                         elif label in ("home/away", "12"):
                             _remember_odd(odds, "12", odd)
 
+    odds = _finalize_odds_meta(odds)
     _odds_cache[fixture_id] = odds
     return odds
 
@@ -777,7 +1094,7 @@ MARKET_THRESHOLDS = {
     "Home CS":65,"Away CS":72,"AH Home +0.5":58,"AH Away +0.5":78,
     "First to Score H":55,"First to Score A":85,
 }
-MIN_ODDS=1.25; BANKER_MIN=76; VALUE_MIN=70; WILD_MIN=60
+MIN_ODDS=1.25; BANKER_MIN=80; VALUE_MIN=70; WILD_MIN=60
 # Scale targets: aim for 10–15 picks on a busy fixture day
 MAX_BANKERS=3; MAX_VALUE_GEMS=7; MAX_WILD_CARDS=10
 TARGET_MIN=10; TARGET_MAX=15
@@ -869,6 +1186,7 @@ def calibrate_confidence(raw_conf, profile_data):
 
     hit_rate = float(profile_data.get("hit_rate") or 0)
     roi_flat = float(profile_data.get("roi_flat") or 0)
+    avg_confidence = float(profile_data.get("avg_confidence") or 0)
     adjustment = 0
 
     if roi_flat < -10:
@@ -880,14 +1198,25 @@ def calibrate_confidence(raw_conf, profile_data):
 
     if hit_rate and hit_rate < max(45, raw_conf - 18):
         adjustment -= 5
+    if hit_rate and avg_confidence:
+        calibration_gap = hit_rate - avg_confidence
+        if calibration_gap <= -15:
+            adjustment -= 6
+        elif calibration_gap <= -8:
+            adjustment -= 3
+        elif calibration_gap >= 10 and roi_flat > 0:
+            adjustment += 2
 
     return max(1, min(95, round(raw_conf + adjustment)))
 
-def candidate_risk_flags(raw_conf, conf, market, odds, odds_is_real, ev, profile_data):
+def candidate_risk_flags(raw_conf, conf, market, odds, odds_is_real, ev, profile_data, odds_meta=None, fixture_context=None, team_news=None):
     flags = []
     count = int(profile_data.get("count") or 0)
     hit_rate = float(profile_data.get("hit_rate") or 0)
     roi_flat = float(profile_data.get("roi_flat") or 0)
+    odds_meta = odds_meta or {}
+    fixture_context = fixture_context or {}
+    team_news = team_news or {}
 
     if not odds_is_real:
         flags.append("estimated_odds")
@@ -903,10 +1232,65 @@ def candidate_risk_flags(raw_conf, conf, market, odds, odds_is_real, ev, profile
         flags.append("confidence_calibrated_down")
     if ev is not None and ev < algo_min_ev():
         flags.append("thin_edge")
-    if conf < market_threshold(market):
-        flags.append("below_market_threshold")
+    if (odds_meta.get("bookmaker_count") or 0) >= 3:
+        if float(odds_meta.get("spread_pct") or 0) >= 18:
+            flags.append("wide_odds_market")
+        if float(odds_meta.get("best_vs_average_pct") or 0) >= 12:
+            flags.append("best_price_far_above_consensus")
+    for flag in fixture_context.get("flags") or []:
+        flags.append(f"context:{flag}")
+    for flag in team_news.get("flags") or []:
+        flags.append(flag)
+    if team_news and not team_news.get("available"):
+        flags.append("team_news_unavailable")
 
     return flags
+
+def apply_context_adjustments(scores, fixture_context=None, team_news=None):
+    fixture_context = fixture_context or {}
+    team_news = team_news or {}
+    flags = set(fixture_context.get("flags") or []) | set(team_news.get("flags") or [])
+    adjusted = dict(scores)
+
+    def bump(markets, delta):
+        for market in markets:
+            if market in adjusted:
+                adjusted[market] = max(1, min(95, round(adjusted[market] + delta)))
+
+    volatility_flags = {
+        "friendly",
+        "cup_or_knockout",
+        "team_news_heavy_absences",
+        "lower_strength_or_friendly_league",
+    }
+    if flags & volatility_flags:
+        for market, value in list(adjusted.items()):
+            if value >= 70:
+                adjusted[market] = max(1, value - 4)
+
+    if "team_news_absences" in flags:
+        for market, value in list(adjusted.items()):
+            if value >= 70:
+                adjusted[market] = max(1, value - 2)
+
+    if "home_short_rest" in flags:
+        bump(["Home Win", "DC: 1X", "DNB Home", "AH Home +0.5", "Home CS", "First to Score H"], -4)
+        bump(["Away Win", "DC: X2", "DNB Away", "AH Away +0.5"], 2)
+    if "away_short_rest" in flags:
+        bump(["Away Win", "DC: X2", "DNB Away", "AH Away +0.5", "Away CS", "First to Score A"], -4)
+        bump(["Home Win", "DC: 1X", "DNB Home", "AH Home +0.5"], 2)
+
+    if "home_relegation_zone" in flags or "away_relegation_zone" in flags:
+        bump(["GG / BTTS Yes", "Over 1.5", "Over 2.5"], 2)
+        bump(["Under 1.5", "Under 2.5", "Under 3.5"], -2)
+    if "mid_table_context" in flags:
+        bump(["Under 2.5", "Under 3.5"], 2)
+        bump(["Over 2.5"], -2)
+    if "continental_knockout" in flags:
+        bump(["Under 3.5", "AH Home +0.5", "AH Away +0.5", "DC: 1X", "DC: X2"], 3)
+        bump(["Home Win", "Away Win", "Over 2.5", "GG + Over 2.5"], -3)
+
+    return adjusted
 
 def market_threshold(market):
     if market.startswith("Corners "):
@@ -921,8 +1305,6 @@ def passes_publish_gate(candidate):
     if (require_real_odds() or not allow_estimated_picks()) and not candidate["odds_is_real"]:
         return False
     if candidate["conf"] < WILD_MIN:
-        return False
-    if candidate["conf"] < market_threshold(candidate["market"]):
         return False
     if candidate["odds"] < MIN_ODDS:
         return False
@@ -948,7 +1330,15 @@ def _market_history_is_bad(profile_data):
 
 def _has_severe_risk(candidate):
     flags = set(candidate.get("risk_flags") or [])
-    return bool(flags & {"no_real_odds", "negative_market_roi", "low_market_hit_rate", "thin_edge"})
+    return bool(flags & {
+        "no_real_odds",
+        "negative_market_roi",
+        "low_market_hit_rate",
+        "thin_edge",
+        "wide_odds_market",
+        "best_price_far_above_consensus",
+        "team_news_heavy_absences",
+    })
 
 def _form_games(candidate):
     home_games = int((candidate.get("home_recent_form") or {}).get("games") or 0)
@@ -956,13 +1346,9 @@ def _form_games(candidate):
     return min(home_games, away_games)
 
 def _banker_quality(candidate):
-    if not candidate.get("proven"):
-        return False
     if not candidate.get("odds_is_real"):
         return False
     if candidate.get("conf", 0) < BANKER_MIN:
-        return False
-    if not (1.25 <= candidate.get("odds", 0) <= 1.85):
         return False
     if (candidate.get("ev") or 0) < max(algo_min_ev(), 0.03):
         return False
@@ -977,13 +1363,11 @@ def _banker_quality(candidate):
 def _value_gem_quality(candidate):
     if not candidate.get("odds_is_real"):
         return False
-    if candidate.get("conf", 0) < VALUE_MIN:
+    conf = candidate.get("conf", 0)
+    if not (VALUE_MIN <= conf < BANKER_MIN):
         return False
     odds = candidate.get("odds", 0)
-    conf = candidate.get("conf", 0)
-    short_odds_value = conf >= 78 and 1.25 <= odds < 1.35
-    standard_value = 1.35 <= odds <= 3.50
-    if not (short_odds_value or standard_value):
+    if odds < MIN_ODDS:
         return False
     if (candidate.get("ev") or 0) < max(algo_min_ev(), 0.04):
         return False
@@ -1000,8 +1384,7 @@ def _wild_profile(candidate):
         return ""
     ev = candidate.get("ev") or 0
     conf = candidate.get("conf", 0)
-    odds = candidate.get("odds", 0)
-    if WILD_MIN <= conf < VALUE_MIN and odds > 2.00 and ev >= max(algo_min_ev(), 0.03):
+    if WILD_MIN <= conf < VALUE_MIN and ev >= max(algo_min_ev(), 0.03):
         return "high_upside"
     return ""
 
@@ -1015,9 +1398,19 @@ def _tag_profile(candidate, profile_name):
 
 def recent_form_summary(form):
     games = max(form.get("games", 0), 1)
+    wins = form.get("wins", 0)
+    draws = form.get("draws", 0)
+    losses = form.get("losses")
+    if losses is None:
+        losses = max(0, form.get("games", 0) - wins - draws)
     return {
         "games": form.get("games", 0),
-        "wins": form.get("wins", 0),
+        "scope": form.get("scope", "overall"),
+        "last_played": form.get("last_played", ""),
+        "wins": wins,
+        "draws": draws,
+        "losses": losses,
+        "form": form.get("form", ""),
         "avg_scored": form.get("avg_scored", 0),
         "avg_conceded": form.get("avg_conceded", 0),
         "clean_sheets": form.get("clean_sheets", 0),
@@ -1038,7 +1431,7 @@ def _format_form_line(label, form):
     if not games:
         return f"{label}: recent form unavailable"
     return (
-        f"{label}: {form.get('wins', 0)} wins/{games}, "
+        f"{label}: {form.get('wins', 0)}W-{form.get('draws', 0)}D-{form.get('losses', 0)}L over {games}, "
         f"{form.get('avg_scored', 0)} scored and {form.get('avg_conceded', 0)} conceded per match, "
         f"BTTS {_percent(form.get('btts_rate'))}, over 2.5 {_percent(form.get('over25_rate'))}, "
         f"{form.get('clean_sheets', 0)} clean sheets"
@@ -1128,6 +1521,9 @@ def _compact_pick_for_llm(pick):
         "home_recent_form": pick.get("home_recent_form") or {},
         "away_recent_form": pick.get("away_recent_form") or {},
         "corner_profile": pick.get("corner_profile") or {},
+        "odds_meta": pick.get("odds_meta") or {},
+        "fixture_context": pick.get("fixture_context") or {},
+        "team_news": pick.get("team_news") or {},
         "fallback_reasoning": pick.get("reasoning", ""),
         "fallback_verdict": pick.get("model_verdict", ""),
     }
@@ -1202,8 +1598,9 @@ def _call_minimax_pick_batch(picks):
                 "role": "system",
                 "content": (
                     "You write concise betting-pick explanations for a football analytics product. "
-                    "Use only the supplied data. Do not promise a win, do not invent injuries, odds movement, "
-                    "lineups, news, standings, or head-to-head facts. Mention uncertainty naturally. "
+                    "Use only the supplied data. Do not promise a win, and do not invent injuries, lineups, "
+                    "news, standings, odds movement, or head-to-head facts beyond the provided fields. "
+                    "Mention uncertainty naturally. "
                     "Return strict JSON only."
                 ),
             },
@@ -1263,6 +1660,7 @@ def select_picks(all_confs, scored_fxs, odds_list):
         for market,conf in confs.items():
             key  = ODDS_KEYS_MAP.get(market)
             real_odd = (real_odds.get(key) if key else None) or real_odds.get(market)
+            odds_meta = ((real_odds.get("_meta") or {}).get(key) if key else None) or (real_odds.get("_meta") or {}).get(market) or {}
             odds_is_real = bool(real_odd)
             profile_data = market_profile(profile, market, fx.get("league"))
             calibrated_conf = calibrate_confidence(conf, profile_data)
@@ -1283,9 +1681,14 @@ def select_picks(all_confs, scored_fxs, odds_list):
                 "away_recent_form":fx.get("away_recent_form",{}),
                 "corner_profile":fx.get("corner_profile",{}),
                 "market_profile":profile_data,
+                "odds_meta": odds_meta,
+                "fixture_context": fx.get("fixture_context", {}),
+                "team_news": fx.get("team_news", {}),
             }
             candidate["risk_flags"] = candidate_risk_flags(
-                conf, calibrated_conf, market, odds, odds_is_real, ev, profile_data
+                conf, calibrated_conf, market, odds, odds_is_real, ev, profile_data, odds_meta,
+                fx.get("fixture_context", {}),
+                fx.get("team_news", {}),
             )
             if passes_publish_gate(candidate):
                 pool.append(candidate)
@@ -1418,13 +1821,14 @@ def serialize_selected_picks(bankers, value_gems, wild_cards, target_date, bankr
             })
     return picks
 
-def serialize_fixture_markets(confs, real_odds=None, league=None, corner_profile=None):
+def serialize_fixture_markets(confs, real_odds=None, league=None, corner_profile=None, fixture_context=None, team_news=None):
     markets = []
     real_odds = real_odds or {}
     profile = load_performance_profile()
     for market, confidence in sorted(confs.items(), key=lambda item: item[1], reverse=True):
         key = ODDS_KEYS_MAP.get(market)
         real_odd = (real_odds.get(key) if key else None) or real_odds.get(market)
+        odds_meta = ((real_odds.get("_meta") or {}).get(key) if key else None) or (real_odds.get("_meta") or {}).get(market) or {}
         profile_data = market_profile(profile, market, league)
         calibrated_confidence = calibrate_confidence(confidence, profile_data)
         odds = real_odd or est_odds(calibrated_confidence)
@@ -1436,6 +1840,7 @@ def serialize_fixture_markets(confs, real_odds=None, league=None, corner_profile
             "raw_confidence": confidence,
             "confidence": calibrated_confidence,
             "odds": odds,
+            "odds_meta": odds_meta,
             "ev": ev,
             "odds_source": "api_football" if odds_is_real else "estimated",
             "proven": market in PROVEN_MARKETS,
@@ -1447,9 +1852,14 @@ def serialize_fixture_markets(confs, real_odds=None, league=None, corner_profile
                 "odds_is_real": odds_is_real,
                 "market_profile": profile_data,
                 "corner_profile": corner_profile or {},
+                "odds_meta": odds_meta,
+                "fixture_context": fixture_context or {},
+                "team_news": team_news or {},
             }),
             "risk_flags": candidate_risk_flags(
-                confidence, calibrated_confidence, market, odds, odds_is_real, ev, profile_data
+                confidence, calibrated_confidence, market, odds, odds_is_real, ev, profile_data, odds_meta,
+                fixture_context or {},
+                team_news or {},
             ),
         })
     return markets
@@ -1467,12 +1877,19 @@ def serialize_fixture_summaries(scored_fxs, all_confs, odds_list=None):
             "match_id": str(fx.get("match_id") or ""),
             "home_recent_form": fx.get("home_recent_form", {}),
             "away_recent_form": fx.get("away_recent_form", {}),
+            "fixture_context": fx.get("fixture_context", {}),
+            "team_news": fx.get("team_news", {}),
             "market_count": len(confs),
             "markets_70_plus": sum(1 for value in confs.values() if value >= 70),
             "markets_65_plus": sum(1 for value in confs.values() if value >= 65),
             "corner_profile": fx.get("corner_profile", {}),
             "markets": serialize_fixture_markets(
-                confs, real_odds, fx.get("league"), fx.get("corner_profile", {})
+                confs,
+                real_odds,
+                fx.get("league"),
+                fx.get("corner_profile", {}),
+                fx.get("fixture_context", {}),
+                fx.get("team_news", {}),
             ),
         })
     return summaries
@@ -2159,19 +2576,35 @@ def run_daily_algo():
                           "def":comparison.get("def",{}).get("home","50%")}
                 a_comp = {"att":comparison.get("att",{}).get("away","50%"),
                           "def":comparison.get("def",{}).get("away","50%")}
-                hf = fetch_team_recent_form(fx.get("hid")) or map_aps_to_form(teams_data.get("home"),h_comp)
-                af = fetch_team_recent_form(fx.get("aid")) or map_aps_to_form(teams_data.get("away"),a_comp)
+                hf_overall = fetch_team_recent_form(fx.get("hid"))
+                af_overall = fetch_team_recent_form(fx.get("aid"))
+                hf = fetch_team_recent_form(fx.get("hid"), venue="home") or hf_overall or map_aps_to_form(teams_data.get("home"),h_comp)
+                af = fetch_team_recent_form(fx.get("aid"), venue="away") or af_overall or map_aps_to_form(teams_data.get("away"),a_comp)
+                strength = league_strength_factor(fx)
+                hf = apply_league_strength(hf, strength)
+                af = apply_league_strength(af, strength)
                 hf["attack_str"] = _percent_to_ratio(h_comp.get("att"), hf.get("attack_str", 0.5))
                 af["attack_str"] = _percent_to_ratio(a_comp.get("att"), af.get("attack_str", 0.5))
                 hf["defence_str"] = _percent_to_ratio(h_comp.get("def"), hf.get("defence_str", 0.5))
                 af["defence_str"] = _percent_to_ratio(a_comp.get("def"), af.get("defence_str", 0.5))
                 h2h = parse_aps_h2h(pred_data.get("h2h",[]),fx["hname"])
             else:
-                hf=fetch_team_recent_form(fx.get("hid")) or _default_form()
-                af=fetch_team_recent_form(fx.get("aid")) or _default_form()
-                h2h={"games":5,"t1w":2,"o25":3,"btts":2}
+                hf=fetch_team_recent_form(fx.get("hid"), venue="home") or fetch_team_recent_form(fx.get("hid")) or _default_form()
+                af=fetch_team_recent_form(fx.get("aid"), venue="away") or fetch_team_recent_form(fx.get("aid")) or _default_form()
+                strength = league_strength_factor(fx)
+                hf = apply_league_strength(hf, strength)
+                af = apply_league_strength(af, strength)
+                h2h = parse_aps_h2h([], fx["hname"])
             fx["home_recent_form"] = recent_form_summary(hf)
             fx["away_recent_form"] = recent_form_summary(af)
+            fixture_context = build_fixture_context(fx, hf, af)
+            fixture_context["h2h"] = h2h
+            context_flags = set(fixture_context.get("flags") or [])
+            context_flags.add("h2h_available" if int(h2h.get("games") or 0) >= 2 else "h2h_unavailable")
+            fixture_context["flags"] = sorted(context_flags)
+            team_news = fetch_fixture_team_news(fx.get("aps_id"), fx.get("hid"), fx.get("aid"))
+            fx["fixture_context"] = fixture_context
+            fx["team_news"] = team_news
             real_odds = get_api_football_odds(fx["aps_id"])
             corner_odds_available = any(key.startswith("Corners ") for key in real_odds)
             corner_profile = build_corner_profile(fx) if corner_odds_available else {}
@@ -2183,12 +2616,14 @@ def run_daily_algo():
                 real_odds,
                 api_preds=pred_data,
                 corner_profile=corner_profile,
+                fixture_context=fixture_context,
             )
+            confs = apply_context_adjustments(confs, fixture_context, team_news)
             all_confs.append(confs); scored_fxs.append(fx); odds_list.append(real_odds)
             log.info("    APS scored OK")
         except Exception as e:
             log.warning(f"APS score error {fx['fixture']}: {e}")
-            confs = score_fixture(_default_form(),_default_form(),{"games":5,"t1w":2,"o25":3,"btts":2},{})
+            confs = score_fixture(_default_form(),_default_form(),parse_aps_h2h([], fx.get("hname", "")),{})
             all_confs.append(confs); scored_fxs.append(fx); odds_list.append({})
         time.sleep(0.5)   # Paid tier limit
 

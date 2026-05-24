@@ -57,19 +57,25 @@ class PickSerializer(serializers.ModelSerializer):
         return obj.backs.filter(user=request.user).exists()
 
     def get_tier(self, obj) -> str:
-        if obj.tier != Pick.Tier.WILD_CARD:
-            return obj.tier
-        try:
-            odds = float(obj.odds or 0)
-        except (TypeError, ValueError):
-            odds = 0
         confidence = obj.confidence or 0
-        if 60 <= confidence < 70 and odds > 2.0:
-            return obj.tier
-        return Pick.Tier.VALUE_GEM
+        if confidence >= 80:
+            return Pick.Tier.BANKER
+        if 70 <= confidence < 80:
+            return Pick.Tier.VALUE_GEM
+        if 60 <= confidence < 70:
+            return Pick.Tier.WILD_CARD
+        return obj.tier
 
     def get_selection_profile(self, obj) -> str:
-        if obj.tier == Pick.Tier.WILD_CARD and self.get_tier(obj) != Pick.Tier.WILD_CARD:
+        tier = self.get_tier(obj)
+        if obj.tier != tier:
+            if tier == Pick.Tier.BANKER:
+                return "reliability"
+            if tier == Pick.Tier.VALUE_GEM:
+                return "mispriced_value"
+            if tier == Pick.Tier.WILD_CARD:
+                return "high_upside"
+        if obj.tier == Pick.Tier.WILD_CARD and tier != Pick.Tier.WILD_CARD:
             return "mispriced_value"
         for flag in obj.risk_flags or []:
             if str(flag).startswith("profile:"):
@@ -77,8 +83,15 @@ class PickSerializer(serializers.ModelSerializer):
         return ""
 
     def get_model_verdict(self, obj) -> str:
-        if obj.tier == Pick.Tier.WILD_CARD and self.get_tier(obj) != Pick.Tier.WILD_CARD:
+        tier = self.get_tier(obj)
+        if obj.tier == tier:
+            return obj.model_verdict
+        if tier == Pick.Tier.BANKER:
+            return "Banker selected for high confidence and a controlled risk profile."
+        if tier == Pick.Tier.VALUE_GEM:
             return "Value Gem selected for positive value and confidence."
+        if tier == Pick.Tier.WILD_CARD:
+            return "Wild Card selected for playable upside at moderate confidence."
         return obj.model_verdict
 
     def get_risk_level(self, obj) -> str:
@@ -161,6 +174,10 @@ class DailyPicksQuerySerializer(serializers.Serializer):
     date = serializers.DateField(required=False)
 
 
+class BackedPicksQuerySerializer(serializers.Serializer):
+    date = serializers.DateField(required=False)
+
+
 class RecordQuerySerializer(serializers.Serializer):
     days = serializers.IntegerField(required=False, min_value=1, max_value=365, default=90)
 
@@ -185,6 +202,7 @@ class FixtureMarketSerializer(serializers.Serializer):
     raw_confidence = serializers.IntegerField(required=False)
     confidence = serializers.IntegerField()
     odds = serializers.FloatField()
+    odds_meta = serializers.JSONField(required=False)
     ev = serializers.FloatField()
     odds_source = serializers.CharField(required=False)
     proven = serializers.BooleanField()
@@ -206,6 +224,8 @@ class FixturePickGroupSerializer(serializers.Serializer):
     markets_70_plus = serializers.IntegerField()
     markets_65_plus = serializers.IntegerField()
     corner_profile = serializers.JSONField(required=False)
+    fixture_context = serializers.JSONField(required=False)
+    team_news = serializers.JSONField(required=False)
     markets = FixtureMarketSerializer(many=True)
     picks = PickSerializer(many=True)
 
@@ -278,3 +298,9 @@ class PickBackResponseSerializer(serializers.Serializer):
     backed = serializers.BooleanField()
     created = serializers.BooleanField()
     backed_count = serializers.IntegerField()
+
+
+class BackedPicksResponseSerializer(serializers.Serializer):
+    date = serializers.DateField(required=False, allow_null=True)
+    count = serializers.IntegerField()
+    picks = PickSerializer(many=True)
