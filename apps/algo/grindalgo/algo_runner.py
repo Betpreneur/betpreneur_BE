@@ -69,11 +69,33 @@ def _env_int(name, default):
 
 # ── API-FOOTBALL TRACKED LEAGUES ─────────────────────────────────
 APS_TRACKED_LEAGUES = {
+    7:   "Asian Cup",
     848: "UEFA Europa Conference League",
     10:  "Club Friendlies",
     21:  "International Friendlies",
     71:  "Serie B (Brazil)",
+    115: "Svenska Cupen (Sweden)",
+    241: "Copa Colombia",
     253: "MLS",
+    486: "Belarus Cup",
+    587: "World Cup U17",
+    658: "Latvia Cup",
+    742: "Copa Paulista (Brazil)",
+    822: "Morocco Cup",
+    840: "Taca Revelacao U23 (Portugal)",
+    853: "Supercopa de Ecuador",
+    914: "Tournoi Maurice Revello",
+    950: "World Cup U17 Women",
+    973: "CAF Cup of Nations U17",
+    975: "Serie C Relegation Play-offs (Italy)",
+    989: "Oberliga Relegation Round (Germany)",
+    999: "Serie D Championship Round (Italy)",
+    1000: "Segunda Division RFEF Play-offs",
+    1011: "Second Amateur Division Play-offs (Belgium)",
+    1100: "Brasiliense U20 (Brazil)",
+    1148: "Maranhense 2 (Brazil)",
+    1158: "Copa Gaucha (Brazil)",
+    1229: "Liga Women (Peru)",
     141: "Segunda Division",
     79:  "2. Bundesliga",
     203: "Super Lig (Turkey)",
@@ -447,6 +469,28 @@ LEAGUE_STRENGTH = {
     "253": 0.96,  # MLS
     "10": 0.82,   # Friendlies
     "21": 0.82,   # International Friendlies
+    "7": 0.98,    # Asian Cup
+    "115": 0.88,  # Svenska Cupen
+    "241": 0.88,  # Copa Colombia
+    "486": 0.82,  # Belarus Cup
+    "587": 0.78,  # World Cup U17
+    "658": 0.82,  # Latvia Cup
+    "742": 0.84,  # Copa Paulista
+    "822": 0.82,  # Morocco Cup
+    "840": 0.76,  # Portugal U23 cup
+    "853": 0.84,  # Ecuador Super Cup
+    "914": 0.76,  # Tournoi Maurice Revello
+    "950": 0.76,  # World Cup U17 Women
+    "973": 0.76,  # CAF U17
+    "975": 0.80,  # Serie C relegation playoffs
+    "989": 0.76,  # Oberliga relegation round
+    "999": 0.78,  # Serie D championship round
+    "1000": 0.80, # Segunda RFEF playoffs
+    "1011": 0.76, # Belgium amateur playoffs
+    "1100": 0.74, # Brasiliense U20
+    "1148": 0.74, # Maranhense 2
+    "1158": 0.80, # Copa Gaucha
+    "1229": 0.76, # Peru Women
 }
 
 def league_strength_factor(fx):
@@ -599,8 +643,17 @@ def build_fixture_context(fx, home_form=None, away_form=None):
     league_type = normalize(fx.get("league_type", ""))
     flags = []
     knockout_round = _is_knockout_round(round_name)
-    if "cup" in league_type or "cup" in league or knockout_round:
+    cup_terms = ("cup", "copa", "coppa", "taca", "supercopa")
+    if "cup" in league_type or any(term in league for term in cup_terms) or knockout_round:
         flags.append("cup_or_knockout")
+    if "relegation" in league or "relegation" in round_name:
+        flags.append("relegation_playoff")
+    if "u17" in league or "u20" in league or "u23" in league or "revelacao" in league or "revello" in league:
+        flags.append("youth_competition")
+    if "women" in league or "liga women" in league:
+        flags.append("women_competition")
+    if "amateur" in league or "oberliga" in league or "serie d" in league or "maranhense" in league:
+        flags.append("lower_division")
     if "friendly" in league:
         flags.append("friendly")
     if "uefa" in league or "champions league" in league or "europa" in league:
@@ -1300,6 +1353,10 @@ def apply_context_adjustments(scores, fixture_context=None, team_news=None):
     volatility_flags = {
         "friendly",
         "cup_or_knockout",
+        "relegation_playoff",
+        "youth_competition",
+        "women_competition",
+        "lower_division",
         "team_news_heavy_absences",
         "lower_strength_or_friendly_league",
     }
