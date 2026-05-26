@@ -6,6 +6,8 @@ from .models import AlgoRun, Pick, PickBack
 class PickSerializer(serializers.ModelSerializer):
     tier = serializers.SerializerMethodField()
     model_verdict = serializers.SerializerMethodField()
+    home_recent_form = serializers.SerializerMethodField()
+    away_recent_form = serializers.SerializerMethodField()
     backed_count = serializers.SerializerMethodField()
     backed_by_me = serializers.SerializerMethodField()
     selection_profile = serializers.SerializerMethodField()
@@ -49,6 +51,24 @@ class PickSerializer(serializers.ModelSerializer):
 
     def get_backed_count(self, obj) -> int:
         return obj.backs.count()
+
+    def _recent_form_payload(self, form) -> dict:
+        form = dict(form or {})
+        wins = int(form.get("wins") or 0)
+        draws = int(form.get("draws") or 0)
+        games = int(form.get("games") or 0)
+        if "losses" not in form:
+            form["losses"] = max(0, games - wins - draws)
+        form.setdefault("draws", draws)
+        form.setdefault("scope", "overall")
+        form.setdefault("form", "")
+        return form
+
+    def get_home_recent_form(self, obj) -> dict:
+        return self._recent_form_payload(obj.home_recent_form)
+
+    def get_away_recent_form(self, obj) -> dict:
+        return self._recent_form_payload(obj.away_recent_form)
 
     def get_backed_by_me(self, obj) -> bool:
         request = self.context.get("request")
@@ -182,6 +202,23 @@ class RecordQuerySerializer(serializers.Serializer):
     days = serializers.IntegerField(required=False, min_value=1, max_value=365, default=90)
 
 
+class MarketHealthQuerySerializer(serializers.Serializer):
+    days = serializers.IntegerField(required=False, min_value=1, max_value=365, default=90)
+    market = serializers.CharField(required=False, allow_blank=True)
+    scope = serializers.ChoiceField(
+        choices=("all", "published", "internal"),
+        required=False,
+        default="all",
+    )
+
+
+class MarketHealthResponseSerializer(serializers.Serializer):
+    days = serializers.IntegerField()
+    scope = serializers.CharField()
+    count = serializers.IntegerField()
+    markets = serializers.JSONField()
+
+
 class DailyPicksSummarySerializer(serializers.Serializer):
     fixture_count = serializers.IntegerField()
     market_count = serializers.IntegerField()
@@ -223,6 +260,8 @@ class FixturePickGroupSerializer(serializers.Serializer):
     market_count = serializers.IntegerField()
     markets_70_plus = serializers.IntegerField()
     markets_65_plus = serializers.IntegerField()
+    home_recent_form = serializers.JSONField(required=False)
+    away_recent_form = serializers.JSONField(required=False)
     corner_profile = serializers.JSONField(required=False)
     fixture_context = serializers.JSONField(required=False)
     team_news = serializers.JSONField(required=False)

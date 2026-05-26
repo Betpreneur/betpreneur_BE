@@ -10,7 +10,7 @@ from django.conf import settings
 from django.db.models import Q
 from django.utils import timezone
 
-from .models import AlgoRun, Pick
+from .models import AlgoRun, MarketPrediction, Pick
 
 
 @contextmanager
@@ -67,7 +67,7 @@ class AlgoRunnerService:
         picks = []
         for item in selected_picks:
             picks.append(
-                Pick(
+                Pick.objects.create(
                     run=algo_run,
                     match_date=item.get("match_date") or algo_run.target_date,
                     fixture=item.get("fixture", ""),
@@ -91,7 +91,69 @@ class AlgoRunnerService:
                     source=item.get("source", ""),
                 )
             )
-        Pick.objects.bulk_create(picks)
+        return picks
+
+    def _prediction_rejection_reason(self, market, published=False):
+        if published or market.get("selected"):
+            return ""
+        flags = market.get("risk_flags") or []
+        if not market.get("eligible"):
+            if flags:
+                return ", ".join(str(flag) for flag in flags[:4])
+            return "below_publish_gate"
+        return "not_top_pick"
+
+    def _persist_market_predictions(self, algo_run: AlgoRun, result):
+        MarketPrediction.objects.filter(run=algo_run).delete()
+        fixture_summaries = result.get("fixture_summaries") or []
+        if not fixture_summaries:
+            return 0
+
+        selected_lookup = {
+            (
+                str(pick.match_id or "").strip(),
+                pick.market,
+            ): pick
+            for pick in algo_run.picks.all()
+        }
+        rows = []
+        for fixture in fixture_summaries:
+            match_id = str(fixture.get("match_id") or "").strip()
+            for market in fixture.get("markets") or []:
+                selected_pick = selected_lookup.get((match_id, market.get("market", "")))
+                published = bool(selected_pick)
+                rows.append(
+                    MarketPrediction(
+                        run=algo_run,
+                        selected_pick=selected_pick,
+                        match_date=algo_run.target_date,
+                        fixture=fixture.get("fixture", ""),
+                        home_team=fixture.get("home_team", ""),
+                        away_team=fixture.get("away_team", ""),
+                        league=fixture.get("league", ""),
+                        kickoff=fixture.get("kickoff", ""),
+                        match_id=match_id,
+                        market=market.get("market", ""),
+                        meaning=market.get("meaning", ""),
+                        raw_confidence=market.get("raw_confidence") or market.get("confidence") or 0,
+                        confidence=market.get("confidence") or 0,
+                        odds=market.get("odds") or 0,
+                        ev=market.get("ev"),
+                        odds_source=market.get("odds_source", ""),
+                        odds_meta=market.get("odds_meta") or {},
+                        eligible=bool(market.get("eligible")),
+                        published=published,
+                        rejection_reason=self._prediction_rejection_reason(market, published),
+                        risk_flags=market.get("risk_flags") or [],
+                        home_recent_form=fixture.get("home_recent_form") or {},
+                        away_recent_form=fixture.get("away_recent_form") or {},
+                        fixture_context=fixture.get("fixture_context") or {},
+                        team_news=fixture.get("team_news") or {},
+                    )
+                )
+        MarketPrediction.objects.bulk_create(rows, ignore_conflicts=True, batch_size=500)
+        result["internal_prediction_count"] = len(rows)
+        return len(rows)
 
     def _sync_settled_picks(self, result):
         settled_picks = result.get("settled_picks") or []
@@ -116,11 +178,137 @@ class AlgoRunnerService:
             result["database_updated_count"] = updated
 
     def _performance_profile(self):
+        predictions = (
+            MarketPrediction.objects.filter(status__in=[MarketPrediction.Status.WIN, MarketPrediction.Status.LOSS])
+            .select_related("run")
+            .order_by("-match_date", "-run__target_date", "-created_at", "-id")
+        )
+        if predictions.exists():
+            return self._performance_profile_from_predictions(predictions)
+
         picks = (
             Pick.objects.filter(status__in=[Pick.Status.WIN, Pick.Status.LOSS])
             .select_related("run")
             .order_by("-match_date", "-run__target_date", "-created_at", "-id")
         )
+        return self._performance_profile_from_picks(picks)
+
+    def _empty_market_stats(self):
+        return {
+            "count": 0,
+            "wins": 0,
+            "losses": 0,
+            "stake": 0.0,
+            "pnl": 0.0,
+            "confidence_total": 0.0,
+            "published_count": 0,
+            "internal_count": 0,
+            "recent_statuses": [],
+        }
+
+    def _finalize_market_stats(self, group):
+        payload = {}
+        for key, stats in group.items():
+            settled = stats["wins"] + stats["losses"]
+            stake = stats["stake"]
+            recent_statuses = stats["recent_statuses"]
+            loss_streak = 0
+            for status in recent_statuses:
+                if status != Pick.Status.LOSS:
+                    break
+                loss_streak += 1
+            recent_5 = recent_statuses[:5]
+            recent_10 = recent_statuses[:10]
+            recent_5_losses = sum(1 for status in recent_5 if status == Pick.Status.LOSS)
+            recent_10_wins = sum(1 for status in recent_10 if status == Pick.Status.WIN)
+            hit_rate = round((stats["wins"] / settled) * 100, 1) if settled else 0.0
+            roi_flat = round((stats["pnl"] / stake) * 100, 1) if stake else 0.0
+            recent_10_hit_rate = round((recent_10_wins / len(recent_10)) * 100, 1) if recent_10 else 0.0
+            state = "active"
+            if loss_streak >= 3 or recent_5_losses >= 4 or (len(recent_10) >= 5 and recent_10_hit_rate < 35):
+                state = "suppressed"
+            elif loss_streak >= 2 or recent_5_losses >= 3 or (len(recent_10) >= 5 and recent_10_hit_rate < 45):
+                state = "cooling"
+            elif len(recent_10) >= 5 and recent_10_hit_rate >= 60 and roi_flat >= 0:
+                state = "recovered"
+            payload[key] = {
+                "count": stats["count"],
+                "wins": stats["wins"],
+                "losses": stats["losses"],
+                "hit_rate": hit_rate,
+                "roi_flat": roi_flat,
+                "avg_confidence": round(stats["confidence_total"] / stats["count"], 1) if stats["count"] else 0.0,
+                "published_count": stats["published_count"],
+                "internal_count": stats["internal_count"],
+                "recent_count": len(recent_statuses),
+                "loss_streak": loss_streak,
+                "recent_5_losses": recent_5_losses,
+                "recent_10_hit_rate": recent_10_hit_rate,
+                "state": state,
+            }
+        return payload
+
+    def _performance_profile_from_predictions(self, predictions):
+        latest = {}
+        for prediction in predictions:
+            key = (
+                prediction.match_date or prediction.run.target_date,
+                str(prediction.match_id or "").strip(),
+                prediction.fixture,
+                prediction.market,
+            )
+            if key not in latest:
+                latest[key] = prediction
+
+        older_picks = (
+            Pick.objects.filter(status__in=[Pick.Status.WIN, Pick.Status.LOSS])
+            .select_related("run")
+            .order_by("-match_date", "-run__target_date", "-created_at", "-id")
+        )
+        for pick in older_picks:
+            key = (
+                pick.match_date or pick.run.target_date,
+                str(pick.match_id or "").strip(),
+                pick.fixture,
+                pick.market,
+            )
+            if key not in latest:
+                latest[key] = pick
+
+        market_stats = defaultdict(self._empty_market_stats)
+        league_market_stats = defaultdict(self._empty_market_stats)
+
+        for record in latest.values():
+            keys = [record.market, f"{record.league}::{record.market}"]
+            stat_groups = [market_stats[keys[0]], league_market_stats[keys[1]]]
+            for stats in stat_groups:
+                stats["count"] += 1
+                if record.status == Pick.Status.WIN:
+                    stats["wins"] += 1
+                else:
+                    stats["losses"] += 1
+                if isinstance(record, MarketPrediction):
+                    stats["stake"] += 1000.0
+                    stats["pnl"] += float(record.pnl_simulated or 0)
+                    is_published = record.published
+                else:
+                    stats["stake"] += float(record.stake or 0)
+                    stats["pnl"] += float(record.pnl or 0)
+                    is_published = True
+                stats["confidence_total"] += float(record.confidence or 0)
+                if is_published:
+                    stats["published_count"] += 1
+                else:
+                    stats["internal_count"] += 1
+                if len(stats["recent_statuses"]) < 10:
+                    stats["recent_statuses"].append(record.status)
+
+        return {
+            "markets": self._finalize_market_stats(market_stats),
+            "league_markets": self._finalize_market_stats(league_market_stats),
+        }
+
+    def _performance_profile_from_picks(self, picks):
         latest = {}
         for pick in picks:
             key = (
@@ -132,8 +320,8 @@ class AlgoRunnerService:
             if key not in latest:
                 latest[key] = pick
 
-        market_stats = defaultdict(lambda: {"count": 0, "wins": 0, "losses": 0, "stake": 0.0, "pnl": 0.0, "confidence_total": 0.0})
-        league_market_stats = defaultdict(lambda: {"count": 0, "wins": 0, "losses": 0, "stake": 0.0, "pnl": 0.0, "confidence_total": 0.0})
+        market_stats = defaultdict(self._empty_market_stats)
+        league_market_stats = defaultdict(self._empty_market_stats)
 
         for pick in latest.values():
             keys = [pick.market, f"{pick.league}::{pick.market}"]
@@ -147,25 +335,13 @@ class AlgoRunnerService:
                 stats["stake"] += float(pick.stake or 0)
                 stats["pnl"] += float(pick.pnl or 0)
                 stats["confidence_total"] += float(pick.confidence or 0)
-
-        def finalize(group):
-            payload = {}
-            for key, stats in group.items():
-                settled = stats["wins"] + stats["losses"]
-                stake = stats["stake"]
-                payload[key] = {
-                    "count": stats["count"],
-                    "wins": stats["wins"],
-                    "losses": stats["losses"],
-                    "hit_rate": round((stats["wins"] / settled) * 100, 1) if settled else 0.0,
-                    "roi_flat": round((stats["pnl"] / stake) * 100, 1) if stake else 0.0,
-                    "avg_confidence": round(stats["confidence_total"] / stats["count"], 1) if stats["count"] else 0.0,
-                }
-            return payload
+                stats["published_count"] += 1
+                if len(stats["recent_statuses"]) < 10:
+                    stats["recent_statuses"].append(pick.status)
 
         return {
-            "markets": finalize(market_stats),
-            "league_markets": finalize(league_market_stats),
+            "markets": self._finalize_market_stats(market_stats),
+            "league_markets": self._finalize_market_stats(league_market_stats),
         }
 
     def _api_football_headers(self):
@@ -292,9 +468,16 @@ class AlgoRunnerService:
             | Q(match_date__isnull=True, run__target_date=target_date),
             status=Pick.Status.PENDING,
         )
+        predictions = MarketPrediction.objects.filter(
+            match_date=target_date,
+            status=MarketPrediction.Status.PENDING,
+        )
         updated = 0
+        predictions_updated = 0
         total_pnl = 0
         settled = []
+        settled_predictions = []
+        first_scorer_cache = {}
 
         for pick in picks:
             fixture = fixture_map.get(str(pick.match_id))
@@ -312,7 +495,9 @@ class AlgoRunnerService:
             away_team = (teams.get("away") or {}).get("name")
             first_scorer = None
             if "First to Score" in pick.market:
-                first_scorer = self._first_scorer(pick.match_id)
+                if pick.match_id not in first_scorer_cache:
+                    first_scorer_cache[pick.match_id] = self._first_scorer(pick.match_id)
+                first_scorer = first_scorer_cache[pick.match_id]
 
             won = self._check_market(pick, home_goals, away_goals, home_team, away_team, first_scorer)
             stake = pick.stake or Decimal("0")
@@ -346,13 +531,67 @@ class AlgoRunnerService:
                 "pnl": float(pick.pnl or 0),
             })
 
+        for prediction in predictions:
+            fixture = fixture_map.get(str(prediction.match_id))
+            if not fixture:
+                continue
+
+            goals = fixture.get("goals") or {}
+            home_goals = goals.get("home")
+            away_goals = goals.get("away")
+            if home_goals is None or away_goals is None:
+                continue
+
+            teams = fixture.get("teams") or {}
+            home_team = (teams.get("home") or {}).get("name")
+            away_team = (teams.get("away") or {}).get("name")
+            first_scorer = None
+            if "First to Score" in prediction.market:
+                if prediction.match_id not in first_scorer_cache:
+                    first_scorer_cache[prediction.match_id] = self._first_scorer(prediction.match_id)
+                first_scorer = first_scorer_cache[prediction.match_id]
+
+            won = self._check_market(prediction, home_goals, away_goals, home_team, away_team, first_scorer)
+            stake = Decimal("1000")
+            if won is None:
+                prediction.status = MarketPrediction.Status.VOID
+                prediction.pnl_simulated = Decimal("0")
+            elif won:
+                prediction.status = MarketPrediction.Status.WIN
+                prediction.pnl_simulated = Decimal(str(round(float(stake) * (float(prediction.odds) - 1), 2)))
+            else:
+                prediction.status = MarketPrediction.Status.LOSS
+                prediction.pnl_simulated = -stake
+
+            prediction.score = f"{home_goals}-{away_goals}"
+            if prediction.market.startswith("Corners "):
+                corner_total = self._fixture_corner_total(prediction.match_id)
+                prediction.result = f"{corner_total} corners" if corner_total is not None else prediction.score
+            else:
+                prediction.result = prediction.score
+            prediction.settled_at = timezone.now()
+            prediction.save(update_fields=["status", "pnl_simulated", "score", "result", "settled_at"])
+
+            predictions_updated += 1
+            settled_predictions.append({
+                "id": prediction.id,
+                "fixture": prediction.fixture,
+                "market": prediction.market,
+                "published": prediction.published,
+                "status": prediction.status,
+                "score": prediction.score,
+                "pnl_simulated": float(prediction.pnl_simulated or 0),
+            })
+
         return {
             "status": "success",
             "date": target_date.isoformat(),
             "updated_count": updated,
             "database_updated_count": updated,
+            "internal_predictions_updated_count": predictions_updated,
             "total_pnl": total_pnl,
             "settled_picks": settled,
+            "settled_internal_predictions": settled_predictions,
         }
 
     def run(self, algo_run: AlgoRun) -> AlgoRun:
@@ -382,6 +621,7 @@ class AlgoRunnerService:
             algo_run.bankroll = result.get("bankroll")
             algo_run.result = result
             self._persist_selected_picks(algo_run, result)
+            self._persist_market_predictions(algo_run, result)
         except Exception as exc:
             algo_run.status = AlgoRun.Status.FAILED
             algo_run.error = str(exc)

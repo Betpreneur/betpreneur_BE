@@ -4,7 +4,7 @@ from django.template.response import TemplateResponse
 from django.urls import path
 from django.utils import timezone
 
-from .models import AlgoRun, Pick, PickBack
+from .models import AlgoRun, MarketPrediction, Pick, PickBack
 from .performance import performance_dashboard
 from .tasks import generate_daily_picks, run_monthly_auditor, settle_daily_results
 
@@ -42,6 +42,27 @@ class PickInline(admin.TabularInline):
         "stake",
         "settled_at",
     )
+
+
+class MarketPredictionInline(admin.TabularInline):
+    model = MarketPrediction
+    extra = 0
+    can_delete = False
+    fields = (
+        "match_date",
+        "fixture",
+        "market",
+        "confidence",
+        "odds",
+        "ev",
+        "eligible",
+        "published",
+        "status",
+        "score",
+        "pnl_simulated",
+    )
+    readonly_fields = fields
+    show_change_link = True
 
 
 @admin.action(description="Queue pick generation for selected run dates")
@@ -130,7 +151,7 @@ class AlgoRunAdmin(admin.ModelAdmin):
         ("Result Payload", {"fields": ("result", "error"), "classes": ("collapse",)}),
         ("Timestamps", {"fields": ("created_at", "updated_at"), "classes": ("collapse",)}),
     )
-    inlines = [PickInline]
+    inlines = [PickInline, MarketPredictionInline]
 
     def get_urls(self):
         urls = super().get_urls()
@@ -246,6 +267,144 @@ class PickAdmin(admin.ModelAdmin):
         messages.success(request, f"Marked {updated} pick(s) as void.")
 
     actions = ("queue_settlement_for_pick_dates", "mark_void")
+
+
+@admin.register(MarketPrediction)
+class MarketPredictionAdmin(admin.ModelAdmin):
+    date_hierarchy = "match_date"
+    list_display = (
+        "id",
+        "match_date",
+        "fixture",
+        "league",
+        "market",
+        "confidence",
+        "odds",
+        "ev",
+        "eligible",
+        "published",
+        "market_state",
+        "status",
+        "score",
+        "pnl_simulated",
+    )
+    list_filter = (
+        "published",
+        "eligible",
+        "status",
+        "odds_source",
+        "match_date",
+        "league",
+        "market",
+    )
+    search_fields = (
+        "fixture",
+        "home_team",
+        "away_team",
+        "league",
+        "market",
+        "match_id",
+        "rejection_reason",
+    )
+    list_editable = ("status", "score", "pnl_simulated")
+    readonly_fields = (
+        "run",
+        "selected_pick",
+        "created_at",
+        "settled_at",
+    )
+    fieldsets = (
+        (
+            "Match",
+            {
+                "fields": (
+                    "run",
+                    "selected_pick",
+                    "match_date",
+                    "fixture",
+                    "home_team",
+                    "away_team",
+                    "league",
+                    "kickoff",
+                    "match_id",
+                )
+            },
+        ),
+        (
+            "Prediction",
+            {
+                "fields": (
+                    "market",
+                    "meaning",
+                    "raw_confidence",
+                    "confidence",
+                    "odds",
+                    "ev",
+                    "odds_source",
+                    "odds_meta",
+                    "eligible",
+                    "published",
+                    "rejection_reason",
+                    "risk_flags",
+                )
+            },
+        ),
+        (
+            "Context",
+            {
+                "fields": (
+                    "home_recent_form",
+                    "away_recent_form",
+                    "fixture_context",
+                    "team_news",
+                ),
+                "classes": ("collapse",),
+            },
+        ),
+        (
+            "Settlement",
+            {
+                "fields": (
+                    "status",
+                    "score",
+                    "result",
+                    "pnl_simulated",
+                    "settled_at",
+                )
+            },
+        ),
+        ("Timestamps", {"fields": ("created_at",), "classes": ("collapse",)}),
+    )
+
+    @admin.display(description="State")
+    def market_state(self, obj):
+        flags = set(obj.risk_flags or [])
+        if "market_suppressed" in flags or "market_loss_streak" in flags or "market_recent_losses" in flags:
+            return "suppressed"
+        if "market_cooling" in flags or "market_recent_low_hit_rate" in flags:
+            return "cooling"
+        if "market_recovered" in flags:
+            return "recovered"
+        return "active"
+
+    @admin.action(description="Queue settlement for selected prediction dates")
+    def queue_settlement_for_prediction_dates(self, request, queryset):
+        task_ids = []
+        dates = queryset.values_list("match_date", flat=True).distinct()
+        for match_date in dates:
+            task = settle_daily_results.delay(match_date.isoformat())
+            task_ids.append(task.id)
+        messages.success(
+            request,
+            f"Queued {len(task_ids)} settlement task(s): {', '.join(task_ids)}",
+        )
+
+    @admin.action(description="Mark selected internal predictions as void")
+    def mark_void(self, request, queryset):
+        updated = queryset.update(status=MarketPrediction.Status.VOID, pnl_simulated=0, settled_at=timezone.now())
+        messages.success(request, f"Marked {updated} internal prediction(s) as void.")
+
+    actions = ("queue_settlement_for_prediction_dates", "mark_void")
 
 
 @admin.register(PickBack)

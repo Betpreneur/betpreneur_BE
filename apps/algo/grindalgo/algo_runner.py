@@ -1113,6 +1113,12 @@ def algo_min_ev():
 def algo_min_market_sample():
     return _env_int("ALGO_MIN_MARKET_SAMPLE", 15)
 
+def algo_market_loss_streak_block():
+    return _env_int("ALGO_MARKET_LOSS_STREAK_BLOCK", 3)
+
+def algo_market_recent_loss_block():
+    return _env_int("ALGO_MARKET_RECENT_5_LOSS_BLOCK", 4)
+
 def algo_max_daily_picks():
     return _env_int("ALGO_MAX_DAILY_PICKS", TARGET_MAX)
 
@@ -1207,6 +1213,21 @@ def calibrate_confidence(raw_conf, profile_data):
         elif calibration_gap >= 10 and roi_flat > 0:
             adjustment += 2
 
+    loss_streak = int(profile_data.get("loss_streak") or 0)
+    recent_5_losses = int(profile_data.get("recent_5_losses") or 0)
+    recent_count = int(profile_data.get("recent_count") or 0)
+    recent_10_hit_rate = float(profile_data.get("recent_10_hit_rate") or 0)
+    if loss_streak >= algo_market_loss_streak_block():
+        adjustment -= 10
+    elif loss_streak >= 2:
+        adjustment -= 5
+    if recent_5_losses >= algo_market_recent_loss_block():
+        adjustment -= 8
+    elif recent_5_losses >= 3:
+        adjustment -= 4
+    if recent_count >= 5 and recent_10_hit_rate and recent_10_hit_rate < 40:
+        adjustment -= 4
+
     return max(1, min(95, round(raw_conf + adjustment)))
 
 def candidate_risk_flags(raw_conf, conf, market, odds, odds_is_real, ev, profile_data, odds_meta=None, fixture_context=None, team_news=None):
@@ -1228,6 +1249,25 @@ def candidate_risk_flags(raw_conf, conf, market, odds, odds_is_real, ev, profile
         flags.append("negative_market_roi")
     if count >= algo_min_market_sample() and hit_rate and hit_rate < 50:
         flags.append("low_market_hit_rate")
+    loss_streak = int(profile_data.get("loss_streak") or 0)
+    recent_5_losses = int(profile_data.get("recent_5_losses") or 0)
+    recent_count = int(profile_data.get("recent_count") or 0)
+    recent_10_hit_rate = float(profile_data.get("recent_10_hit_rate") or 0)
+    market_state = str(profile_data.get("state") or "")
+    if market_state == "suppressed":
+        flags.append("market_suppressed")
+    elif market_state == "cooling":
+        flags.append("market_cooling")
+    elif market_state == "recovered":
+        flags.append("market_recovered")
+    if loss_streak >= algo_market_loss_streak_block():
+        flags.append("market_loss_streak")
+    elif loss_streak >= 2:
+        flags.append("market_cooling")
+    if recent_5_losses >= algo_market_recent_loss_block():
+        flags.append("market_recent_losses")
+    if recent_count >= 5 and recent_10_hit_rate and recent_10_hit_rate < 40:
+        flags.append("market_recent_low_hit_rate")
     if conf < raw_conf:
         flags.append("confidence_calibrated_down")
     if ev is not None and ev < algo_min_ev():
@@ -1312,6 +1352,16 @@ def passes_publish_gate(candidate):
         return False
 
     profile_data = candidate.get("market_profile", {})
+    if str(profile_data.get("state") or "") == "suppressed":
+        return False
+    if int(profile_data.get("loss_streak") or 0) >= algo_market_loss_streak_block():
+        return False
+    if int(profile_data.get("recent_5_losses") or 0) >= algo_market_recent_loss_block():
+        return False
+    recent_count = int(profile_data.get("recent_count") or 0)
+    recent_10_hit_rate = float(profile_data.get("recent_10_hit_rate") or 0)
+    if recent_count >= 5 and recent_10_hit_rate and recent_10_hit_rate < 35:
+        return False
     if int(profile_data.get("count") or 0) >= algo_min_market_sample():
         if float(profile_data.get("roi_flat") or 0) < -12:
             return False
@@ -1338,6 +1388,10 @@ def _has_severe_risk(candidate):
         "wide_odds_market",
         "best_price_far_above_consensus",
         "team_news_heavy_absences",
+        "market_suppressed",
+        "market_loss_streak",
+        "market_recent_losses",
+        "market_recent_low_hit_rate",
     })
 
 def _form_games(candidate):

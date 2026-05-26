@@ -15,7 +15,7 @@ from rest_framework.permissions import AllowAny, IsAdminUser, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from .models import AlgoRun, Pick, PickBack
+from .models import AlgoRun, MarketPrediction, Pick, PickBack
 from .performance import (
     add_pick,
     confidence_band,
@@ -32,6 +32,8 @@ from .serializers import (
     BackedPicksResponseSerializer,
     DailyPicksQuerySerializer,
     DailyPicksResponseSerializer,
+    MarketHealthQuerySerializer,
+    MarketHealthResponseSerializer,
     PickSerializer,
     PickBackResponseSerializer,
     PickDetailResponseSerializer,
@@ -244,6 +246,19 @@ def _form_has_games(form):
     return int((form or {}).get("games") or 0) > 0
 
 
+def _recent_form_payload(form):
+    form = dict(form or {})
+    wins = int(form.get("wins") or 0)
+    draws = int(form.get("draws") or 0)
+    games = int(form.get("games") or 0)
+    if "losses" not in form:
+        form["losses"] = max(0, games - wins - draws)
+    form.setdefault("draws", draws)
+    form.setdefault("scope", "overall")
+    form.setdefault("form", "")
+    return form
+
+
 def _fresh_recent_forms_for_pick(pick, fixture_summary=None):
     fixture_summary = fixture_summary or {}
     home_form = pick.home_recent_form or fixture_summary.get("home_recent_form") or {}
@@ -291,7 +306,7 @@ def _fresh_recent_forms_for_pick(pick, fixture_summary=None):
         Pick.objects.filter(id=pick.id).update(
             **{field: getattr(pick, field) for field in update_fields}
         )
-    return home_form, away_form
+    return _recent_form_payload(home_form), _recent_form_payload(away_form)
 
 
 def _pick_performance_slices(pick, days=PICK_DETAIL_HISTORY_DAYS):
@@ -350,6 +365,10 @@ def _pick_detail_payload(pick, request=None):
             "market_count": fixture_summary.get("market_count", len(fixture_summary.get("markets") or [])),
             "markets_70_plus": fixture_summary.get("markets_70_plus", 0),
             "markets_65_plus": fixture_summary.get("markets_65_plus", 0),
+            "home_recent_form": home_form,
+            "away_recent_form": away_form,
+            "fixture_context": fixture_summary.get("fixture_context", {}),
+            "team_news": fixture_summary.get("team_news", {}),
             "corner_profile": fixture_summary.get("corner_profile", {}),
         },
         "market": {
@@ -431,6 +450,10 @@ def _daily_picks_payload(target_date, request=None):
             "market_count": item.get("market_count", 0),
             "markets_70_plus": item.get("markets_70_plus", 0),
             "markets_65_plus": item.get("markets_65_plus", 0),
+            "home_recent_form": _recent_form_payload(item.get("home_recent_form", {})),
+            "away_recent_form": _recent_form_payload(item.get("away_recent_form", {})),
+            "fixture_context": item.get("fixture_context", {}),
+            "team_news": item.get("team_news", {}),
             "corner_profile": item.get("corner_profile", {}),
             "markets": markets,
             "picks": [],
@@ -449,11 +472,21 @@ def _daily_picks_payload(target_date, request=None):
                 "market_count": 0,
                 "markets_70_plus": 0,
                 "markets_65_plus": 0,
+                "home_recent_form": _recent_form_payload(pick.home_recent_form),
+                "away_recent_form": _recent_form_payload(pick.away_recent_form),
+                "fixture_context": {},
+                "team_news": {},
                 "corner_profile": {},
                 "markets": [],
                 "picks": [],
             }
-        data = PickSerializer(pick).data
+        fixtures[key]["home_recent_form"] = _recent_form_payload(
+            fixtures[key].get("home_recent_form") or pick.home_recent_form
+        )
+        fixtures[key]["away_recent_form"] = _recent_form_payload(
+            fixtures[key].get("away_recent_form") or pick.away_recent_form
+        )
+        data = PickSerializer(pick, context={"request": request}).data
         data["backed_by_me"] = pick.id in backed_ids
         data["backed_count"] = pick.backs.count()
         fixtures[key]["picks"].append(data)
@@ -758,6 +791,134 @@ class DailyPicksDownloadView(APIView):
                     pick.status,
                 ])
         return response
+
+
+def _market_health_state(loss_streak, recent_5_losses, recent_10_hit_rate, recent_10_count, roi_flat):
+    if loss_streak >= 3 or recent_5_losses >= 4 or (recent_10_count >= 5 and recent_10_hit_rate < 35):
+        return "suppressed"
+    if loss_streak >= 2 or recent_5_losses >= 3 or (recent_10_count >= 5 and recent_10_hit_rate < 45):
+        return "cooling"
+    if recent_10_count >= 5 and recent_10_hit_rate >= 60 and roi_flat >= 0:
+        return "recovered"
+    return "active"
+
+
+class MarketHealthView(APIView):
+    permission_classes = [IsAdminUser]
+    serializer_class = MarketHealthResponseSerializer
+
+    @extend_schema(
+        summary="Internal market health",
+        description="Staff endpoint. Shows market performance used to suppress, watch, or restore markets.",
+        tags=["Admin Algo"],
+        parameters=[MarketHealthQuerySerializer],
+        responses={200: MarketHealthResponseSerializer},
+    )
+    def get(self, request):
+        query = MarketHealthQuerySerializer(data=request.query_params)
+        query.is_valid(raise_exception=True)
+        days = query.validated_data.get("days", 90)
+        scope = query.validated_data.get("scope", "all")
+        market_filter = query.validated_data.get("market", "")
+        since = timezone.localdate() - timedelta(days=days)
+
+        qs = MarketPrediction.objects.filter(
+            match_date__gte=since,
+            status__in=[MarketPrediction.Status.WIN, MarketPrediction.Status.LOSS],
+        ).order_by("-match_date", "-created_at", "-id")
+        if market_filter:
+            qs = qs.filter(market__iexact=market_filter)
+        if scope == "published":
+            qs = qs.filter(published=True)
+        elif scope == "internal":
+            qs = qs.filter(published=False)
+
+        latest = {}
+        for prediction in qs:
+            key = (
+                prediction.match_date,
+                str(prediction.match_id or "").strip(),
+                prediction.fixture,
+                prediction.market,
+            )
+            if key not in latest:
+                latest[key] = prediction
+
+        grouped = {}
+        for prediction in latest.values():
+            item = grouped.setdefault(
+                prediction.market,
+                {
+                    "market": prediction.market,
+                    "count": 0,
+                    "wins": 0,
+                    "losses": 0,
+                    "published_count": 0,
+                    "internal_count": 0,
+                    "stake": 0.0,
+                    "pnl": 0.0,
+                    "confidence_total": 0.0,
+                    "recent_statuses": [],
+                },
+            )
+            item["count"] += 1
+            if prediction.status == MarketPrediction.Status.WIN:
+                item["wins"] += 1
+            else:
+                item["losses"] += 1
+            if prediction.published:
+                item["published_count"] += 1
+            else:
+                item["internal_count"] += 1
+            item["stake"] += 1000.0
+            item["pnl"] += float(prediction.pnl_simulated or 0)
+            item["confidence_total"] += float(prediction.confidence or 0)
+            if len(item["recent_statuses"]) < 10:
+                item["recent_statuses"].append(prediction.status)
+
+        markets = []
+        for item in grouped.values():
+            recent = item.pop("recent_statuses")
+            loss_streak = 0
+            for status_value in recent:
+                if status_value != MarketPrediction.Status.LOSS:
+                    break
+                loss_streak += 1
+            recent_5_losses = sum(1 for status_value in recent[:5] if status_value == MarketPrediction.Status.LOSS)
+            recent_10 = recent[:10]
+            recent_10_wins = sum(1 for status_value in recent_10 if status_value == MarketPrediction.Status.WIN)
+            hit_rate = round((item["wins"] / item["count"]) * 100, 1) if item["count"] else 0.0
+            roi_flat = round((item["pnl"] / item["stake"]) * 100, 1) if item["stake"] else 0.0
+            recent_10_hit_rate = round((recent_10_wins / len(recent_10)) * 100, 1) if recent_10 else 0.0
+            item.update({
+                "hit_rate": hit_rate,
+                "roi_flat": roi_flat,
+                "avg_confidence": round(item["confidence_total"] / item["count"], 1) if item["count"] else 0.0,
+                "loss_streak": loss_streak,
+                "recent_5_losses": recent_5_losses,
+                "recent_10_hit_rate": recent_10_hit_rate,
+                "state": _market_health_state(loss_streak, recent_5_losses, recent_10_hit_rate, len(recent_10), roi_flat),
+            })
+            item.pop("stake", None)
+            item.pop("confidence_total", None)
+            markets.append(item)
+
+        state_rank = {"suppressed": 3, "cooling": 2, "active": 1, "recovered": 0}
+        markets.sort(
+            key=lambda item: (
+                state_rank.get(item["state"], 0),
+                item["loss_streak"],
+                item["recent_5_losses"],
+                -item["hit_rate"],
+            ),
+            reverse=True,
+        )
+        return Response({
+            "days": days,
+            "scope": scope,
+            "count": len(markets),
+            "markets": markets,
+        })
 
 
 class BackPickView(APIView):
