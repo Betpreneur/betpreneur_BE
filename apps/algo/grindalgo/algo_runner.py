@@ -1007,6 +1007,21 @@ def score_fixture(hf, af, h2h, real_odds, api_preds=None, corner_profile=None, f
         "AH Away +0.5":min(95,ac+draw_conf),
         "First to Score H":fts_h,"First to Score A":fts_a,
     }
+    fixture_context["goal_model"] = {
+        "expected_total": round(exp_total, 2),
+        "draw_confidence": draw_conf,
+        "over15_margin": round(exp_total - 1.5, 2),
+        "over25_margin": round(exp_total - 2.5, 2),
+        "under35_margin": round(3.5 - exp_total, 2),
+    }
+    if exp_total < algo_over15_min_expected_goals():
+        scores["Over 1.5"] = min(scores["Over 1.5"], 59)
+    if exp_total < algo_over25_min_expected_goals():
+        scores["Over 2.5"] = min(scores["Over 2.5"], 59)
+    if exp_total > algo_under35_max_expected_goals():
+        scores["Under 3.5"] = min(scores["Under 3.5"], 59)
+    if draw_conf >= algo_dc12_max_draw_confidence():
+        scores["DC: 12"] = min(scores["DC: 12"], 59)
     if knockout_mode:
         h2_u25 = h2h.get("u25", 0) / h2h_games * 100
         h2_u35 = h2h.get("u35", 0) / h2h_games * 100
@@ -1172,6 +1187,18 @@ def algo_market_loss_streak_block():
 def algo_market_recent_loss_block():
     return _env_int("ALGO_MARKET_RECENT_5_LOSS_BLOCK", 4)
 
+def algo_over15_min_expected_goals():
+    return _env_float("ALGO_OVER15_MIN_EXPECTED_GOALS", 1.85)
+
+def algo_over25_min_expected_goals():
+    return _env_float("ALGO_OVER25_MIN_EXPECTED_GOALS", 2.85)
+
+def algo_under35_max_expected_goals():
+    return _env_float("ALGO_UNDER35_MAX_EXPECTED_GOALS", 2.75)
+
+def algo_dc12_max_draw_confidence():
+    return _env_int("ALGO_DC12_MAX_DRAW_CONFIDENCE", 24)
+
 def algo_max_daily_picks():
     return _env_int("ALGO_MAX_DAILY_PICKS", TARGET_MAX)
 
@@ -1325,6 +1352,17 @@ def candidate_risk_flags(raw_conf, conf, market, odds, odds_is_real, ev, profile
         flags.append("confidence_calibrated_down")
     if ev is not None and ev < algo_min_ev():
         flags.append("thin_edge")
+    goal_model = fixture_context.get("goal_model") or {}
+    expected_total = float(goal_model.get("expected_total") or 0)
+    draw_confidence = float(goal_model.get("draw_confidence") or 0)
+    if market == "Over 1.5" and expected_total and expected_total < algo_over15_min_expected_goals():
+        flags.append("goal_line_boundary")
+    if market == "Over 2.5" and expected_total and expected_total < algo_over25_min_expected_goals():
+        flags.append("goal_line_boundary")
+    if market == "Under 3.5" and expected_total and expected_total > algo_under35_max_expected_goals():
+        flags.append("goal_line_boundary")
+    if market == "DC: 12" and draw_confidence >= algo_dc12_max_draw_confidence():
+        flags.append("draw_boundary_risk")
     if (odds_meta.get("bookmaker_count") or 0) >= 3:
         if float(odds_meta.get("spread_pct") or 0) >= 18:
             flags.append("wide_odds_market")
@@ -1409,6 +1447,18 @@ def passes_publish_gate(candidate):
         return False
 
     profile_data = candidate.get("market_profile", {})
+    fixture_context = candidate.get("fixture_context") or {}
+    goal_model = fixture_context.get("goal_model") or {}
+    expected_total = float(goal_model.get("expected_total") or 0)
+    draw_confidence = float(goal_model.get("draw_confidence") or 0)
+    if candidate["market"] == "Over 1.5" and expected_total and expected_total < algo_over15_min_expected_goals():
+        return False
+    if candidate["market"] == "Over 2.5" and expected_total and expected_total < algo_over25_min_expected_goals():
+        return False
+    if candidate["market"] == "Under 3.5" and expected_total and expected_total > algo_under35_max_expected_goals():
+        return False
+    if candidate["market"] == "DC: 12" and draw_confidence >= algo_dc12_max_draw_confidence():
+        return False
     if str(profile_data.get("state") or "") == "suppressed":
         return False
     if int(profile_data.get("loss_streak") or 0) >= algo_market_loss_streak_block():
@@ -1449,6 +1499,8 @@ def _has_severe_risk(candidate):
         "market_loss_streak",
         "market_recent_losses",
         "market_recent_low_hit_rate",
+        "goal_line_boundary",
+        "draw_boundary_risk",
     })
 
 def _form_games(candidate):
