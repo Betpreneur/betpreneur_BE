@@ -1176,7 +1176,7 @@ ODDS_KEYS_MAP = {
 def est_odds(c): return round(1/max(c/100,0.05)*1.05,2)
 
 def algo_min_ev():
-    return _env_float("ALGO_MIN_EV", 0.02)
+    return _env_float("ALGO_MIN_EV", 0.0)
 
 def algo_min_market_sample():
     return _env_int("ALGO_MIN_MARKET_SAMPLE", 15)
@@ -1188,16 +1188,25 @@ def algo_market_recent_loss_block():
     return _env_int("ALGO_MARKET_RECENT_5_LOSS_BLOCK", 4)
 
 def algo_over15_min_expected_goals():
-    return _env_float("ALGO_OVER15_MIN_EXPECTED_GOALS", 1.85)
+    return _env_float("ALGO_OVER15_MIN_EXPECTED_GOALS", 1.65)
 
 def algo_over25_min_expected_goals():
-    return _env_float("ALGO_OVER25_MIN_EXPECTED_GOALS", 2.85)
+    return _env_float("ALGO_OVER25_MIN_EXPECTED_GOALS", 2.65)
 
 def algo_under35_max_expected_goals():
-    return _env_float("ALGO_UNDER35_MAX_EXPECTED_GOALS", 2.75)
+    return _env_float("ALGO_UNDER35_MAX_EXPECTED_GOALS", 3.05)
 
 def algo_dc12_max_draw_confidence():
-    return _env_int("ALGO_DC12_MAX_DRAW_CONFIDENCE", 24)
+    return _env_int("ALGO_DC12_MAX_DRAW_CONFIDENCE", 30)
+
+def algo_min_daily_picks():
+    return _env_int("ALGO_MIN_DAILY_PICKS", 6)
+
+def algo_floor_confidence():
+    return _env_int("ALGO_FLOOR_CONFIDENCE", 58)
+
+def algo_floor_ev():
+    return _env_float("ALGO_FLOOR_EV", -0.03)
 
 def algo_max_daily_picks():
     return _env_int("ALGO_MAX_DAILY_PICKS", TARGET_MAX)
@@ -1443,7 +1452,9 @@ def passes_publish_gate(candidate):
         return False
     if candidate["odds"] < MIN_ODDS:
         return False
-    if candidate["ev"] is None or candidate["ev"] < algo_min_ev():
+    if candidate["ev"] is None:
+        return False
+    if candidate["ev"] < algo_min_ev():
         return False
 
     profile_data = candidate.get("market_profile", {})
@@ -1491,7 +1502,6 @@ def _has_severe_risk(candidate):
         "no_real_odds",
         "negative_market_roi",
         "low_market_hit_rate",
-        "thin_edge",
         "wide_odds_market",
         "best_price_far_above_consensus",
         "team_news_heavy_absences",
@@ -1499,8 +1509,6 @@ def _has_severe_risk(candidate):
         "market_loss_streak",
         "market_recent_losses",
         "market_recent_low_hit_rate",
-        "goal_line_boundary",
-        "draw_boundary_risk",
     })
 
 def _form_games(candidate):
@@ -1550,6 +1558,27 @@ def _wild_profile(candidate):
     if WILD_MIN <= conf < VALUE_MIN and ev >= max(algo_min_ev(), 0.03):
         return "high_upside"
     return ""
+
+def _best_available_quality(candidate):
+    if not candidate.get("odds_is_real"):
+        return False
+    if _has_severe_risk(candidate):
+        return False
+    if candidate.get("conf", 0) < algo_floor_confidence():
+        return False
+    if candidate.get("odds", 0) < MIN_ODDS:
+        return False
+    ev = candidate.get("ev")
+    if ev is None or ev < algo_floor_ev():
+        return False
+    if candidate["market"].startswith("Corners ") and not corner_market_allowed(
+        candidate["market"], candidate.get("odds"), candidate.get("corner_profile")
+    ):
+        return False
+    profile_data = candidate.get("market_profile") or {}
+    if str(profile_data.get("state") or "") == "suppressed":
+        return False
+    return True
 
 def _tag_profile(candidate, profile_name):
     flags = list(candidate.get("risk_flags") or [])
@@ -1753,6 +1782,8 @@ def pick_verdict(pick):
     profile_name = pick.get("selection_profile", "")
     if "negative_market_roi" in flags or "low_market_hit_rate" in flags:
         return f"{tier.replace('_', ' ').title()} passed today, but historical market risk is flagged."
+    if profile_name == "best_available":
+        return "Best available pick from today's slate; published with visible risk controls."
     if tier == "wild_card" and profile_name == "lean":
         return "Wild Card marked as a lean: extra playable volume with moderate risk."
     if tier == "wild_card" and profile_name == "high_upside":
@@ -2017,6 +2048,30 @@ def select_picks(all_confs, scored_fxs, odds_list):
         if p["fixture"] not in seen_w:
             seen_w.add(p["fixture"]); wild_cards.append(p)
         if len(wild_cards)>=MAX_WILD_CARDS: break
+
+    selected_fixtures = used_b | seen_v | seen_w
+    min_daily = max(0, min(algo_min_daily_picks(), algo_max_daily_picks()))
+    if len(bankers) + len(value_gems) + len(wild_cards) < min_daily:
+        fallback_cands = sorted(
+            [
+                _tag_profile(p, "best_available")
+                for p in pool
+                if p["fixture"] not in selected_fixtures and _best_available_quality(p)
+            ],
+            key=lambda x: (
+                x["conf"],
+                x["ev"] if x.get("ev") is not None else -999,
+                -x["odds"],
+            ),
+            reverse=True,
+        )
+        for p in fallback_cands:
+            if p["fixture"] in selected_fixtures:
+                continue
+            wild_cards.append(p)
+            selected_fixtures.add(p["fixture"])
+            if len(bankers) + len(value_gems) + len(wild_cards) >= min_daily:
+                break
 
     max_daily = max(1, algo_max_daily_picks())
     selected = bankers + value_gems + wild_cards
@@ -2952,7 +3007,7 @@ def run_daily_algo():
               "fd_fixtures":0,"aps_fixtures":len(fixtures),
               "total_scored":len(all_confs),"picks_count":picks_count,
               "no_bet": picks_count == 0,
-              "publish_policy":"strict_edge_only",
+              "publish_policy":"best_available_with_risk_controls",
               "market_count":sum(len(confs) for confs in all_confs),
               "markets_70_plus":sum(1 for confs in all_confs for value in confs.values() if value >= 70),
               "markets_65_plus":sum(1 for confs in all_confs for value in confs.values() if value >= 65),
