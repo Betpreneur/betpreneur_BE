@@ -227,6 +227,7 @@ class PickAdmin(admin.ModelAdmin):
                     "meaning",
                     "reasoning",
                     "risk_flags",
+                    "insights",
                     "confidence",
                     "odds",
                     "ev",
@@ -346,6 +347,7 @@ class MarketPredictionAdmin(admin.ModelAdmin):
                     "published",
                     "rejection_reason",
                     "risk_flags",
+                    "insights",
                 )
             },
         ),

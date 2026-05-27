@@ -32,6 +32,7 @@ class PickSerializer(serializers.ModelSerializer):
             "home_recent_form",
             "away_recent_form",
             "risk_flags",
+            "insights",
             "selection_profile",
             "risk_level",
             "confidence",
@@ -245,6 +246,7 @@ class FixtureMarketSerializer(serializers.Serializer):
     proven = serializers.BooleanField()
     eligible = serializers.BooleanField()
     risk_flags = serializers.ListField(child=serializers.CharField(), required=False)
+    insights = serializers.JSONField(required=False)
     selected = serializers.BooleanField(required=False)
     selected_pick_id = serializers.IntegerField(required=False, allow_null=True)
     selected_tier = serializers.CharField(required=False, allow_blank=True)
@@ -265,6 +267,7 @@ class FixturePickGroupSerializer(serializers.Serializer):
     corner_profile = serializers.JSONField(required=False)
     fixture_context = serializers.JSONField(required=False)
     team_news = serializers.JSONField(required=False)
+    insights = serializers.JSONField(required=False)
     markets = FixtureMarketSerializer(many=True)
     picks = PickSerializer(many=True)
 

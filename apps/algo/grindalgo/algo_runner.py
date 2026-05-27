@@ -1600,6 +1600,110 @@ def _format_form_line(label, form):
         f"{form.get('clean_sheets', 0)} clean sheets"
     )
 
+def _append_unique(items, value):
+    if value and value not in items:
+        items.append(value)
+
+def _compact_items(items, limit=6):
+    return [str(item) for item in items if item][:limit]
+
+def build_fixture_insights(fx):
+    home = fx.get("home_recent_form") or {}
+    away = fx.get("away_recent_form") or {}
+    context = fx.get("fixture_context") or {}
+    team_news = fx.get("team_news") or {}
+    flags = set(context.get("flags") or []) | set(team_news.get("flags") or [])
+    goal_model = context.get("goal_model") or {}
+    h2h = context.get("h2h") or {}
+
+    key_signals = []
+    risk_warnings = []
+    confidence_drivers = []
+
+    if home.get("games"):
+        _append_unique(key_signals, f"Home venue form: {home.get('wins', 0)}W-{home.get('draws', 0)}D-{home.get('losses', 0)}L, {home.get('avg_scored', 0)} scored and {home.get('avg_conceded', 0)} conceded per match.")
+    if away.get("games"):
+        _append_unique(key_signals, f"Away venue form: {away.get('wins', 0)}W-{away.get('draws', 0)}D-{away.get('losses', 0)}L, {away.get('avg_scored', 0)} scored and {away.get('avg_conceded', 0)} conceded per match.")
+    if goal_model.get("expected_total") is not None:
+        _append_unique(key_signals, f"Goal model projects {goal_model.get('expected_total')} total goals with draw confidence at {goal_model.get('draw_confidence', 'unknown')}%.")
+    if int(h2h.get("games") or 0) >= 2:
+        _append_unique(key_signals, f"H2H sample: {h2h.get('games')} games, {h2h.get('draws', 0)} draws, average {h2h.get('avg_goals', 0)} goals.")
+    if context.get("league_strength"):
+        _append_unique(confidence_drivers, f"League strength factor {context.get('league_strength')}.")
+
+    for flag in sorted(flags):
+        if flag in {"cup_or_knockout", "continental_knockout", "relegation_playoff", "friendly", "youth_competition", "women_competition", "lower_division", "lower_strength_or_friendly_league"}:
+            _append_unique(risk_warnings, flag)
+        elif flag in {"home_short_rest", "away_short_rest", "team_news_absences", "team_news_heavy_absences", "lineups_unavailable", "team_news_unavailable"}:
+            _append_unique(risk_warnings, flag)
+
+    strategy = "Use normal pre-match selection rules."
+    if risk_warnings:
+        strategy = "Treat this fixture cautiously; context contains volatility flags."
+    if goal_model.get("expected_total") is not None:
+        expected = float(goal_model.get("expected_total") or 0)
+        if expected < algo_over15_min_expected_goals():
+            strategy = "Avoid aggressive goal overs; projected total is close to the lower scoring boundary."
+        elif expected > algo_under35_max_expected_goals():
+            strategy = "Avoid loose goal unders; projected total is close to the high-scoring boundary."
+    if float(goal_model.get("draw_confidence") or 0) >= algo_dc12_max_draw_confidence():
+        _append_unique(risk_warnings, "draw_boundary_risk")
+
+    return {
+        "pre_match_strategy": strategy,
+        "key_signals": _compact_items(key_signals),
+        "confidence_drivers": _compact_items(confidence_drivers),
+        "risk_warnings": _compact_items(risk_warnings, 8),
+    }
+
+def build_market_insights(market, confidence, odds, ev, risk_flags=None, fixture_context=None, home_form=None, away_form=None, corner_profile=None, profile_data=None, eligible=False):
+    risk_flags = list(risk_flags or [])
+    fixture_context = fixture_context or {}
+    goal_model = fixture_context.get("goal_model") or {}
+    profile_data = profile_data or {}
+    key_signals = []
+    confidence_drivers = []
+    avoid_reasons = []
+
+    expected_total = goal_model.get("expected_total")
+    if expected_total is not None:
+        _append_unique(key_signals, f"Expected goals: {expected_total}.")
+    if market.startswith("Corners "):
+        _append_unique(key_signals, f"Corner model projects {((corner_profile or {}).get('expected_total', 'unknown'))} total corners.")
+    if ev is not None:
+        _append_unique(confidence_drivers, f"EV {ev:+.3f} at {odds} odds.")
+    else:
+        _append_unique(avoid_reasons, "No real odds/EV available.")
+    if profile_data.get("state"):
+        _append_unique(confidence_drivers if profile_data.get("state") == "recovered" else avoid_reasons, f"Market state: {profile_data.get('state')}.")
+    if profile_data.get("hit_rate"):
+        _append_unique(confidence_drivers, f"Historical hit rate {profile_data.get('hit_rate')}%.")
+
+    if "goal_line_boundary" in risk_flags:
+        _append_unique(avoid_reasons, "Goal projection is too close to the selected line.")
+    if "draw_boundary_risk" in risk_flags:
+        _append_unique(avoid_reasons, "Draw pressure is too high for DC:12.")
+    for flag in risk_flags:
+        if flag in {"market_suppressed", "market_loss_streak", "market_recent_losses", "thin_edge", "negative_market_roi", "low_market_hit_rate", "wide_odds_market", "best_price_far_above_consensus"}:
+            _append_unique(avoid_reasons, flag)
+
+    strategy = "Playable candidate if it survives ranking."
+    if not eligible:
+        strategy = "Do not publish; keep this market in internal monitoring."
+    elif avoid_reasons:
+        strategy = "Eligible but caution remains; publish only if it is clearly the best fixture option."
+    if confidence >= 80 and eligible and not avoid_reasons:
+        strategy = "Strong pre-match candidate."
+
+    return {
+        "pre_match_strategy": strategy,
+        "market_state": profile_data.get("state", "untracked"),
+        "key_signals": _compact_items(key_signals),
+        "confidence_drivers": _compact_items(confidence_drivers),
+        "risk_warnings": _compact_items(risk_flags, 10),
+        "avoid_reason": "; ".join(_compact_items(avoid_reasons, 5)),
+    }
+
 def _market_evidence(pick):
     market = pick.get("market", "")
     home = pick.get("home_recent_form") or {}
@@ -1687,6 +1791,7 @@ def _compact_pick_for_llm(pick):
         "odds_meta": pick.get("odds_meta") or {},
         "fixture_context": pick.get("fixture_context") or {},
         "team_news": pick.get("team_news") or {},
+        "insights": pick.get("insights") or {},
         "fallback_reasoning": pick.get("reasoning", ""),
         "fallback_verdict": pick.get("model_verdict", ""),
     }
@@ -1853,6 +1958,19 @@ def select_picks(all_confs, scored_fxs, odds_list):
                 fx.get("fixture_context", {}),
                 fx.get("team_news", {}),
             )
+            candidate["insights"] = build_market_insights(
+                market,
+                calibrated_conf,
+                odds,
+                ev,
+                candidate["risk_flags"],
+                fx.get("fixture_context", {}),
+                fx.get("home_recent_form", {}),
+                fx.get("away_recent_form", {}),
+                fx.get("corner_profile", {}),
+                profile_data,
+                eligible=passes_publish_gate(candidate),
+            )
             if passes_publish_gate(candidate):
                 pool.append(candidate)
 
@@ -1976,6 +2094,7 @@ def serialize_selected_picks(bankers, value_gems, wild_cards, target_date, bankr
                 "home_recent_form": pick.get("home_recent_form", {}),
                 "away_recent_form": pick.get("away_recent_form", {}),
                 "risk_flags": pick.get("risk_flags", []),
+                "insights": pick.get("insights", {}),
                 "confidence": pick.get("conf", 0),
                 "odds": pick.get("odds", 0),
                 "ev": pick.get("ev", 0),
@@ -1984,7 +2103,7 @@ def serialize_selected_picks(bankers, value_gems, wild_cards, target_date, bankr
             })
     return picks
 
-def serialize_fixture_markets(confs, real_odds=None, league=None, corner_profile=None, fixture_context=None, team_news=None):
+def serialize_fixture_markets(confs, real_odds=None, league=None, corner_profile=None, fixture_context=None, team_news=None, home_recent_form=None, away_recent_form=None):
     markets = []
     real_odds = real_odds or {}
     profile = load_performance_profile()
@@ -1997,6 +2116,24 @@ def serialize_fixture_markets(confs, real_odds=None, league=None, corner_profile
         odds = real_odd or est_odds(calibrated_confidence)
         odds_is_real = bool(real_odd)
         ev = round((calibrated_confidence / 100) * odds - 1, 3) if odds_is_real else None
+        risk_flags = candidate_risk_flags(
+            confidence, calibrated_confidence, market, odds, odds_is_real, ev, profile_data, odds_meta,
+            fixture_context or {},
+            team_news or {},
+        )
+        gate_candidate = {
+            "market": market,
+            "conf": calibrated_confidence,
+            "odds": odds,
+            "ev": ev,
+            "odds_is_real": odds_is_real,
+            "market_profile": profile_data,
+            "corner_profile": corner_profile or {},
+            "odds_meta": odds_meta,
+            "fixture_context": fixture_context or {},
+            "team_news": team_news or {},
+        }
+        eligible = passes_publish_gate(gate_candidate)
         markets.append({
             "market": market,
             "meaning": market_meaning(market),
@@ -2007,22 +2144,20 @@ def serialize_fixture_markets(confs, real_odds=None, league=None, corner_profile
             "ev": ev,
             "odds_source": "api_football" if odds_is_real else "estimated",
             "proven": market in PROVEN_MARKETS,
-            "eligible": passes_publish_gate({
-                "market": market,
-                "conf": calibrated_confidence,
-                "odds": odds,
-                "ev": ev,
-                "odds_is_real": odds_is_real,
-                "market_profile": profile_data,
-                "corner_profile": corner_profile or {},
-                "odds_meta": odds_meta,
-                "fixture_context": fixture_context or {},
-                "team_news": team_news or {},
-            }),
-            "risk_flags": candidate_risk_flags(
-                confidence, calibrated_confidence, market, odds, odds_is_real, ev, profile_data, odds_meta,
+            "eligible": eligible,
+            "risk_flags": risk_flags,
+            "insights": build_market_insights(
+                market,
+                calibrated_confidence,
+                odds,
+                ev,
+                risk_flags,
                 fixture_context or {},
-                team_news or {},
+                home_recent_form or {},
+                away_recent_form or {},
+                corner_profile or {},
+                profile_data,
+                eligible=eligible,
             ),
         })
     return markets
@@ -2053,7 +2188,10 @@ def serialize_fixture_summaries(scored_fxs, all_confs, odds_list=None):
                 fx.get("corner_profile", {}),
                 fx.get("fixture_context", {}),
                 fx.get("team_news", {}),
+                fx.get("home_recent_form", {}),
+                fx.get("away_recent_form", {}),
             ),
+            "insights": build_fixture_insights(fx),
         })
     return summaries
 
