@@ -32,6 +32,9 @@ from .serializers import (
     BackedPicksResponseSerializer,
     DailyPicksQuerySerializer,
     DailyPicksResponseSerializer,
+    GameAnalysisQuerySerializer,
+    GameDetailResponseSerializer,
+    GameListResponseSerializer,
     MarketHealthQuerySerializer,
     MarketHealthResponseSerializer,
     PickSerializer,
@@ -197,6 +200,208 @@ def _market_sort_value(market):
         market.get("ev") if market.get("ev") is not None else -999,
         market.get("odds") or 0,
     )
+
+
+def _game_market_rank(market):
+    return (
+        1 if market.get("selected") else 0,
+        1 if market.get("eligible") else 0,
+        market.get("confidence") or 0,
+        market.get("ev") if market.get("ev") is not None else -999,
+        market.get("odds") or 0,
+    )
+
+
+def _tier_for_confidence(confidence):
+    confidence = confidence or 0
+    if confidence >= 80:
+        return Pick.Tier.BANKER
+    if 70 <= confidence < 80:
+        return Pick.Tier.VALUE_GEM
+    if 60 <= confidence < 70:
+        return Pick.Tier.WILD_CARD
+    return "watchlist"
+
+
+def _normalise_fixture_markets(item, picks_by_match):
+    markets = []
+    match_picks = picks_by_match.get(str(item.get("match_id") or ""), [])
+    pick_by_market = {pick.market: pick for pick in match_picks}
+    for market in item.get("markets") or []:
+        payload = dict(market)
+        payload["suggested_tier"] = _tier_for_confidence(payload.get("confidence"))
+        selected_pick = pick_by_market.get(payload.get("market"))
+        if selected_pick:
+            payload["selected"] = True
+            payload["selected_pick_id"] = selected_pick.id
+            payload["selected_tier"] = _effective_pick_tier(selected_pick)
+        else:
+            payload.setdefault("selected", False)
+            payload.setdefault("selected_pick_id", None)
+            payload.setdefault("selected_tier", "")
+        markets.append(payload)
+    return sorted(markets, key=_game_market_rank, reverse=True)
+
+
+def _game_summary_from_fixture(item, picks_by_match, request=None, include_markets=False):
+    match_id = str(item.get("match_id") or "")
+    markets = _normalise_fixture_markets(item, picks_by_match)
+    match_picks = sorted(picks_by_match.get(match_id, []), key=_top_pick_sort_key, reverse=True)
+    pick_data = PickSerializer(match_picks, many=True, context={"request": request}).data
+    top_market = markets[0] if markets else None
+    official_pick = pick_data[0] if pick_data else None
+
+    payload = {
+        "fixture": item.get("fixture", ""),
+        "home_team": item.get("home_team", ""),
+        "away_team": item.get("away_team", ""),
+        "league": item.get("league", ""),
+        "kickoff": item.get("kickoff", ""),
+        "match_id": match_id,
+        "published": bool(match_picks),
+        "official_pick_count": len(match_picks),
+        "official_pick": official_pick,
+        "official_picks": pick_data,
+        "top_market": top_market,
+        "market_count": item.get("market_count", len(markets)),
+        "eligible_market_count": sum(1 for market in markets if market.get("eligible")),
+        "markets_70_plus": item.get("markets_70_plus", 0),
+        "markets_65_plus": item.get("markets_65_plus", 0),
+        "home_recent_form": _recent_form_payload(item.get("home_recent_form", {})),
+        "away_recent_form": _recent_form_payload(item.get("away_recent_form", {})),
+        "fixture_context": item.get("fixture_context", {}),
+        "team_news": item.get("team_news", {}),
+        "corner_profile": item.get("corner_profile", {}),
+        "insights": item.get("insights", {}),
+    }
+    if include_markets:
+        payload["markets"] = markets
+        payload["model_summary"] = {
+            "pre_match_strategy": (item.get("insights") or {}).get("pre_match_strategy", ""),
+            "key_signals": (item.get("insights") or {}).get("key_signals", []),
+            "risk_warnings": (item.get("insights") or {}).get("risk_warnings", []),
+            "top_market": top_market,
+        }
+    return payload
+
+
+def _picks_by_match(algo_run):
+    grouped = {}
+    for pick in sorted(list(algo_run.picks.all()), key=_top_pick_sort_key, reverse=True):
+        grouped.setdefault(str(pick.match_id or ""), []).append(pick)
+    return grouped
+
+
+def _all_games_payload(target_date, request=None):
+    algo_run = _latest_successful_run(target_date)
+    if not algo_run:
+        return {
+            "date": target_date,
+            "published": False,
+            "run_id": None,
+            "posted_at": None,
+            "summary": {
+                "game_count": 0,
+                "published_game_count": 0,
+                "market_count": 0,
+                "eligible_market_count": 0,
+                "top_pick_count": 0,
+            },
+            "games": [],
+        }
+
+    picks_by_match = _picks_by_match(algo_run)
+    fixture_summaries = (algo_run.result or {}).get("fixture_summaries", [])
+    games = [
+        _game_summary_from_fixture(item, picks_by_match, request=request)
+        for item in fixture_summaries
+    ]
+
+    games.sort(
+        key=lambda game: (
+            1 if game.get("published") else 0,
+            (game.get("top_market") or {}).get("confidence") or 0,
+            (game.get("top_market") or {}).get("ev") if (game.get("top_market") or {}).get("ev") is not None else -999,
+            game.get("kickoff") or "",
+        ),
+        reverse=True,
+    )
+
+    return {
+        "date": target_date,
+        "published": bool(games),
+        "run_id": algo_run.id,
+        "posted_at": algo_run.created_at,
+        "summary": {
+            "game_count": len(games),
+            "published_game_count": sum(1 for game in games if game.get("published")),
+            "market_count": (algo_run.result or {}).get("market_count", sum(game.get("market_count", 0) for game in games)),
+            "eligible_market_count": sum(game.get("eligible_market_count", 0) for game in games),
+            "top_pick_count": sum(len(items) for items in picks_by_match.values()),
+            "markets_70_plus": (algo_run.result or {}).get("markets_70_plus", 0),
+            "markets_65_plus": (algo_run.result or {}).get("markets_65_plus", 0),
+        },
+        "games": games,
+    }
+
+
+def _game_detail_payload(target_date, match_id, request=None):
+    algo_run = _latest_successful_run(target_date)
+    if not algo_run:
+        return {
+            "date": target_date,
+            "published": False,
+            "run_id": None,
+            "posted_at": None,
+            "game": None,
+        }
+
+    target_match_id = str(match_id)
+    picks_by_match = _picks_by_match(algo_run)
+    fixture_summary = next(
+        (
+            item
+            for item in (algo_run.result or {}).get("fixture_summaries", [])
+            if str(item.get("match_id") or "") == target_match_id
+        ),
+        None,
+    )
+    if not fixture_summary:
+        match_picks = picks_by_match.get(target_match_id, [])
+        if not match_picks:
+            return {
+                "date": target_date,
+                "published": False,
+                "run_id": algo_run.id,
+                "posted_at": algo_run.created_at,
+                "game": None,
+            }
+        pick = match_picks[0]
+        fixture_summary = {
+            "fixture": pick.fixture,
+            "home_team": pick.home_team,
+            "away_team": pick.away_team,
+            "league": pick.league,
+            "kickoff": pick.kickoff,
+            "match_id": pick.match_id,
+            "home_recent_form": pick.home_recent_form,
+            "away_recent_form": pick.away_recent_form,
+            "markets": [],
+        }
+
+    game = _game_summary_from_fixture(
+        fixture_summary,
+        picks_by_match,
+        request=request,
+        include_markets=True,
+    )
+    return {
+        "date": target_date,
+        "published": game.get("published", False),
+        "run_id": algo_run.id,
+        "posted_at": algo_run.created_at,
+        "game": game,
+    }
 
 
 def _markets_for_pick_detail(pick, fixture_summary):
@@ -714,8 +919,8 @@ class TopPickView(APIView):
     serializer_class = TopPickResponseSerializer
 
     @extend_schema(
-        summary="Top pick of the day",
-        description="Authenticated user endpoint. Returns the highest-ranked published pick for the requested matchday.",
+        summary="Top picks of the day",
+        description="Authenticated user endpoint. Returns the high-value published picks for the requested matchday, ranked by tier, confidence, EV, and odds.",
         tags=["Picks"],
         parameters=[DailyPicksQuerySerializer],
         responses={200: TopPickResponseSerializer},
@@ -725,21 +930,60 @@ class TopPickView(APIView):
         query.is_valid(raise_exception=True)
         target_date = query.validated_data.get("date") or timezone.localdate()
         algo_run = _latest_successful_run(target_date)
-        pick = None
+        picks = []
         if algo_run:
-            picks = list(algo_run.picks.all())
-            pick = max(picks, key=_top_pick_sort_key) if picks else None
-        pick_data = PickSerializer(pick).data if pick else None
-        if pick_data:
-            pick_data["backed_by_me"] = PickBack.objects.filter(pick=pick, user=request.user).exists()
-            pick_data["backed_count"] = pick.backs.count()
+            picks = sorted(list(algo_run.picks.all()), key=_top_pick_sort_key, reverse=True)
+        picks_data = PickSerializer(picks, many=True, context={"request": request}).data
+        top_pick = picks_data[0] if picks_data else None
         return Response(
             {
                 "date": target_date,
-                "published": bool(pick),
-                "pick": pick_data,
+                "published": bool(picks_data),
+                "count": len(picks_data),
+                "pick": top_pick,
+                "top_pick": top_pick,
+                "picks": picks_data,
             }
         )
+
+
+class GamesView(APIView):
+    permission_classes = [IsAuthenticated]
+    serializer_class = GameListResponseSerializer
+
+    @extend_schema(
+        summary="All covered games",
+        description="Authenticated user endpoint. Returns every fixture scored for the covered leagues on a matchday, including each game's best available market and any official published pick.",
+        tags=["Games"],
+        parameters=[GameAnalysisQuerySerializer],
+        responses={200: GameListResponseSerializer},
+    )
+    def get(self, request):
+        query = GameAnalysisQuerySerializer(data=request.query_params)
+        query.is_valid(raise_exception=True)
+        target_date = query.validated_data.get("date") or timezone.localdate()
+        return Response(_all_games_payload(target_date, request))
+
+
+class GameDetailView(APIView):
+    permission_classes = [IsAuthenticated]
+    serializer_class = GameDetailResponseSerializer
+
+    @extend_schema(
+        summary="Game analysis detail",
+        description="Authenticated user endpoint. Returns full model context for one scored fixture, including all markets, fixture context, forms, team news, insights, and official picks if published.",
+        tags=["Games"],
+        parameters=[GameAnalysisQuerySerializer],
+        responses={200: GameDetailResponseSerializer},
+    )
+    def get(self, request, match_id):
+        query = GameAnalysisQuerySerializer(data=request.query_params)
+        query.is_valid(raise_exception=True)
+        target_date = query.validated_data.get("date") or timezone.localdate()
+        payload = _game_detail_payload(target_date, match_id, request)
+        if payload["game"] is None:
+            return Response(payload, status=status.HTTP_404_NOT_FOUND)
+        return Response(payload)
 
 
 class PickDetailView(APIView):

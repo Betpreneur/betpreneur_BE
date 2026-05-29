@@ -199,6 +199,10 @@ class BackedPicksQuerySerializer(serializers.Serializer):
     date = serializers.DateField(required=False)
 
 
+class GameAnalysisQuerySerializer(serializers.Serializer):
+    date = serializers.DateField(required=False)
+
+
 class RecordQuerySerializer(serializers.Serializer):
     days = serializers.IntegerField(required=False, min_value=1, max_value=365, default=90)
 
@@ -286,7 +290,27 @@ class DailyPicksResponseSerializer(serializers.Serializer):
 class TopPickResponseSerializer(serializers.Serializer):
     date = serializers.DateField()
     published = serializers.BooleanField()
-    pick = PickSerializer(allow_null=True)
+    count = serializers.IntegerField(required=False)
+    pick = PickSerializer(allow_null=True, required=False)
+    top_pick = PickSerializer(allow_null=True, required=False)
+    picks = PickSerializer(many=True, required=False)
+
+
+class GameListResponseSerializer(serializers.Serializer):
+    date = serializers.DateField()
+    published = serializers.BooleanField()
+    run_id = serializers.IntegerField(allow_null=True)
+    posted_at = serializers.DateTimeField(allow_null=True)
+    summary = serializers.JSONField()
+    games = serializers.JSONField()
+
+
+class GameDetailResponseSerializer(serializers.Serializer):
+    date = serializers.DateField()
+    published = serializers.BooleanField()
+    run_id = serializers.IntegerField(allow_null=True)
+    posted_at = serializers.DateTimeField(allow_null=True)
+    game = serializers.JSONField(allow_null=True)
 
 
 class PickDetailResponseSerializer(serializers.Serializer):
