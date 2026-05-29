@@ -1799,6 +1799,9 @@ def llm_reasoning_enabled():
         return bool(api_key)
     return str(configured).strip().lower() in {"1", "true", "yes", "on"}
 
+def llm_debug_logging_enabled():
+    return _env_bool("ALGO_LLM_DEBUG_LOG_RESPONSE", False)
+
 def _strip_llm_thinking(content):
     return re.sub(r"<think>.*?</think>", "", content or "", flags=re.DOTALL | re.IGNORECASE).strip()
 
@@ -1837,6 +1840,17 @@ def _parse_llm_json(content):
             raise
         return json.loads(match.group(0))
 
+def _llm_items_from_payload(parsed):
+    if isinstance(parsed, list):
+        return parsed
+    if not isinstance(parsed, dict):
+        return []
+    for key in ("picks", "items", "results", "explanations"):
+        value = parsed.get(key)
+        if isinstance(value, list):
+            return value
+    return []
+
 def _deepseek_chat_completion(payload, *, retries=2):
     api_key = os.environ.get("DEEPSEEK_API_KEY", "").strip()
     if not api_key:
@@ -1853,7 +1867,13 @@ def _deepseek_chat_completion(payload, *, retries=2):
         if response.status_code != 429:
             response.raise_for_status()
             message = ((response.json().get("choices") or [{}])[0].get("message") or {})
-            return message.get("content", "")
+            content = message.get("content", "")
+            if llm_debug_logging_enabled():
+                log.info(
+                    "DeepSeek explanation raw response: %s",
+                    _strip_llm_thinking(content).replace("\n", " ")[:1500],
+                )
+            return content
         last_error = response
         body = (response.text or "").replace("\n", " ")[:500]
         request_id = response.headers.get("x-request-id") or response.headers.get("X-Request-Id") or ""
@@ -1921,21 +1941,53 @@ def _call_deepseek_pick_batch(picks):
             },
         ],
     }
-    parsed = _parse_llm_json(_deepseek_chat_completion(payload) or "")
+    content = _deepseek_chat_completion(payload) or ""
+    parsed = _parse_llm_json(content)
+    items = _llm_items_from_payload(parsed)
+    if not items:
+        log.warning(
+            "DeepSeek explanation response had no picks list; keys=%s body=%s",
+            list(parsed.keys()) if isinstance(parsed, dict) else type(parsed).__name__,
+            _strip_llm_thinking(content).replace("\n", " ")[:500],
+        )
     generated_by_index = {}
-    for item in parsed.get("picks", []) or []:
-        try:
-            index = int(item.get("index"))
-        except (TypeError, ValueError):
+    skipped = 0
+    for item in items:
+        if not isinstance(item, dict):
+            skipped += 1
             continue
-        reasoning = str(item.get("reasoning", "")).strip()
-        verdict = str(item.get("model_verdict", "")).strip()
+        try:
+            index = int(item.get("index", item.get("id", item.get("pick_index"))))
+        except (TypeError, ValueError):
+            skipped += 1
+            continue
+        reasoning = str(
+            item.get("reasoning")
+            or item.get("analysis")
+            or item.get("explanation")
+            or item.get("why")
+            or ""
+        ).strip()
+        verdict = str(
+            item.get("model_verdict")
+            or item.get("verdict")
+            or item.get("summary")
+            or ""
+        ).strip()
         if len(reasoning) < 40 or len(verdict) < 10:
+            skipped += 1
             continue
         generated_by_index[index] = {
             "reasoning": reasoning[:900],
             "model_verdict": verdict[:280],
         }
+    if skipped or len(generated_by_index) != len(picks):
+        log.info(
+            "DeepSeek explanation parse accepted %s/%s items; skipped=%s",
+            len(generated_by_index),
+            len(picks),
+            skipped,
+        )
     return generated_by_index
 
 def enhance_pick_explanations_with_llm(picks):
