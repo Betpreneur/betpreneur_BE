@@ -1797,7 +1797,7 @@ def llm_reasoning_enabled():
     configured = os.environ.get("ALGO_LLM_REASONING_ENABLED")
     if configured is None or configured == "":
         return bool(api_key)
-    return str(configured).strip().lower() in {"1", "true", "yes", "on"}
+    return bool(api_key) and str(configured).strip().lower() in {"1", "true", "yes", "on"}
 
 def llm_debug_logging_enabled():
     return _env_bool("ALGO_LLM_DEBUG_LOG_RESPONSE", False)
@@ -1899,7 +1899,10 @@ def _deepseek_chat_completion(payload, *, retries=2):
 
 def _call_deepseek_pick_batch(picks):
     api_key = os.environ.get("DEEPSEEK_API_KEY", "").strip()
-    if not api_key or not picks:
+    if not api_key:
+        log.warning("DeepSeek explanation skipped: DEEPSEEK_API_KEY is not configured")
+        return {}
+    if not picks:
         return {}
     model = os.environ.get("DEEPSEEK_MODEL", "deepseek-v4-flash")
     compact_picks = []
@@ -1992,7 +1995,12 @@ def _call_deepseek_pick_batch(picks):
 
 def enhance_pick_explanations_with_llm(picks):
     if not llm_reasoning_enabled():
-        log.info("LLM pick explanations disabled or missing DEEPSEEK_API_KEY")
+        log.info(
+            "LLM pick explanations disabled or missing DEEPSEEK_API_KEY "
+            "(enabled=%s, key_present=%s)",
+            os.environ.get("ALGO_LLM_REASONING_ENABLED", ""),
+            bool(os.environ.get("DEEPSEEK_API_KEY", "").strip()),
+        )
         return
     log.info(
         "LLM pick explanations using DeepSeek model=%s debug_response=%s picks=%s",
