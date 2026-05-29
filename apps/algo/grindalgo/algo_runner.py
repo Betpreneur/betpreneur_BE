@@ -1793,7 +1793,7 @@ def pick_verdict(pick):
     return f"{tier.replace('_', ' ').title()} selected for positive value and confidence."
 
 def llm_reasoning_enabled():
-    api_key = os.environ.get("MINIMAX_API_KEY", "").strip()
+    api_key = os.environ.get("DEEPSEEK_API_KEY", "").strip()
     configured = os.environ.get("ALGO_LLM_REASONING_ENABLED")
     if configured is None or configured == "":
         return bool(api_key)
@@ -1837,11 +1837,11 @@ def _parse_llm_json(content):
             raise
         return json.loads(match.group(0))
 
-def _minimax_chat_completion(payload, *, retries=2):
-    api_key = os.environ.get("MINIMAX_API_KEY", "").strip()
+def _deepseek_chat_completion(payload, *, retries=2):
+    api_key = os.environ.get("DEEPSEEK_API_KEY", "").strip()
     if not api_key:
         return None
-    base_url = os.environ.get("MINIMAX_BASE_URL", "https://api.minimax.io/v1").rstrip("/")
+    base_url = os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com/v1").rstrip("/")
     last_error = None
     for attempt in range(retries + 1):
         response = requests.post(
@@ -1863,7 +1863,7 @@ def _minimax_chat_completion(payload, *, retries=2):
         except (TypeError, ValueError):
             delay = 2 + attempt * 3
         log.warning(
-            "MiniMax rate limit hit; retrying in %.1fs (attempt %s/%s, retry_after=%s, request_id=%s, body=%s)",
+            "DeepSeek rate limit hit; retrying in %.1fs (attempt %s/%s, retry_after=%s, request_id=%s, body=%s)",
             delay,
             attempt + 1,
             retries + 1,
@@ -1874,14 +1874,14 @@ def _minimax_chat_completion(payload, *, retries=2):
         time.sleep(delay)
     if last_error is not None:
         body = (last_error.text or "").replace("\n", " ")[:800]
-        raise RuntimeError(f"MiniMax 429 after retries: {body}")
+        raise RuntimeError(f"DeepSeek 429 after retries: {body}")
     return None
 
-def _call_minimax_pick_batch(picks):
-    api_key = os.environ.get("MINIMAX_API_KEY", "").strip()
+def _call_deepseek_pick_batch(picks):
+    api_key = os.environ.get("DEEPSEEK_API_KEY", "").strip()
     if not api_key or not picks:
         return {}
-    model = os.environ.get("MINIMAX_MODEL", "MiniMax-M2.7-highspeed")
+    model = os.environ.get("DEEPSEEK_MODEL", "deepseek-v4-flash")
     compact_picks = []
     for index, pick in enumerate(picks):
         item = _compact_pick_for_llm(pick)
@@ -1889,27 +1889,31 @@ def _call_minimax_pick_batch(picks):
         compact_picks.append(item)
     payload = {
         "model": model,
-        "temperature": 0.35,
+        "temperature": 0.25,
         "top_p": 0.9,
-        "max_completion_tokens": max(900, min(3600, 320 * len(compact_picks))),
+        "max_tokens": max(1000, min(4200, 380 * len(compact_picks))),
+        "response_format": {"type": "json_object"},
         "messages": [
             {
                 "role": "system",
                 "content": (
-                    "You write concise betting-pick explanations for a football analytics product. "
-                    "Use only the supplied data. Do not promise a win, and do not invent injuries, lineups, "
-                    "news, standings, odds movement, or head-to-head facts beyond the provided fields. "
-                    "Mention uncertainty naturally. "
+                    "You are a careful football betting analyst writing for paying users. "
+                    "Your job is to explain why the model likes a pick in plain, human language. "
+                    "Use only the supplied data. Do not promise a win. Do not invent injuries, lineups, "
+                    "standings, odds movement, venue facts, or head-to-head facts beyond the provided fields. "
+                    "Be specific, balanced, and clear about the main reason and the main risk. "
                     "Return strict JSON only."
                 ),
             },
             {
                 "role": "user",
                 "content": (
-                    "Rewrite each selected pick into a more substantive customer-facing explanation.\n"
+                    "Rewrite each selected pick into a customer-facing explanation that feels like a real analyst wrote it.\n"
                     "For every input item, return the same index with:\n"
-                    "- reasoning: 2-3 sentences, specific to the market, form, confidence, EV, odds, and risk flags.\n"
-                    "- model_verdict: 1 short sentence, no hype.\n"
+                    "- reasoning: 3-4 short sentences. Explain the football logic first, then mention confidence/odds/EV, then name the key risk if there is one.\n"
+                    "- model_verdict: 1 direct sentence that tells the user how to treat the pick, without hype.\n"
+                    "Avoid generic phrases like 'the model prefers this market from the available fixture markets'. "
+                    "Avoid listing raw stats without interpretation. If the data is thin, say so naturally.\n"
                     "Return JSON shaped exactly as: "
                     '{"picks":[{"index":0,"reasoning":"...","model_verdict":"..."}]}.\n'
                     f"Data:\n{json.dumps(compact_picks, ensure_ascii=True)}"
@@ -1917,7 +1921,7 @@ def _call_minimax_pick_batch(picks):
             },
         ],
     }
-    parsed = _parse_llm_json(_minimax_chat_completion(payload) or "")
+    parsed = _parse_llm_json(_deepseek_chat_completion(payload) or "")
     generated_by_index = {}
     for item in parsed.get("picks", []) or []:
         try:
@@ -1938,7 +1942,7 @@ def enhance_pick_explanations_with_llm(picks):
     if not llm_reasoning_enabled():
         return
     try:
-        generated_by_index = _call_minimax_pick_batch(picks)
+        generated_by_index = _call_deepseek_pick_batch(picks)
     except Exception as exc:
         log.warning("LLM pick explanation batch skipped: %s", exc)
         return
