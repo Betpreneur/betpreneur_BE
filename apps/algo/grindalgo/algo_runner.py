@@ -1992,7 +1992,14 @@ def _call_deepseek_pick_batch(picks):
 
 def enhance_pick_explanations_with_llm(picks):
     if not llm_reasoning_enabled():
+        log.info("LLM pick explanations disabled or missing DEEPSEEK_API_KEY")
         return
+    log.info(
+        "LLM pick explanations using DeepSeek model=%s debug_response=%s picks=%s",
+        os.environ.get("DEEPSEEK_MODEL", "deepseek-v4-flash"),
+        llm_debug_logging_enabled(),
+        len(picks),
+    )
     try:
         generated_by_index = _call_deepseek_pick_batch(picks)
     except Exception as exc:
