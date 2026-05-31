@@ -3149,12 +3149,15 @@ def run_daily_algo():
 
     # ── SHEGE ANALYSIS MODE ──────────────────────────────────────
     shege_picks = None
-    try:
-        from .gemini_analyst import filter_ev_candidates, call_shege_analyst
-        ev_candidates = filter_ev_candidates(all_confs, scored_fxs, odds_list)
-        shege_picks  = call_shege_analyst(ev_candidates)
-    except Exception as _gem_err:
-        log.error(f"Shege analysis failed (non-fatal): {_gem_err}")
+    if GEMINI_KEY:
+        try:
+            from .gemini_analyst import filter_ev_candidates, call_shege_analyst
+            ev_candidates = filter_ev_candidates(all_confs, scored_fxs, odds_list)
+            shege_picks = call_shege_analyst(ev_candidates)
+        except Exception as _gem_err:
+            log.error(f"Shege analysis failed (non-fatal): {_gem_err}")
+    else:
+        log.info("Shege analysis skipped; GEMINI_API_KEY is not configured")
     # ── END SHEGE ────────────────────────────────────────────────
 
     generate_and_upload_pdf(drive, bankers, value_gems, wild_cards, target_date, bankroll,
@@ -3176,5 +3179,12 @@ def run_daily_algo():
               "selected_picks": serialize_selected_picks(
                   bankers, value_gems, wild_cards, target_date, bankroll
               )}
-    log.info(f"Run complete: {result}")
+    log.info(
+        "Run complete: status=%s date=%s scored=%s picks=%s markets=%s",
+        result["status"],
+        result["date"],
+        result["total_scored"],
+        result["picks_count"],
+        result["market_count"],
+    )
     return result
