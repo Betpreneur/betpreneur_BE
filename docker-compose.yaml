@@ -37,7 +37,7 @@ services:
     environment:
       DJANGO_SETTINGS_MODULE: config.settings
       TZ: Africa/Lagos
-    command: celery -A config worker --loglevel=info --concurrency=${CELERY_WORKER_CONCURRENCY:-1} --max-tasks-per-child=${CELERY_MAX_TASKS_PER_CHILD:-1} --prefetch-multiplier=1
+    command: celery -A config worker --loglevel=info --concurrency=1 --max-tasks-per-child=1 --prefetch-multiplier=1
     volumes:
       - media:/home/appuser/media
     networks:

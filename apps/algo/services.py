@@ -179,17 +179,29 @@ class AlgoRunnerService:
         if settled_picks:
             result["database_updated_count"] = updated
 
+    def _performance_window_days(self):
+        raw = self._runner_env().get("ALGO_PERFORMANCE_PROFILE_DAYS", 90)
+        try:
+            return max(7, min(int(raw), 365))
+        except (TypeError, ValueError):
+            return 90
+
     def _performance_profile(self):
+        since = timezone.localdate() - timedelta(days=self._performance_window_days())
         predictions = (
-            MarketPrediction.objects.filter(status__in=[MarketPrediction.Status.WIN, MarketPrediction.Status.LOSS])
+            MarketPrediction.objects.filter(
+                match_date__gte=since,
+                status__in=[MarketPrediction.Status.WIN, MarketPrediction.Status.LOSS],
+            )
             .select_related("run")
             .order_by("-match_date", "-run__target_date", "-created_at", "-id")
         )
         if predictions.exists():
-            return self._performance_profile_from_predictions(predictions)
+            return self._performance_profile_from_predictions(predictions, since)
 
         picks = (
             Pick.objects.filter(status__in=[Pick.Status.WIN, Pick.Status.LOSS])
+            .filter(Q(match_date__gte=since) | Q(match_date__isnull=True, run__target_date__gte=since))
             .select_related("run")
             .order_by("-match_date", "-run__target_date", "-created_at", "-id")
         )
@@ -212,8 +224,8 @@ class AlgoRunnerService:
             return "promote"
         return ""
 
-    def _strategy_profile(self, target_date):
-        performance = self._performance_profile()
+    def _strategy_profile(self, target_date, performance=None):
+        performance = performance or self._performance_profile()
         market_actions = {}
         league_market_actions = {}
         league_warnings = set()
@@ -335,7 +347,7 @@ class AlgoRunnerService:
             }
         return payload
 
-    def _performance_profile_from_predictions(self, predictions):
+    def _performance_profile_from_predictions(self, predictions, since):
         latest = {}
         for prediction in predictions:
             key = (
@@ -349,6 +361,7 @@ class AlgoRunnerService:
 
         older_picks = (
             Pick.objects.filter(status__in=[Pick.Status.WIN, Pick.Status.LOSS])
+            .filter(Q(match_date__gte=since) | Q(match_date__isnull=True, run__target_date__gte=since))
             .select_related("run")
             .order_by("-match_date", "-run__target_date", "-created_at", "-id")
         )
@@ -686,10 +699,12 @@ class AlgoRunnerService:
         algo_run.started_at = timezone.now()
         algo_run.save(update_fields=["status", "started_at", "updated_at"])
 
+        performance_profile = self._performance_profile()
+        strategy_profile = self._strategy_profile(algo_run.target_date, performance_profile)
         env = self._runner_env({
             "OVERRIDE_DATE": algo_run.target_date.isoformat(),
-            "ALGO_PERFORMANCE_PROFILE": json.dumps(self._performance_profile()),
-            "ALGO_STRATEGY_PROFILE": json.dumps(self._strategy_profile(algo_run.target_date)),
+            "ALGO_PERFORMANCE_PROFILE": json.dumps(performance_profile),
+            "ALGO_STRATEGY_PROFILE": json.dumps(strategy_profile),
         })
         try:
             with temporary_env(env):
