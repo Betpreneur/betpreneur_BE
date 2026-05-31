@@ -120,12 +120,13 @@ MARKET_MEANINGS = {
     "Over 2.5":"3 or more total goals","Under 2.5":"2 or fewer total goals",
     "Under 3.5":"3 or fewer total goals","Over 3.5":"4 or more total goals",
     "GG / BTTS Yes":"Both teams to score","GG + Over 2.5":"Both score & 3+ goals",
+    "DC: 12":"Home or Away win",
     "DNB Home":"Home win (Draw = refund)","DNB Away":"Away win (Draw = refund)",
     "Home CS":"Home team keeps clean sheet","Away CS":"Away team keeps clean sheet",
     "AH Home +0.5":"Home win or draw (+0.5)","AH Away +0.5":"Away win or draw (+0.5)",
     "First to Score H":"Home team scores first","First to Score A":"Away team scores first",
 }
-EXCLUDED_MARKETS = {"DC: 1X", "DC: X2", "DC: 12"}
+EXCLUDED_MARKETS = {"DC: 1X", "DC: X2"}
 
 def market_meaning(market):
     if market.startswith("Corners Over "):
@@ -1001,6 +1002,7 @@ def score_fixture(hf, af, h2h, real_odds, api_preds=None, corner_profile=None, f
         "Over 2.5":o25,"Under 2.5":100-o25,
         "Under 3.5":min(90,100-round(o25*0.55)),
         "GG / BTTS Yes":gg,"GG + Over 2.5":round(gg*o25/100),
+        "DC: 12":dc12,
         "DNB Home":hc,"DNB Away":ac,
         "Home CS":hcs,"Away CS":acs,
         "AH Home +0.5":min(95,hc+draw_conf),
@@ -1020,6 +1022,8 @@ def score_fixture(hf, af, h2h, real_odds, api_preds=None, corner_profile=None, f
         scores["Over 2.5"] = min(scores["Over 2.5"], 59)
     if exp_total > algo_under35_max_expected_goals():
         scores["Under 3.5"] = min(scores["Under 3.5"], 59)
+    if draw_conf >= algo_high_draw_risk_confidence():
+        scores["DC: 12"] = min(scores["DC: 12"], 59)
     if knockout_mode:
         h2_u25 = h2h.get("u25", 0) / h2h_games * 100
         h2_u35 = h2h.get("u35", 0) / h2h_games * 100
@@ -1138,6 +1142,9 @@ def get_api_football_odds(fixture_id):
                             _remember_odd(odds, "btts_yes", odd)
                         elif label == "no":
                             _remember_odd(odds, "btts_no", odd)
+                    elif bet_id == 12 or bet_name == "double chance":
+                        if label in ("home/away", "12"):
+                            _remember_odd(odds, "12", odd)
     odds = _finalize_odds_meta(odds)
     _odds_cache[fixture_id] = odds
     return odds
@@ -1148,7 +1155,7 @@ MARKET_THRESHOLDS = {
     "Home Win":64,"Away Win":85,"Draw":68,"Over 1.5":58,"Under 1.5":68,
     "Over 2.5":80,"Under 2.5":65,"Under 3.5":60,"Over 3.5":68,
     "GG / BTTS Yes":72,"GG + Over 2.5":75,"No Goal":999,
-    "DNB Home":64,"DNB Away":85,
+    "DC: 12":70,"DNB Home":64,"DNB Away":85,
     "Home CS":65,"Away CS":72,"AH Home +0.5":58,"AH Away +0.5":78,
     "First to Score H":55,"First to Score A":85,
 }
@@ -1160,6 +1167,7 @@ ODDS_KEYS_MAP = {
     "Home Win":"hw","Away Win":"aw","Draw":"d","Over 1.5":"o15",
     "Under 1.5":"u15","Over 2.5":"o25","Under 2.5":"u25",
     "Under 3.5":"u35","Over 3.5":"o35","GG / BTTS Yes":"btts_yes",
+    "DC: 12":"12",
 }
 
 def est_odds(c): return round(1/max(c/100,0.05)*1.05,2)
@@ -1404,6 +1412,10 @@ def candidate_risk_flags(raw_conf, conf, market, odds, odds_is_real, ev, profile
         flags.append("goal_line_boundary")
     if market == "Under 3.5" and expected_total and expected_total > algo_under35_max_expected_goals():
         flags.append("goal_line_boundary")
+    if market == "DC: 12" and conf < VALUE_MIN:
+        flags.append("below_dc12_value_threshold")
+    if market == "DC: 12" and float(goal_model.get("draw_confidence") or 0) >= algo_high_draw_risk_confidence():
+        flags.append("draw_boundary_risk")
     if (odds_meta.get("bookmaker_count") or 0) >= 3:
         if float(odds_meta.get("spread_pct") or 0) >= 18:
             flags.append("wide_odds_market")
@@ -1476,6 +1488,8 @@ def market_threshold(market):
 def passes_publish_gate(candidate):
     if candidate["market"] in EXCLUDED_MARKETS:
         return False
+    if candidate["market"] == "DC: 12" and candidate["conf"] < VALUE_MIN:
+        return False
     if candidate["market"].startswith("Corners ") and not corner_market_allowed(
         candidate["market"], candidate.get("odds"), candidate.get("corner_profile")
     ):
@@ -1501,6 +1515,8 @@ def passes_publish_gate(candidate):
     if candidate["market"] == "Over 2.5" and expected_total and expected_total < algo_over25_min_expected_goals():
         return False
     if candidate["market"] == "Under 3.5" and expected_total and expected_total > algo_under35_max_expected_goals():
+        return False
+    if candidate["market"] == "DC: 12" and draw_confidence >= algo_high_draw_risk_confidence():
         return False
     if str(profile_data.get("state") or "") == "suppressed":
         return False
@@ -1745,8 +1761,12 @@ def build_market_insights(market, confidence, odds, ev, risk_flags=None, fixture
 
     if "goal_line_boundary" in risk_flags:
         _append_unique(avoid_reasons, "Goal projection is too close to the selected line.")
+    if "below_dc12_value_threshold" in risk_flags:
+        _append_unique(avoid_reasons, "DC:12 is only allowed at Value Gem or Banker confidence.")
+    if "draw_boundary_risk" in risk_flags:
+        _append_unique(avoid_reasons, "Draw pressure is too high for DC:12.")
     for flag in risk_flags:
-        if flag in {"market_suppressed", "market_loss_streak", "market_recent_losses", "strategy_suppressed", "strategy_cooling", "thin_edge", "negative_market_roi", "low_market_hit_rate", "wide_odds_market", "best_price_far_above_consensus"}:
+        if flag in {"market_suppressed", "market_loss_streak", "market_recent_losses", "strategy_suppressed", "strategy_cooling", "thin_edge", "negative_market_roi", "low_market_hit_rate", "wide_odds_market", "best_price_far_above_consensus", "below_dc12_value_threshold", "draw_boundary_risk"}:
             _append_unique(avoid_reasons, flag)
         if flag == "strategy_promoted":
             _append_unique(confidence_drivers, "Autonomous strategy memory has promoted this market.")

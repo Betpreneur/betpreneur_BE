@@ -59,7 +59,7 @@ PICK_TIER_RANK = {
     Pick.Tier.VALUE_GEM: 2,
     Pick.Tier.WILD_CARD: 1,
 }
-EXCLUDED_MARKETS = {"DC: 1X", "DC: X2", "DC: 12"}
+EXCLUDED_MARKETS = {"DC: 1X", "DC: X2"}
 
 
 def _effective_pick_tier(pick):
