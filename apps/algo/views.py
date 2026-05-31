@@ -212,6 +212,42 @@ def _game_market_rank(market):
     )
 
 
+def _fixture_group_sort_key(item):
+    return (
+        (item.get("country") or "World").lower(),
+        (item.get("league") or item.get("competition") or "").lower(),
+        item.get("kickoff") or "",
+        (item.get("fixture") or "").lower(),
+    )
+
+
+def _group_by_country_and_league(items, item_label):
+    countries = {}
+    for item in items:
+        country = item.get("country") or "World"
+        league = item.get("league") or "Other"
+        country_bucket = countries.setdefault(country, {})
+        country_bucket.setdefault(league, []).append(item)
+
+    grouped = []
+    for country in sorted(countries):
+        leagues = []
+        for league in sorted(countries[country]):
+            league_items = sorted(countries[country][league], key=_fixture_group_sort_key)
+            leagues.append({
+                "league": league,
+                "competition": league,
+                "count": len(league_items),
+                item_label: league_items,
+            })
+        grouped.append({
+            "country": country,
+            "count": sum(league["count"] for league in leagues),
+            "leagues": leagues,
+        })
+    return grouped
+
+
 def _tier_for_confidence(confidence):
     confidence = confidence or 0
     if confidence >= 80:
@@ -255,7 +291,23 @@ def _game_summary_from_fixture(item, picks_by_match, request=None, include_marke
         "fixture": item.get("fixture", ""),
         "home_team": item.get("home_team", ""),
         "away_team": item.get("away_team", ""),
+        "home_logo": item.get("home_logo", ""),
+        "away_logo": item.get("away_logo", ""),
+        "teams": {
+            "home": {
+                "name": item.get("home_team", ""),
+                "logo": item.get("home_logo", ""),
+            },
+            "away": {
+                "name": item.get("away_team", ""),
+                "logo": item.get("away_logo", ""),
+            },
+        },
         "league": item.get("league", ""),
+        "country": item.get("country", ""),
+        "round": item.get("round", ""),
+        "league_type": item.get("league_type", ""),
+        "competition": item.get("league", ""),
         "kickoff": item.get("kickoff", ""),
         "match_id": match_id,
         "published": bool(match_picks),
@@ -319,12 +371,13 @@ def _all_games_payload(target_date, request=None):
 
     games.sort(
         key=lambda game: (
-            1 if game.get("published") else 0,
-            (game.get("top_market") or {}).get("confidence") or 0,
-            (game.get("top_market") or {}).get("ev") if (game.get("top_market") or {}).get("ev") is not None else -999,
+            (game.get("country") or "World").lower(),
+            (game.get("league") or "").lower(),
             game.get("kickoff") or "",
+            0 if game.get("published") else 1,
+            -((game.get("top_market") or {}).get("confidence") or 0),
+            game.get("fixture") or "",
         ),
-        reverse=True,
     )
 
     return {
@@ -342,6 +395,7 @@ def _all_games_payload(target_date, request=None):
             "markets_65_plus": (algo_run.result or {}).get("markets_65_plus", 0),
         },
         "games": games,
+        "grouped_games": _group_by_country_and_league(games, "games"),
     }
 
 
@@ -381,6 +435,18 @@ def _game_detail_payload(target_date, match_id, request=None):
             "fixture": pick.fixture,
             "home_team": pick.home_team,
             "away_team": pick.away_team,
+            "home_logo": fixture_summary.get("home_logo", ""),
+            "away_logo": fixture_summary.get("away_logo", ""),
+            "teams": {
+                "home": {
+                    "name": pick.home_team,
+                    "logo": fixture_summary.get("home_logo", ""),
+                },
+                "away": {
+                    "name": pick.away_team,
+                    "logo": fixture_summary.get("away_logo", ""),
+                },
+            },
             "league": pick.league,
             "kickoff": pick.kickoff,
             "match_id": pick.match_id,
@@ -564,6 +630,8 @@ def _pick_detail_payload(pick, request=None):
             "fixture": pick.fixture,
             "home_team": pick.home_team,
             "away_team": pick.away_team,
+            "home_logo": "",
+            "away_logo": "",
             "league": pick.league,
             "kickoff": pick.kickoff,
             "match_id": pick.match_id,
@@ -651,7 +719,23 @@ def _daily_picks_payload(target_date, request=None):
             "fixture": item.get("fixture", ""),
             "home_team": item.get("home_team", ""),
             "away_team": item.get("away_team", ""),
+            "home_logo": item.get("home_logo", ""),
+            "away_logo": item.get("away_logo", ""),
+            "teams": {
+                "home": {
+                    "name": item.get("home_team", ""),
+                    "logo": item.get("home_logo", ""),
+                },
+                "away": {
+                    "name": item.get("away_team", ""),
+                    "logo": item.get("away_logo", ""),
+                },
+            },
             "league": item.get("league", ""),
+            "country": item.get("country", ""),
+            "round": item.get("round", ""),
+            "league_type": item.get("league_type", ""),
+            "competition": item.get("league", ""),
             "kickoff": item.get("kickoff", ""),
             "match_id": item.get("match_id", ""),
             "market_count": item.get("market_count", 0),
@@ -674,7 +758,17 @@ def _daily_picks_payload(target_date, request=None):
                 "fixture": pick.fixture,
                 "home_team": pick.home_team,
                 "away_team": pick.away_team,
+                "home_logo": "",
+                "away_logo": "",
+                "teams": {
+                    "home": {"name": pick.home_team, "logo": ""},
+                    "away": {"name": pick.away_team, "logo": ""},
+                },
                 "league": pick.league,
+                "country": "",
+                "round": "",
+                "league_type": "",
+                "competition": pick.league,
                 "kickoff": pick.kickoff,
                 "match_id": pick.match_id,
                 "market_count": 0,
@@ -713,10 +807,14 @@ def _daily_picks_payload(target_date, request=None):
 
     published_fixtures = sorted(
         [fixture for fixture in fixtures.values() if fixture["picks"]],
-        key=lambda fixture: _top_pick_sort_key(
-            next(pick for pick in picks if str(pick.match_id) == str(fixture["match_id"]))
+        key=lambda fixture: (
+            (fixture.get("country") or "World").lower(),
+            (fixture.get("league") or "").lower(),
+            fixture.get("kickoff") or "",
+            -_top_pick_sort_key(
+                next(pick for pick in picks if str(pick.match_id) == str(fixture["match_id"]))
+            )[1],
         ),
-        reverse=True,
     )
     top_pick = picks[0] if picks else None
 
@@ -745,6 +843,7 @@ def _daily_picks_payload(target_date, request=None):
             "markets_65_plus": (algo_run.result or {}).get("markets_65_plus", 0),
         },
         "fixtures": published_fixtures,
+        "grouped_fixtures": _group_by_country_and_league(published_fixtures, "fixtures"),
     }
 
 

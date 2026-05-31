@@ -260,7 +260,14 @@ class FixturePickGroupSerializer(serializers.Serializer):
     fixture = serializers.CharField()
     home_team = serializers.CharField(allow_blank=True)
     away_team = serializers.CharField(allow_blank=True)
+    home_logo = serializers.URLField(required=False, allow_blank=True)
+    away_logo = serializers.URLField(required=False, allow_blank=True)
+    teams = serializers.JSONField(required=False)
     league = serializers.CharField(allow_blank=True)
+    country = serializers.CharField(required=False, allow_blank=True)
+    round = serializers.CharField(required=False, allow_blank=True)
+    league_type = serializers.CharField(required=False, allow_blank=True)
+    competition = serializers.CharField(required=False, allow_blank=True)
     kickoff = serializers.CharField(allow_blank=True)
     match_id = serializers.CharField(allow_blank=True)
     market_count = serializers.IntegerField()
@@ -285,6 +292,7 @@ class DailyPicksResponseSerializer(serializers.Serializer):
     posted_at = serializers.DateTimeField(allow_null=True)
     summary = DailyPicksSummarySerializer()
     fixtures = FixturePickGroupSerializer(many=True)
+    grouped_fixtures = serializers.JSONField(required=False)
 
 
 class TopPickResponseSerializer(serializers.Serializer):
@@ -303,6 +311,7 @@ class GameListResponseSerializer(serializers.Serializer):
     posted_at = serializers.DateTimeField(allow_null=True)
     summary = serializers.JSONField()
     games = serializers.JSONField()
+    grouped_games = serializers.JSONField(required=False)
 
 
 class GameDetailResponseSerializer(serializers.Serializer):
