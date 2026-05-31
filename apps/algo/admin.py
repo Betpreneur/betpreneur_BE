@@ -4,7 +4,7 @@ from django.template.response import TemplateResponse
 from django.urls import path
 from django.utils import timezone
 
-from .models import AlgoRun, MarketPrediction, Pick, PickBack
+from .models import AlgoRun, MarketPrediction, Pick, PickBack, StrategyReview
 from .performance import performance_dashboard
 from .tasks import generate_daily_picks, run_monthly_auditor, settle_daily_results
 
@@ -415,3 +415,63 @@ class PickBackAdmin(admin.ModelAdmin):
     list_filter = ("created_at",)
     search_fields = ("pick__fixture", "pick__market", "user__username", "user__email")
     readonly_fields = ("created_at",)
+
+
+@admin.register(StrategyReview)
+class StrategyReviewAdmin(admin.ModelAdmin):
+    date_hierarchy = "target_date"
+    list_display = (
+        "id",
+        "target_date",
+        "daily_policy",
+        "suppressed_count",
+        "cooling_count",
+        "promoted_count",
+        "league_warning_count",
+        "updated_at",
+    )
+    list_filter = ("daily_policy", "target_date")
+    search_fields = ("reason",)
+    readonly_fields = ("created_at", "updated_at")
+    fieldsets = (
+        (
+            "Review",
+            {
+                "fields": (
+                    "target_date",
+                    "daily_policy",
+                    "reason",
+                )
+            },
+        ),
+        (
+            "Actions",
+            {
+                "fields": (
+                    "markets_suppressed",
+                    "markets_cooling",
+                    "markets_promoted",
+                    "league_market_actions",
+                    "league_warnings",
+                )
+            },
+        ),
+        ("Profile Payload", {"fields": ("profile",), "classes": ("collapse",)}),
+        ("Timestamps", {"fields": ("created_at", "updated_at"), "classes": ("collapse",)}),
+    )
+
+    @admin.display(description="Suppressed")
+    def suppressed_count(self, obj):
+        return len(obj.markets_suppressed or [])
+
+    @admin.display(description="Cooling")
+    def cooling_count(self, obj):
+        return len(obj.markets_cooling or [])
+
+    @admin.display(description="Promoted")
+    def promoted_count(self, obj):
+        return len(obj.markets_promoted or [])
+
+    @admin.display(description="League warnings")
+    def league_warning_count(self, obj):
+        return len(obj.league_warnings or [])

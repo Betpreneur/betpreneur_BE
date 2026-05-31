@@ -10,7 +10,7 @@ from django.conf import settings
 from django.db.models import Q
 from django.utils import timezone
 
-from .models import AlgoRun, MarketPrediction, Pick
+from .models import AlgoRun, MarketPrediction, Pick, StrategyReview
 
 
 @contextmanager
@@ -194,6 +194,91 @@ class AlgoRunnerService:
             .order_by("-match_date", "-run__target_date", "-created_at", "-id")
         )
         return self._performance_profile_from_picks(picks)
+
+    def _strategy_action_for_stats(self, stats):
+        count = int(stats.get("count") or 0)
+        if count < 5:
+            return ""
+        state = stats.get("state") or "active"
+        hit_rate = float(stats.get("hit_rate") or 0)
+        roi_flat = float(stats.get("roi_flat") or 0)
+        loss_streak = int(stats.get("loss_streak") or 0)
+        recent_5_losses = int(stats.get("recent_5_losses") or 0)
+        if state == "suppressed" or loss_streak >= 3 or recent_5_losses >= 4:
+            return "suppress"
+        if state == "cooling" or roi_flat < -8 or hit_rate < 45:
+            return "cool"
+        if state == "recovered" and hit_rate >= 60 and roi_flat >= 0:
+            return "promote"
+        return ""
+
+    def _strategy_profile(self, target_date):
+        performance = self._performance_profile()
+        market_actions = {}
+        league_market_actions = {}
+        league_warnings = set()
+
+        for market, stats in (performance.get("markets") or {}).items():
+            action = self._strategy_action_for_stats(stats)
+            if action:
+                market_actions[market] = {"action": action, **stats}
+
+        league_bad_counts = defaultdict(int)
+        for key, stats in (performance.get("league_markets") or {}).items():
+            action = self._strategy_action_for_stats(stats)
+            if not action:
+                continue
+            league_market_actions[key] = {"action": action, **stats}
+            league = str(key).split("::", 1)[0]
+            if action in {"suppress", "cool"}:
+                league_bad_counts[league] += 1
+
+        for league, count in league_bad_counts.items():
+            if count >= 2:
+                league_warnings.add(league)
+
+        markets_suppressed = sorted(
+            market for market, item in market_actions.items() if item.get("action") == "suppress"
+        )
+        markets_cooling = sorted(
+            market for market, item in market_actions.items() if item.get("action") == "cool"
+        )
+        markets_promoted = sorted(
+            market for market, item in market_actions.items() if item.get("action") == "promote"
+        )
+        reasons = []
+        if markets_suppressed:
+            reasons.append(f"Suppressing weak markets: {', '.join(markets_suppressed[:6])}.")
+        if markets_cooling:
+            reasons.append(f"Cooling markets under watch: {', '.join(markets_cooling[:6])}.")
+        if markets_promoted:
+            reasons.append(f"Promoting recovered markets: {', '.join(markets_promoted[:6])}.")
+        if league_warnings:
+            reasons.append(f"League warnings active: {', '.join(sorted(league_warnings)[:6])}.")
+        reason = " ".join(reasons) or "No major market restrictions; using adaptive market memory."
+
+        profile = {
+            "date": target_date.isoformat(),
+            "markets": market_actions,
+            "league_markets": league_market_actions,
+            "league_warnings": sorted(league_warnings),
+            "daily_policy": "adaptive_market_memory",
+            "reason": reason,
+        }
+        StrategyReview.objects.update_or_create(
+            target_date=target_date,
+            defaults={
+                "profile": profile,
+                "markets_suppressed": markets_suppressed,
+                "markets_cooling": markets_cooling,
+                "markets_promoted": markets_promoted,
+                "league_market_actions": league_market_actions,
+                "league_warnings": sorted(league_warnings),
+                "daily_policy": "adaptive_market_memory",
+                "reason": reason,
+            },
+        )
+        return profile
 
     def _empty_market_stats(self):
         return {
@@ -604,6 +689,7 @@ class AlgoRunnerService:
         env = self._runner_env({
             "OVERRIDE_DATE": algo_run.target_date.isoformat(),
             "ALGO_PERFORMANCE_PROFILE": json.dumps(self._performance_profile()),
+            "ALGO_STRATEGY_PROFILE": json.dumps(self._strategy_profile(algo_run.target_date)),
         })
         try:
             with temporary_env(env):

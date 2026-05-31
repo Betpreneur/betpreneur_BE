@@ -401,6 +401,7 @@ def _all_games_payload(target_date, request=None):
             "markets_70_plus": (algo_run.result or {}).get("markets_70_plus", 0),
             "markets_65_plus": (algo_run.result or {}).get("markets_65_plus", 0),
         },
+        "strategy": (algo_run.result or {}).get("strategy_profile", {}),
         "games": games,
         "grouped_games": _group_by_country_and_league(games, "games"),
     }
@@ -859,6 +860,7 @@ def _daily_picks_payload(target_date, request=None):
             "markets_70_plus": (algo_run.result or {}).get("markets_70_plus", 0),
             "markets_65_plus": (algo_run.result or {}).get("markets_65_plus", 0),
         },
+        "strategy": (algo_run.result or {}).get("strategy_profile", {}),
         "fixtures": published_fixtures,
         "grouped_fixtures": _group_by_country_and_league(published_fixtures, "fixtures"),
     }

@@ -291,6 +291,7 @@ class DailyPicksResponseSerializer(serializers.Serializer):
     run_id = serializers.IntegerField(allow_null=True)
     posted_at = serializers.DateTimeField(allow_null=True)
     summary = DailyPicksSummarySerializer()
+    strategy = serializers.JSONField(required=False)
     fixtures = FixturePickGroupSerializer(many=True)
     grouped_fixtures = serializers.JSONField(required=False)
 
@@ -310,6 +311,7 @@ class GameListResponseSerializer(serializers.Serializer):
     run_id = serializers.IntegerField(allow_null=True)
     posted_at = serializers.DateTimeField(allow_null=True)
     summary = serializers.JSONField()
+    strategy = serializers.JSONField(required=False)
     games = serializers.JSONField()
     grouped_games = serializers.JSONField(required=False)
 

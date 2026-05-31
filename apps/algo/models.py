@@ -172,3 +172,26 @@ class MarketPrediction(models.Model):
     def __str__(self):
         label = "published" if self.published else "internal"
         return f"{self.fixture} - {self.market} ({label})"
+
+
+class StrategyReview(models.Model):
+    target_date = models.DateField(unique=True)
+    profile = models.JSONField(default=dict, blank=True)
+    markets_suppressed = models.JSONField(default=list, blank=True)
+    markets_cooling = models.JSONField(default=list, blank=True)
+    markets_promoted = models.JSONField(default=list, blank=True)
+    league_market_actions = models.JSONField(default=dict, blank=True)
+    league_warnings = models.JSONField(default=list, blank=True)
+    daily_policy = models.CharField(max_length=100, default="adaptive_market_memory")
+    reason = models.TextField(blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-target_date"]
+        indexes = [
+            models.Index(fields=["target_date"]),
+        ]
+
+    def __str__(self):
+        return f"Strategy review {self.target_date}"

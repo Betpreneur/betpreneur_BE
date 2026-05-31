@@ -1258,6 +1258,23 @@ def load_performance_profile():
         "league_markets": data.get("league_markets", {}) or {},
     }
 
+def load_strategy_profile():
+    raw = os.environ.get("ALGO_STRATEGY_PROFILE", "")
+    if not raw:
+        return {"markets": {}, "league_markets": {}, "league_warnings": []}
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        log.warning("ALGO_STRATEGY_PROFILE is not valid JSON")
+        return {"markets": {}, "league_markets": {}, "league_warnings": []}
+    return {
+        "markets": data.get("markets", {}) or {},
+        "league_markets": data.get("league_markets", {}) or {},
+        "league_warnings": data.get("league_warnings", []) or [],
+        "daily_policy": data.get("daily_policy", ""),
+        "reason": data.get("reason", ""),
+    }
+
 def market_profile(profile, market, league=None):
     league_key = f"{league}::{market}" if league else ""
     return (
@@ -1265,6 +1282,24 @@ def market_profile(profile, market, league=None):
         or profile.get("markets", {}).get(market)
         or {}
     )
+
+def strategy_market_profile(strategy, market, league=None):
+    league_key = f"{league}::{market}" if league else ""
+    return (
+        strategy.get("league_markets", {}).get(league_key)
+        or strategy.get("markets", {}).get(market)
+        or {}
+    )
+
+def apply_strategy_confidence(raw_conf, strategy_data):
+    action = str((strategy_data or {}).get("action") or "")
+    if action == "suppress":
+        return min(raw_conf, 55)
+    if action == "cool":
+        return max(1, raw_conf - 5)
+    if action == "promote":
+        return min(95, raw_conf + 2)
+    return raw_conf
 
 def calibrate_confidence(raw_conf, profile_data):
     count = int(profile_data.get("count") or 0)
@@ -1311,7 +1346,7 @@ def calibrate_confidence(raw_conf, profile_data):
 
     return max(1, min(95, round(raw_conf + adjustment)))
 
-def candidate_risk_flags(raw_conf, conf, market, odds, odds_is_real, ev, profile_data, odds_meta=None, fixture_context=None, team_news=None):
+def candidate_risk_flags(raw_conf, conf, market, odds, odds_is_real, ev, profile_data, odds_meta=None, fixture_context=None, team_news=None, strategy_data=None):
     flags = []
     count = int(profile_data.get("count") or 0)
     hit_rate = float(profile_data.get("hit_rate") or 0)
@@ -1319,6 +1354,7 @@ def candidate_risk_flags(raw_conf, conf, market, odds, odds_is_real, ev, profile
     odds_meta = odds_meta or {}
     fixture_context = fixture_context or {}
     team_news = team_news or {}
+    strategy_data = strategy_data or {}
 
     if not odds_is_real:
         flags.append("estimated_odds")
@@ -1341,6 +1377,13 @@ def candidate_risk_flags(raw_conf, conf, market, odds, odds_is_real, ev, profile
         flags.append("market_cooling")
     elif market_state == "recovered":
         flags.append("market_recovered")
+    strategy_action = str(strategy_data.get("action") or "")
+    if strategy_action == "suppress":
+        flags.append("strategy_suppressed")
+    elif strategy_action == "cool":
+        flags.append("strategy_cooling")
+    elif strategy_action == "promote":
+        flags.append("strategy_promoted")
     if loss_streak >= algo_market_loss_streak_block():
         flags.append("market_loss_streak")
     elif loss_streak >= 2:
@@ -1461,6 +1504,8 @@ def passes_publish_gate(candidate):
         return False
     if str(profile_data.get("state") or "") == "suppressed":
         return False
+    if str((candidate.get("strategy_profile") or {}).get("action") or "") == "suppress":
+        return False
     if int(profile_data.get("loss_streak") or 0) >= algo_market_loss_streak_block():
         return False
     if int(profile_data.get("recent_5_losses") or 0) >= algo_market_recent_loss_block():
@@ -1498,6 +1543,7 @@ def _has_severe_risk(candidate):
         "market_loss_streak",
         "market_recent_losses",
         "market_recent_low_hit_rate",
+        "strategy_suppressed",
     })
 
 def _form_games(candidate):
@@ -1700,8 +1746,10 @@ def build_market_insights(market, confidence, odds, ev, risk_flags=None, fixture
     if "goal_line_boundary" in risk_flags:
         _append_unique(avoid_reasons, "Goal projection is too close to the selected line.")
     for flag in risk_flags:
-        if flag in {"market_suppressed", "market_loss_streak", "market_recent_losses", "thin_edge", "negative_market_roi", "low_market_hit_rate", "wide_odds_market", "best_price_far_above_consensus"}:
+        if flag in {"market_suppressed", "market_loss_streak", "market_recent_losses", "strategy_suppressed", "strategy_cooling", "thin_edge", "negative_market_roi", "low_market_hit_rate", "wide_odds_market", "best_price_far_above_consensus"}:
             _append_unique(avoid_reasons, flag)
+        if flag == "strategy_promoted":
+            _append_unique(confidence_drivers, "Autonomous strategy memory has promoted this market.")
 
     strategy = "Playable candidate if it survives ranking."
     if not eligible:
@@ -2013,6 +2061,9 @@ def enhance_pick_explanations_with_llm(picks):
 def select_picks(all_confs, scored_fxs, odds_list):
     pool=[]
     profile = load_performance_profile()
+    strategy = load_strategy_profile()
+    if strategy.get("reason"):
+        log.info("Strategy memory: %s", strategy.get("reason"))
     for fx,confs,real_odds in zip(scored_fxs,all_confs,odds_list):
         for market,conf in confs.items():
             key  = ODDS_KEYS_MAP.get(market)
@@ -2020,7 +2071,8 @@ def select_picks(all_confs, scored_fxs, odds_list):
             odds_meta = ((real_odds.get("_meta") or {}).get(key) if key else None) or (real_odds.get("_meta") or {}).get(market) or {}
             odds_is_real = bool(real_odd)
             profile_data = market_profile(profile, market, fx.get("league"))
-            calibrated_conf = calibrate_confidence(conf, profile_data)
+            strategy_data = strategy_market_profile(strategy, market, fx.get("league"))
+            calibrated_conf = apply_strategy_confidence(calibrate_confidence(conf, profile_data), strategy_data)
             odds = real_odd or est_odds(calibrated_conf)
             ev = round((calibrated_conf/100)*odds-1,3) if odds_is_real else None
             candidate = {
@@ -2042,6 +2094,7 @@ def select_picks(all_confs, scored_fxs, odds_list):
                 "away_recent_form":fx.get("away_recent_form",{}),
                 "corner_profile":fx.get("corner_profile",{}),
                 "market_profile":profile_data,
+                "strategy_profile":strategy_data,
                 "odds_meta": odds_meta,
                 "fixture_context": fx.get("fixture_context", {}),
                 "team_news": fx.get("team_news", {}),
@@ -2050,6 +2103,7 @@ def select_picks(all_confs, scored_fxs, odds_list):
                 conf, calibrated_conf, market, odds, odds_is_real, ev, profile_data, odds_meta,
                 fx.get("fixture_context", {}),
                 fx.get("team_news", {}),
+                strategy_data,
             )
             candidate["insights"] = build_market_insights(
                 market,
@@ -2229,12 +2283,14 @@ def serialize_fixture_markets(confs, real_odds=None, league=None, corner_profile
     markets = []
     real_odds = real_odds or {}
     profile = load_performance_profile()
+    strategy = load_strategy_profile()
     for market, confidence in sorted(confs.items(), key=lambda item: item[1], reverse=True):
         key = ODDS_KEYS_MAP.get(market)
         real_odd = (real_odds.get(key) if key else None) or real_odds.get(market)
         odds_meta = ((real_odds.get("_meta") or {}).get(key) if key else None) or (real_odds.get("_meta") or {}).get(market) or {}
         profile_data = market_profile(profile, market, league)
-        calibrated_confidence = calibrate_confidence(confidence, profile_data)
+        strategy_data = strategy_market_profile(strategy, market, league)
+        calibrated_confidence = apply_strategy_confidence(calibrate_confidence(confidence, profile_data), strategy_data)
         odds = real_odd or est_odds(calibrated_confidence)
         odds_is_real = bool(real_odd)
         ev = round((calibrated_confidence / 100) * odds - 1, 3) if odds_is_real else None
@@ -2242,6 +2298,7 @@ def serialize_fixture_markets(confs, real_odds=None, league=None, corner_profile
             confidence, calibrated_confidence, market, odds, odds_is_real, ev, profile_data, odds_meta,
             fixture_context or {},
             team_news or {},
+            strategy_data,
         )
         gate_candidate = {
             "market": market,
@@ -2250,6 +2307,7 @@ def serialize_fixture_markets(confs, real_odds=None, league=None, corner_profile
             "ev": ev,
             "odds_is_real": odds_is_real,
             "market_profile": profile_data,
+            "strategy_profile": strategy_data,
             "corner_profile": corner_profile or {},
             "odds_meta": odds_meta,
             "fixture_context": fixture_context or {},
@@ -3080,6 +3138,7 @@ def run_daily_algo():
               "total_scored":len(all_confs),"picks_count":picks_count,
               "no_bet": picks_count == 0,
               "publish_policy":"best_available_with_risk_controls",
+              "strategy_profile": load_strategy_profile(),
               "market_count":sum(len(confs) for confs in all_confs),
               "markets_70_plus":sum(1 for confs in all_confs for value in confs.values() if value >= 70),
               "markets_65_plus":sum(1 for confs in all_confs for value in confs.values() if value >= 65),
