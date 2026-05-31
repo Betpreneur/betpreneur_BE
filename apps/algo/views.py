@@ -30,6 +30,8 @@ from .serializers import (
     AuditorRunSerializer,
     BackedPicksQuerySerializer,
     BackedPicksResponseSerializer,
+    BulkPickBackRequestSerializer,
+    BulkPickBackResponseSerializer,
     DailyPicksQuerySerializer,
     DailyPicksResponseSerializer,
     GameAnalysisQuerySerializer,
@@ -307,10 +309,19 @@ def _game_summary_from_fixture(item, picks_by_match, request=None, include_marke
             },
         },
         "league": item.get("league", ""),
+        "league_logo": item.get("league_logo", ""),
+        "competition_logo": item.get("league_logo", ""),
         "country": item.get("country", ""),
+        "country_flag": item.get("country_flag", ""),
+        "competition": item.get("league", ""),
+        "competition_info": {
+            "name": item.get("league", ""),
+            "logo": item.get("league_logo", ""),
+            "country": item.get("country", ""),
+            "country_flag": item.get("country_flag", ""),
+        },
         "round": item.get("round", ""),
         "league_type": item.get("league_type", ""),
-        "competition": item.get("league", ""),
         "kickoff": item.get("kickoff", ""),
         "match_id": match_id,
         "published": bool(match_picks),
@@ -640,9 +651,30 @@ def _pick_detail_payload(pick, request=None):
             "fixture": pick.fixture,
             "home_team": pick.home_team,
             "away_team": pick.away_team,
-            "home_logo": "",
-            "away_logo": "",
+            "home_logo": fixture_summary.get("home_logo", ""),
+            "away_logo": fixture_summary.get("away_logo", ""),
+            "teams": {
+                "home": {
+                    "name": pick.home_team,
+                    "logo": fixture_summary.get("home_logo", ""),
+                },
+                "away": {
+                    "name": pick.away_team,
+                    "logo": fixture_summary.get("away_logo", ""),
+                },
+            },
             "league": pick.league,
+            "league_logo": fixture_summary.get("league_logo", ""),
+            "competition_logo": fixture_summary.get("league_logo", ""),
+            "country": fixture_summary.get("country", ""),
+            "country_flag": fixture_summary.get("country_flag", ""),
+            "competition": pick.league,
+            "competition_info": {
+                "name": pick.league,
+                "logo": fixture_summary.get("league_logo", ""),
+                "country": fixture_summary.get("country", ""),
+                "country_flag": fixture_summary.get("country_flag", ""),
+            },
             "kickoff": pick.kickoff,
             "match_id": pick.match_id,
             "market_count": fixture_summary.get("market_count", len(fixture_summary.get("markets") or [])),
@@ -750,10 +782,19 @@ def _daily_picks_payload(target_date, request=None):
                 },
             },
             "league": item.get("league", ""),
+            "league_logo": item.get("league_logo", ""),
+            "competition_logo": item.get("league_logo", ""),
             "country": item.get("country", ""),
+            "country_flag": item.get("country_flag", ""),
             "round": item.get("round", ""),
             "league_type": item.get("league_type", ""),
             "competition": item.get("league", ""),
+            "competition_info": {
+                "name": item.get("league", ""),
+                "logo": item.get("league_logo", ""),
+                "country": item.get("country", ""),
+                "country_flag": item.get("country_flag", ""),
+            },
             "kickoff": item.get("kickoff", ""),
             "match_id": item.get("match_id", ""),
             "market_count": item.get("market_count", 0),
@@ -783,10 +824,19 @@ def _daily_picks_payload(target_date, request=None):
                     "away": {"name": pick.away_team, "logo": ""},
                 },
                 "league": pick.league,
+                "league_logo": "",
+                "competition_logo": "",
                 "country": "",
+                "country_flag": "",
                 "round": "",
                 "league_type": "",
                 "competition": pick.league,
+                "competition_info": {
+                    "name": pick.league,
+                    "logo": "",
+                    "country": "",
+                    "country_flag": "",
+                },
                 "kickoff": pick.kickoff,
                 "match_id": pick.match_id,
                 "market_count": 0,
@@ -1315,6 +1365,87 @@ class BackPickView(APIView):
                 "backed_count": pick.backs.count(),
             },
             status=status.HTTP_201_CREATED if created else status.HTTP_200_OK,
+        )
+
+
+class BulkBackPickView(APIView):
+    permission_classes = [IsAuthenticated]
+    serializer_class = BulkPickBackResponseSerializer
+
+    @extend_schema(
+        summary="Back multiple picks",
+        description="Authenticated user endpoint. Marks multiple published picks as backed by the current user.",
+        tags=["Picks"],
+        request=BulkPickBackRequestSerializer,
+        responses={200: BulkPickBackResponseSerializer, 201: BulkPickBackResponseSerializer},
+    )
+    def post(self, request):
+        serializer = BulkPickBackRequestSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        pick_ids = serializer.validated_data["pick_ids"]
+
+        picks = list(
+            Pick.objects.select_related("run")
+            .prefetch_related("backs")
+            .filter(id__in=pick_ids)
+            .exclude(market__in=EXCLUDED_MARKETS)
+        )
+        picks_by_id = {pick.id: pick for pick in picks}
+        missing_pick_ids = [pick_id for pick_id in pick_ids if pick_id not in picks_by_id]
+
+        existing_ids = set(
+            PickBack.objects.filter(user=request.user, pick_id__in=picks_by_id)
+            .values_list("pick_id", flat=True)
+        )
+        created_ids = []
+        results = []
+        for pick_id in pick_ids:
+            pick = picks_by_id.get(pick_id)
+            if not pick:
+                results.append({
+                    "pick_id": pick_id,
+                    "backed": False,
+                    "created": False,
+                    "error": "not_found",
+                })
+                continue
+            if pick_id in existing_ids:
+                results.append({
+                    "pick_id": pick_id,
+                    "backed": True,
+                    "created": False,
+                    "backed_count": pick.backs.count(),
+                })
+                continue
+            PickBack.objects.create(user=request.user, pick=pick)
+            created_ids.append(pick_id)
+            results.append({
+                "pick_id": pick_id,
+                "backed": True,
+                "created": True,
+                "backed_count": pick.backs.count() + 1,
+            })
+
+        backed_picks = sorted(
+            picks,
+            key=lambda pick: (
+                pick.match_date or pick.run.target_date,
+                pick.kickoff or "",
+                -(pick.confidence or 0),
+            ),
+        )
+        payload = {
+            "requested_count": len(pick_ids),
+            "backed_count": len(picks),
+            "created_count": len(created_ids),
+            "already_backed_count": len(existing_ids),
+            "missing_pick_ids": missing_pick_ids,
+            "results": results,
+            "picks": PickSerializer(backed_picks, many=True, context={"request": request}).data,
+        }
+        return Response(
+            payload,
+            status=status.HTTP_201_CREATED if created_ids else status.HTTP_200_OK,
         )
 
 

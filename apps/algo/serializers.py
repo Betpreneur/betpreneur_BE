@@ -264,10 +264,14 @@ class FixturePickGroupSerializer(serializers.Serializer):
     away_logo = serializers.URLField(required=False, allow_blank=True)
     teams = serializers.JSONField(required=False)
     league = serializers.CharField(allow_blank=True)
+    league_logo = serializers.URLField(required=False, allow_blank=True)
+    competition_logo = serializers.URLField(required=False, allow_blank=True)
     country = serializers.CharField(required=False, allow_blank=True)
+    country_flag = serializers.URLField(required=False, allow_blank=True)
     round = serializers.CharField(required=False, allow_blank=True)
     league_type = serializers.CharField(required=False, allow_blank=True)
     competition = serializers.CharField(required=False, allow_blank=True)
+    competition_info = serializers.JSONField(required=False)
     kickoff = serializers.CharField(allow_blank=True)
     match_id = serializers.CharField(allow_blank=True)
     market_count = serializers.IntegerField()
@@ -375,6 +379,27 @@ class PickBackResponseSerializer(serializers.Serializer):
     backed = serializers.BooleanField()
     created = serializers.BooleanField()
     backed_count = serializers.IntegerField()
+
+
+class BulkPickBackRequestSerializer(serializers.Serializer):
+    pick_ids = serializers.ListField(
+        child=serializers.IntegerField(min_value=1),
+        min_length=1,
+        max_length=50,
+    )
+
+    def validate_pick_ids(self, value):
+        return list(dict.fromkeys(value))
+
+
+class BulkPickBackResponseSerializer(serializers.Serializer):
+    requested_count = serializers.IntegerField()
+    backed_count = serializers.IntegerField()
+    created_count = serializers.IntegerField()
+    already_backed_count = serializers.IntegerField()
+    missing_pick_ids = serializers.ListField(child=serializers.IntegerField())
+    results = serializers.JSONField()
+    picks = PickSerializer(many=True)
 
 
 class BackedPicksResponseSerializer(serializers.Serializer):
