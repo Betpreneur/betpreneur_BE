@@ -59,6 +59,7 @@ PICK_TIER_RANK = {
     Pick.Tier.VALUE_GEM: 2,
     Pick.Tier.WILD_CARD: 1,
 }
+EXCLUDED_MARKETS = {"DC: 1X", "DC: X2", "DC: 12"}
 
 
 def _effective_pick_tier(pick):
@@ -264,6 +265,8 @@ def _normalise_fixture_markets(item, picks_by_match):
     match_picks = picks_by_match.get(str(item.get("match_id") or ""), [])
     pick_by_market = {pick.market: pick for pick in match_picks}
     for market in item.get("markets") or []:
+        if market.get("market") in EXCLUDED_MARKETS:
+            continue
         payload = dict(market)
         payload["suggested_tier"] = _tier_for_confidence(payload.get("confidence"))
         selected_pick = pick_by_market.get(payload.get("market"))
@@ -339,7 +342,11 @@ def _game_summary_from_fixture(item, picks_by_match, request=None, include_marke
 
 def _picks_by_match(algo_run):
     grouped = {}
-    for pick in sorted(list(algo_run.picks.all()), key=_top_pick_sort_key, reverse=True):
+    for pick in sorted(
+        [pick for pick in algo_run.picks.all() if pick.market not in EXCLUDED_MARKETS],
+        key=_top_pick_sort_key,
+        reverse=True,
+    ):
         grouped.setdefault(str(pick.match_id or ""), []).append(pick)
     return grouped
 
@@ -474,6 +481,8 @@ def _markets_for_pick_detail(pick, fixture_summary):
     markets = []
     selected_market = None
     for market in fixture_summary.get("markets") or []:
+        if market.get("market") in EXCLUDED_MARKETS:
+            continue
         payload = dict(market)
         is_selected = payload.get("market") == pick.market
         payload["selected"] = is_selected
@@ -700,7 +709,11 @@ def _daily_picks_payload(target_date, request=None):
             "fixtures": [],
         }
 
-    picks = sorted(list(algo_run.picks.all()), key=_top_pick_sort_key, reverse=True)
+    picks = sorted(
+        [pick for pick in algo_run.picks.all() if pick.market not in EXCLUDED_MARKETS],
+        key=_top_pick_sort_key,
+        reverse=True,
+    )
     backed_ids = set()
     if request and request.user.is_authenticated:
         backed_ids = set(
@@ -714,7 +727,11 @@ def _daily_picks_payload(target_date, request=None):
     }
     fixtures = {}
     for item in fixture_summaries.values():
-        markets = item.get("markets") or []
+        markets = [
+            market
+            for market in item.get("markets") or []
+            if market.get("market") not in EXCLUDED_MARKETS
+        ]
         fixtures[item.get("match_id")] = {
             "fixture": item.get("fixture", ""),
             "home_team": item.get("home_team", ""),
@@ -1031,7 +1048,11 @@ class TopPickView(APIView):
         algo_run = _latest_successful_run(target_date)
         picks = []
         if algo_run:
-            picks = sorted(list(algo_run.picks.all()), key=_top_pick_sort_key, reverse=True)
+            picks = sorted(
+                [pick for pick in algo_run.picks.all() if pick.market not in EXCLUDED_MARKETS],
+                key=_top_pick_sort_key,
+                reverse=True,
+            )
         picks_data = PickSerializer(picks, many=True, context={"request": request}).data
         top_pick = picks_data[0] if picks_data else None
         return Response(
@@ -1125,6 +1146,8 @@ class DailyPicksDownloadView(APIView):
         writer.writerow(["date", "fixture", "league", "kickoff", "tier", "market", "confidence", "odds", "ev", "status"])
         if algo_run:
             for pick in algo_run.picks.all().order_by("kickoff", "-confidence"):
+                if pick.market in EXCLUDED_MARKETS:
+                    continue
                 writer.writerow([
                     pick.match_date,
                     pick.fixture,
@@ -1309,7 +1332,12 @@ class BackedPicksView(APIView):
         query.is_valid(raise_exception=True)
         target_date = query.validated_data.get("date")
 
-        picks = Pick.objects.select_related("run").prefetch_related("backs").filter(backs__user=request.user)
+        picks = (
+            Pick.objects.select_related("run")
+            .prefetch_related("backs")
+            .filter(backs__user=request.user)
+            .exclude(market__in=EXCLUDED_MARKETS)
+        )
         if target_date:
             picks = picks.filter(match_date=target_date)
         picks = picks.distinct().order_by("-match_date", "kickoff", "-confidence", "-ev")
