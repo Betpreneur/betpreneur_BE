@@ -16,6 +16,7 @@ import logging
 import requests
 import re
 import unicodedata
+import resource
 from datetime import datetime, timedelta, timezone
 
 from reportlab.lib.pagesizes import A4
@@ -66,6 +67,29 @@ def _env_int(name, default):
         return int(os.environ.get(name, default))
     except (TypeError, ValueError):
         return default
+
+def _rss_mb():
+    try:
+        # Linux reports ru_maxrss in kilobytes.
+        return round(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024, 1)
+    except Exception:
+        return 0.0
+
+def log_memory(label):
+    if _env_bool("ALGO_MEMORY_DEBUG", True):
+        log.info("Memory checkpoint [%s]: rss_max=%sMB", label, _rss_mb())
+
+def clear_runtime_caches():
+    for cache in (
+        _form_cache,
+        _standings_cache,
+        _injuries_cache,
+        _lineups_cache,
+        _corner_profile_cache,
+        _fixture_stats_cache,
+        _odds_cache,
+    ):
+        cache.clear()
 
 # ── API-FOOTBALL TRACKED LEAGUES ─────────────────────────────────
 APS_TRACKED_LEAGUES = {
@@ -2408,6 +2432,62 @@ def serialize_fixture_summaries(scored_fxs, all_confs, odds_list=None):
         })
     return summaries
 
+
+def score_aps_fixture_for_pipeline(fx):
+    pred_data = fetch_prediction_data(fx["aps_id"])
+    if pred_data:
+        teams_data = pred_data.get("teams",{})
+        comparison = pred_data.get("comparison",{})
+        h_comp = {"att":comparison.get("att",{}).get("home","50%"),
+                  "def":comparison.get("def",{}).get("home","50%")}
+        a_comp = {"att":comparison.get("att",{}).get("away","50%"),
+                  "def":comparison.get("def",{}).get("away","50%")}
+        hf_overall = fetch_team_recent_form(fx.get("hid"))
+        af_overall = fetch_team_recent_form(fx.get("aid"))
+        hf = fetch_team_recent_form(fx.get("hid"), venue="home") or hf_overall or map_aps_to_form(teams_data.get("home"),h_comp)
+        af = fetch_team_recent_form(fx.get("aid"), venue="away") or af_overall or map_aps_to_form(teams_data.get("away"),a_comp)
+        strength = league_strength_factor(fx)
+        hf = apply_league_strength(hf, strength)
+        af = apply_league_strength(af, strength)
+        hf["attack_str"] = _percent_to_ratio(h_comp.get("att"), hf.get("attack_str", 0.5))
+        af["attack_str"] = _percent_to_ratio(a_comp.get("att"), af.get("attack_str", 0.5))
+        hf["defence_str"] = _percent_to_ratio(h_comp.get("def"), hf.get("defence_str", 0.5))
+        af["defence_str"] = _percent_to_ratio(a_comp.get("def"), af.get("defence_str", 0.5))
+        h2h = parse_aps_h2h(pred_data.get("h2h",[]),fx["hname"])
+    else:
+        hf=fetch_team_recent_form(fx.get("hid"), venue="home") or fetch_team_recent_form(fx.get("hid")) or _default_form()
+        af=fetch_team_recent_form(fx.get("aid"), venue="away") or fetch_team_recent_form(fx.get("aid")) or _default_form()
+        strength = league_strength_factor(fx)
+        hf = apply_league_strength(hf, strength)
+        af = apply_league_strength(af, strength)
+        h2h = parse_aps_h2h([], fx["hname"])
+    fx["home_recent_form"] = recent_form_summary(hf)
+    fx["away_recent_form"] = recent_form_summary(af)
+    fixture_context = build_fixture_context(fx, hf, af)
+    fixture_context["h2h"] = h2h
+    context_flags = set(fixture_context.get("flags") or [])
+    context_flags.add("h2h_available" if int(h2h.get("games") or 0) >= 2 else "h2h_unavailable")
+    fixture_context["flags"] = sorted(context_flags)
+    team_news = fetch_fixture_team_news(fx.get("aps_id"), fx.get("hid"), fx.get("aid"))
+    fx["fixture_context"] = fixture_context
+    fx["team_news"] = team_news
+    real_odds = get_api_football_odds(fx["aps_id"])
+    corner_odds_available = any(key.startswith("Corners ") for key in real_odds)
+    corner_profile = build_corner_profile(fx) if corner_odds_available else {}
+    fx["corner_profile"] = corner_profile
+    confs = score_fixture(
+        hf,
+        af,
+        h2h,
+        real_odds,
+        api_preds=pred_data,
+        corner_profile=corner_profile,
+        fixture_context=fixture_context,
+    )
+    confs = apply_context_adjustments(confs, fixture_context, team_news)
+    return fx, confs, real_odds
+
+
 # ── PDF + DRIVE ───────────────────────────────────────────────────
 def generate_and_upload_pdf(drive, bankers, value_gems, wild_cards,
                              target_date, bankroll, all_scored=None,
@@ -3052,6 +3132,8 @@ def generate_and_upload_pdf(drive, bankers, value_gems, wild_cards,
 # ── MAIN RUNNER ───────────────────────────────────────────────────
 def run_daily_algo():
     log.info("=== GrindAlgo API-Football Run ===")
+    clear_runtime_caches()
+    log_memory("start")
     gc, drive, sheets = get_google_services()
     bankroll = get_bankroll(sheets)
     log.info(f"Bankroll: N{bankroll:,.0f}")
@@ -3062,6 +3144,7 @@ def run_daily_algo():
     log.info(f"WAT: {now_wat.strftime('%Y-%m-%d %H:%M')} | Target: {target_date}")
 
     fixtures = fetch_aps_fixtures(target_date)
+    log_memory("fixtures_fetched")
 
     MAX_FIXTURES = int(os.environ.get("APS_MAX_FIXTURES", "90"))
     if len(fixtures) > MAX_FIXTURES:
@@ -3082,69 +3165,24 @@ def run_daily_algo():
     for idx,fx in enumerate(fixtures):
         try:
             log.info(f"  [APS {idx+1}/{len(fixtures)}] {fx['fixture']}")
-            pred_data = fetch_prediction_data(fx["aps_id"])
-            if pred_data:
-                teams_data = pred_data.get("teams",{})
-                comparison = pred_data.get("comparison",{})
-                h_comp = {"att":comparison.get("att",{}).get("home","50%"),
-                          "def":comparison.get("def",{}).get("home","50%")}
-                a_comp = {"att":comparison.get("att",{}).get("away","50%"),
-                          "def":comparison.get("def",{}).get("away","50%")}
-                hf_overall = fetch_team_recent_form(fx.get("hid"))
-                af_overall = fetch_team_recent_form(fx.get("aid"))
-                hf = fetch_team_recent_form(fx.get("hid"), venue="home") or hf_overall or map_aps_to_form(teams_data.get("home"),h_comp)
-                af = fetch_team_recent_form(fx.get("aid"), venue="away") or af_overall or map_aps_to_form(teams_data.get("away"),a_comp)
-                strength = league_strength_factor(fx)
-                hf = apply_league_strength(hf, strength)
-                af = apply_league_strength(af, strength)
-                hf["attack_str"] = _percent_to_ratio(h_comp.get("att"), hf.get("attack_str", 0.5))
-                af["attack_str"] = _percent_to_ratio(a_comp.get("att"), af.get("attack_str", 0.5))
-                hf["defence_str"] = _percent_to_ratio(h_comp.get("def"), hf.get("defence_str", 0.5))
-                af["defence_str"] = _percent_to_ratio(a_comp.get("def"), af.get("defence_str", 0.5))
-                h2h = parse_aps_h2h(pred_data.get("h2h",[]),fx["hname"])
-            else:
-                hf=fetch_team_recent_form(fx.get("hid"), venue="home") or fetch_team_recent_form(fx.get("hid")) or _default_form()
-                af=fetch_team_recent_form(fx.get("aid"), venue="away") or fetch_team_recent_form(fx.get("aid")) or _default_form()
-                strength = league_strength_factor(fx)
-                hf = apply_league_strength(hf, strength)
-                af = apply_league_strength(af, strength)
-                h2h = parse_aps_h2h([], fx["hname"])
-            fx["home_recent_form"] = recent_form_summary(hf)
-            fx["away_recent_form"] = recent_form_summary(af)
-            fixture_context = build_fixture_context(fx, hf, af)
-            fixture_context["h2h"] = h2h
-            context_flags = set(fixture_context.get("flags") or [])
-            context_flags.add("h2h_available" if int(h2h.get("games") or 0) >= 2 else "h2h_unavailable")
-            fixture_context["flags"] = sorted(context_flags)
-            team_news = fetch_fixture_team_news(fx.get("aps_id"), fx.get("hid"), fx.get("aid"))
-            fx["fixture_context"] = fixture_context
-            fx["team_news"] = team_news
-            real_odds = get_api_football_odds(fx["aps_id"])
-            corner_odds_available = any(key.startswith("Corners ") for key in real_odds)
-            corner_profile = build_corner_profile(fx) if corner_odds_available else {}
-            fx["corner_profile"] = corner_profile
-            confs = score_fixture(
-                hf,
-                af,
-                h2h,
-                real_odds,
-                api_preds=pred_data,
-                corner_profile=corner_profile,
-                fixture_context=fixture_context,
-            )
-            confs = apply_context_adjustments(confs, fixture_context, team_news)
+            fx, confs, real_odds = score_aps_fixture_for_pipeline(fx)
             all_confs.append(confs); scored_fxs.append(fx); odds_list.append(real_odds)
             log.info("    APS scored OK")
+            if (idx + 1) % 10 == 0 or idx + 1 == len(fixtures):
+                log_memory(f"scored_{idx+1}_of_{len(fixtures)}")
         except Exception as e:
             log.warning(f"APS score error {fx['fixture']}: {e}")
             confs = score_fixture(_default_form(),_default_form(),parse_aps_h2h([], fx.get("hname", "")),{})
             all_confs.append(confs); scored_fxs.append(fx); odds_list.append({})
+            if (idx + 1) % 10 == 0 or idx + 1 == len(fixtures):
+                log_memory(f"scored_{idx+1}_of_{len(fixtures)}")
         time.sleep(0.5)   # Paid tier limit
 
     if not all_confs:
         return {"status":"no_data","date":target_date,"picks_count":0}
 
     bankers, value_gems, wild_cards = select_picks(all_confs, scored_fxs, odds_list)
+    log_memory("picks_selected")
     picks_count = record_to_sheets(sheets, bankers, value_gems, wild_cards, target_date, bankroll)
 
     # ── SHEGE ANALYSIS MODE ──────────────────────────────────────
@@ -3163,7 +3201,10 @@ def run_daily_algo():
     generate_and_upload_pdf(drive, bankers, value_gems, wild_cards, target_date, bankroll,
                             all_scored=list(zip(scored_fxs,all_confs,odds_list)),
                             gemini_picks=shege_picks)
+    log_memory("after_pdf")
 
+    fixture_summaries = serialize_fixture_summaries(scored_fxs, all_confs, odds_list)
+    log_memory("fixture_summaries_serialized")
     result = {"status":"success","date":target_date,
               "fd_fixtures":0,"aps_fixtures":len(fixtures),
               "total_scored":len(all_confs),"picks_count":picks_count,
@@ -3173,7 +3214,7 @@ def run_daily_algo():
               "market_count":sum(len(confs) for confs in all_confs),
               "markets_70_plus":sum(1 for confs in all_confs for value in confs.values() if value >= 70),
               "markets_65_plus":sum(1 for confs in all_confs for value in confs.values() if value >= 65),
-              "fixture_summaries":serialize_fixture_summaries(scored_fxs, all_confs, odds_list),
+              "fixture_summaries":fixture_summaries,
               "bankers":len(bankers or []),"value_gems":len(value_gems or []),
               "wild_cards":len(wild_cards or []),"bankroll":bankroll,
               "selected_picks": serialize_selected_picks(
@@ -3187,4 +3228,6 @@ def run_daily_algo():
         result["picks_count"],
         result["market_count"],
     )
+    clear_runtime_caches()
+    log_memory("end")
     return result

@@ -104,6 +104,18 @@ CELERY_ENABLE_UTC = True
 CELERY_TASK_TRACK_STARTED = True
 CELERY_TASK_TIME_LIMIT = config("CELERY_TASK_TIME_LIMIT", default=60 * 60 * 3, cast=int)
 CELERY_TASK_SOFT_TIME_LIMIT = config("CELERY_TASK_SOFT_TIME_LIMIT", default=60 * 60 * 2, cast=int)
+CELERY_TASK_ANNOTATIONS = {
+    "apps.algo.tasks.score_fixture_for_daily_run": {
+        "rate_limit": config("ALGO_SCORING_RATE_LIMIT", default="6/m"),
+        "time_limit": config("ALGO_SCORING_TIME_LIMIT", default=1200, cast=int),
+        "soft_time_limit": config("ALGO_SCORING_SOFT_TIME_LIMIT", default=900, cast=int),
+    },
+    "apps.algo.tasks.explain_picks_for_run": {
+        "rate_limit": config("ALGO_LLM_RATE_LIMIT", default="12/m"),
+        "time_limit": config("ALGO_LLM_TIME_LIMIT", default=420, cast=int),
+        "soft_time_limit": config("ALGO_LLM_SOFT_TIME_LIMIT", default=300, cast=int),
+    },
+}
 
 _cors_allowed_origins = config("CORS_ALLOWED_ORIGINS", default="")
 CORS_ALLOWED_ORIGINS = [

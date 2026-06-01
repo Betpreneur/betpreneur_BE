@@ -1,5 +1,6 @@
 import os
 import json
+import gc
 from collections import defaultdict
 from contextlib import contextmanager
 from datetime import timedelta
@@ -7,10 +8,10 @@ from decimal import Decimal
 
 import requests
 from django.conf import settings
-from django.db.models import Q
+from django.db.models import Count, Q
 from django.utils import timezone
 
-from .models import AlgoRun, MarketPrediction, Pick, StrategyReview
+from .models import AlgoFixture, AlgoRun, MarketPrediction, Pick, StrategyReview
 
 
 @contextmanager
@@ -157,6 +158,672 @@ class AlgoRunnerService:
         result["internal_prediction_count"] = len(rows)
         return len(rows)
 
+    def _persist_fixtures(self, algo_run: AlgoRun, result):
+        AlgoFixture.objects.filter(run=algo_run).delete()
+        fixture_summaries = result.get("fixture_summaries") or []
+        if not fixture_summaries:
+            return 0
+
+        rows = []
+        for fixture in fixture_summaries:
+            rows.append(
+                AlgoFixture(
+                    run=algo_run,
+                    match_date=algo_run.target_date,
+                    fixture=fixture.get("fixture", ""),
+                    home_team=fixture.get("home_team", ""),
+                    away_team=fixture.get("away_team", ""),
+                    home_logo=fixture.get("home_logo", ""),
+                    away_logo=fixture.get("away_logo", ""),
+                    league=fixture.get("league", ""),
+                    league_logo=fixture.get("league_logo", ""),
+                    country=fixture.get("country", ""),
+                    country_flag=fixture.get("country_flag", ""),
+                    round=fixture.get("round", ""),
+                    league_type=fixture.get("league_type", ""),
+                    kickoff=fixture.get("kickoff", ""),
+                    match_id=str(fixture.get("match_id") or ""),
+                    market_count=fixture.get("market_count", 0),
+                    markets_70_plus=fixture.get("markets_70_plus", 0),
+                    markets_65_plus=fixture.get("markets_65_plus", 0),
+                    home_recent_form=fixture.get("home_recent_form") or {},
+                    away_recent_form=fixture.get("away_recent_form") or {},
+                    fixture_context=fixture.get("fixture_context") or {},
+                    team_news=fixture.get("team_news") or {},
+                    corner_profile=fixture.get("corner_profile") or {},
+                    insights=fixture.get("insights") or {},
+                    source_payload=fixture.get("source_payload") or {},
+                    status=AlgoFixture.Status.SCORED,
+                )
+            )
+        AlgoFixture.objects.bulk_create(rows, ignore_conflicts=True, batch_size=500)
+        result["fixture_count"] = len(rows)
+        return len(rows)
+
+    def _fixture_defaults(self, algo_run, fixture):
+        return {
+            "match_date": algo_run.target_date,
+            "fixture": fixture.get("fixture", ""),
+            "home_team": fixture.get("home_team", ""),
+            "away_team": fixture.get("away_team", ""),
+            "home_logo": fixture.get("home_logo", ""),
+            "away_logo": fixture.get("away_logo", ""),
+            "league": fixture.get("league", ""),
+            "league_logo": fixture.get("league_logo", ""),
+            "country": fixture.get("country", ""),
+            "country_flag": fixture.get("country_flag", ""),
+            "round": fixture.get("round", ""),
+            "league_type": fixture.get("league_type", ""),
+            "kickoff": fixture.get("kickoff", ""),
+            "market_count": fixture.get("market_count", 0),
+            "markets_70_plus": fixture.get("markets_70_plus", 0),
+            "markets_65_plus": fixture.get("markets_65_plus", 0),
+            "home_recent_form": fixture.get("home_recent_form") or {},
+            "away_recent_form": fixture.get("away_recent_form") or {},
+            "fixture_context": fixture.get("fixture_context") or {},
+            "team_news": fixture.get("team_news") or {},
+            "corner_profile": fixture.get("corner_profile") or {},
+            "insights": fixture.get("insights") or {},
+            "source_payload": fixture.get("source_payload") or {},
+            "status": AlgoFixture.Status.SCORED,
+            "error": "",
+        }
+
+    def _persist_fixture_summary(self, algo_run: AlgoRun, fixture):
+        match_id = str(fixture.get("match_id") or "")
+        obj, _created = AlgoFixture.objects.update_or_create(
+            run=algo_run,
+            match_id=match_id,
+            defaults=self._fixture_defaults(algo_run, fixture),
+        )
+        return obj
+
+    def _persist_fixture_market_predictions(self, algo_run: AlgoRun, fixture):
+        match_id = str(fixture.get("match_id") or "")
+        MarketPrediction.objects.filter(run=algo_run, match_id=match_id).delete()
+        rows = []
+        for market in fixture.get("markets") or []:
+            rows.append(
+                MarketPrediction(
+                    run=algo_run,
+                    match_date=algo_run.target_date,
+                    fixture=fixture.get("fixture", ""),
+                    home_team=fixture.get("home_team", ""),
+                    away_team=fixture.get("away_team", ""),
+                    league=fixture.get("league", ""),
+                    kickoff=fixture.get("kickoff", ""),
+                    match_id=match_id,
+                    market=market.get("market", ""),
+                    meaning=market.get("meaning", ""),
+                    raw_confidence=market.get("raw_confidence") or market.get("confidence") or 0,
+                    confidence=market.get("confidence") or 0,
+                    odds=market.get("odds") or 0,
+                    ev=market.get("ev"),
+                    odds_source=market.get("odds_source", ""),
+                    odds_meta=market.get("odds_meta") or {},
+                    eligible=bool(market.get("eligible")),
+                    published=False,
+                    rejection_reason=self._prediction_rejection_reason(market, False),
+                    risk_flags=market.get("risk_flags") or [],
+                    insights=market.get("insights") or {},
+                    home_recent_form=fixture.get("home_recent_form") or {},
+                    away_recent_form=fixture.get("away_recent_form") or {},
+                    fixture_context=fixture.get("fixture_context") or {},
+                    team_news=fixture.get("team_news") or {},
+                )
+            )
+        if rows:
+            MarketPrediction.objects.bulk_create(rows, ignore_conflicts=True, batch_size=500)
+        return len(rows)
+
+    def _selected_pick_payload_from_prediction(self, prediction, tier, bankroll):
+        risk_flags = list(prediction.risk_flags or [])
+        profile = {
+            Pick.Tier.BANKER: "reliability",
+            Pick.Tier.VALUE_GEM: "mispriced_value",
+            Pick.Tier.WILD_CARD: "high_upside",
+        }.get(tier, "")
+        if profile:
+            risk_flags.append(f"profile:{profile}")
+        return {
+            "match_date": prediction.match_date,
+            "fixture": prediction.fixture,
+            "home_team": prediction.home_team,
+            "away_team": prediction.away_team,
+            "league": prediction.league,
+            "kickoff": prediction.kickoff,
+            "match_id": prediction.match_id,
+            "tier": tier,
+            "market": prediction.market,
+            "meaning": prediction.meaning,
+            "reasoning": "",
+            "model_verdict": "",
+            "home_recent_form": prediction.home_recent_form or {},
+            "away_recent_form": prediction.away_recent_form or {},
+            "risk_flags": risk_flags,
+            "insights": prediction.insights or {},
+            "confidence": prediction.confidence,
+            "odds": prediction.odds,
+            "ev": prediction.ev,
+            "stake": round(max(100, float(bankroll or 10000) * 0.10), 2),
+            "source": "APS",
+        }
+
+    def _candidate_dict_for_reasoning(self, payload):
+        return {
+            "fixture": payload.get("fixture", ""),
+            "home_team": payload.get("home_team", ""),
+            "away_team": payload.get("away_team", ""),
+            "league": payload.get("league", ""),
+            "kickoff": payload.get("kickoff", ""),
+            "match_id": payload.get("match_id", ""),
+            "tier": payload.get("tier", ""),
+            "market": payload.get("market", ""),
+            "meaning": payload.get("meaning", ""),
+            "conf": payload.get("confidence") or 0,
+            "odds": float(payload.get("odds") or 0),
+            "ev": float(payload.get("ev") or 0),
+            "home_recent_form": payload.get("home_recent_form") or {},
+            "away_recent_form": payload.get("away_recent_form") or {},
+            "risk_flags": payload.get("risk_flags") or [],
+            "selection_profile": next(
+                (
+                    str(flag).split(":", 1)[1]
+                    for flag in payload.get("risk_flags") or []
+                    if str(flag).startswith("profile:")
+                ),
+                "",
+            ),
+        }
+
+    def _select_prediction_ids(self, algo_run):
+        max_daily = self._runner_env().get("ALGO_MAX_DAILY_PICKS", 15)
+        try:
+            max_daily = max(1, int(max_daily))
+        except (TypeError, ValueError):
+            max_daily = 15
+
+        qs = (
+            MarketPrediction.objects.filter(run=algo_run, eligible=True)
+            .exclude(market__in=["DC: 1X", "DC: X2"])
+            .exclude(ev__isnull=True)
+            .order_by("-confidence", "-ev", "odds")
+        )
+        buckets = {
+            Pick.Tier.BANKER: [],
+            Pick.Tier.VALUE_GEM: [],
+            Pick.Tier.WILD_CARD: [],
+        }
+        used_matches = set()
+        for prediction in qs:
+            if prediction.match_id in used_matches:
+                continue
+            tier = None
+            if prediction.confidence >= 80:
+                tier = Pick.Tier.BANKER
+            elif prediction.confidence >= 70:
+                tier = Pick.Tier.VALUE_GEM
+            elif prediction.confidence >= 60:
+                tier = Pick.Tier.WILD_CARD
+            if not tier:
+                continue
+            buckets[tier].append(prediction.id)
+            used_matches.add(prediction.match_id)
+            if sum(len(items) for items in buckets.values()) >= max_daily:
+                break
+        return buckets
+
+    def _publish_selected_predictions(self, algo_run, bankroll, use_llm=False):
+        MarketPrediction.objects.filter(run=algo_run, published=True).update(
+            published=False,
+            selected_pick=None,
+        )
+        selected_ids = self._select_prediction_ids(algo_run)
+        flat_ids = [pk for ids in selected_ids.values() for pk in ids]
+        if not flat_ids:
+            Pick.objects.filter(run=algo_run).delete()
+            return []
+
+        predictions = {
+            prediction.id: prediction
+            for prediction in MarketPrediction.objects.filter(id__in=flat_ids).order_by("-confidence", "-ev")
+        }
+        payloads = []
+        for tier in (Pick.Tier.BANKER, Pick.Tier.VALUE_GEM, Pick.Tier.WILD_CARD):
+            for prediction_id in selected_ids[tier]:
+                prediction = predictions.get(prediction_id)
+                if prediction:
+                    payloads.append(self._selected_pick_payload_from_prediction(prediction, tier, bankroll))
+
+        from .grindalgo import algo_runner
+
+        reason_candidates = [self._candidate_dict_for_reasoning(payload) for payload in payloads]
+        for payload, candidate in zip(payloads, reason_candidates):
+            payload["reasoning"] = algo_runner.pick_reasoning(candidate)
+            payload["model_verdict"] = algo_runner.pick_verdict(candidate)
+        if use_llm:
+            algo_runner.enhance_pick_explanations_with_llm(reason_candidates)
+            for payload, candidate in zip(payloads, reason_candidates):
+                payload["reasoning"] = candidate.get("reasoning", payload["reasoning"])
+                payload["model_verdict"] = candidate.get("model_verdict", payload["model_verdict"])
+
+        picks = self._persist_selected_picks(algo_run, {"selected_picks": payloads}) or []
+        pick_lookup = {(str(pick.match_id or ""), pick.market): pick for pick in picks}
+        updates = []
+        for prediction in predictions.values():
+            pick = pick_lookup.get((str(prediction.match_id or ""), prediction.market))
+            if not pick:
+                continue
+            prediction.published = True
+            prediction.selected_pick = pick
+            updates.append(prediction)
+        if updates:
+            MarketPrediction.objects.bulk_update(updates, ["published", "selected_pick"], batch_size=500)
+        return picks
+
+    def explain_picks_for_run(self, algo_run):
+        if not isinstance(algo_run, AlgoRun):
+            algo_run = AlgoRun.objects.get(id=algo_run)
+        picks = list(algo_run.picks.order_by("tier", "-confidence", "-ev"))
+        if not picks:
+            return {"run_id": algo_run.id, "updated": 0, "total": 0}
+
+        from .grindalgo import algo_runner
+
+        candidates = []
+        for pick in picks:
+            candidates.append({
+                "fixture": pick.fixture,
+                "home_team": pick.home_team,
+                "away_team": pick.away_team,
+                "league": pick.league,
+                "kickoff": pick.kickoff,
+                "match_id": pick.match_id,
+                "tier": pick.tier,
+                "market": pick.market,
+                "meaning": pick.meaning,
+                "conf": pick.confidence,
+                "odds": float(pick.odds or 0),
+                "ev": float(pick.ev or 0),
+                "home_recent_form": pick.home_recent_form or {},
+                "away_recent_form": pick.away_recent_form or {},
+                "risk_flags": pick.risk_flags or [],
+                "reasoning": pick.reasoning,
+                "model_verdict": pick.model_verdict,
+            })
+        with temporary_env(self._runner_env()):
+            algo_runner.enhance_pick_explanations_with_llm(candidates)
+        updated = 0
+        for pick, candidate in zip(picks, candidates):
+            reasoning = candidate.get("reasoning") or pick.reasoning
+            verdict = candidate.get("model_verdict") or pick.model_verdict
+            if reasoning != pick.reasoning or verdict != pick.model_verdict:
+                pick.reasoning = reasoning
+                pick.model_verdict = verdict
+                pick.save(update_fields=["reasoning", "model_verdict"])
+                updated += 1
+        return {"run_id": algo_run.id, "updated": updated, "total": len(picks)}
+
+    def _persist_failed_fixture(self, algo_run, fixture, error):
+        match_id = str(fixture.get("match_id") or fixture.get("aps_id") or "")
+        AlgoFixture.objects.update_or_create(
+            run=algo_run,
+            match_id=match_id,
+            defaults={
+                "match_date": algo_run.target_date,
+                "fixture": fixture.get("fixture", ""),
+                "home_team": fixture.get("hname", ""),
+                "away_team": fixture.get("aname", ""),
+                "home_logo": fixture.get("home_logo", ""),
+                "away_logo": fixture.get("away_logo", ""),
+                "league": fixture.get("league", ""),
+                "league_logo": fixture.get("league_logo", ""),
+                "country": fixture.get("country", ""),
+                "country_flag": fixture.get("country_flag", ""),
+                "round": fixture.get("round", ""),
+                "league_type": fixture.get("league_type", ""),
+                "kickoff": fixture.get("kickoff", ""),
+                "source_payload": fixture,
+                "status": AlgoFixture.Status.FAILED,
+                "error": str(error)[:2000],
+            },
+        )
+
+    def _run_storage_payload(self):
+        return {
+            "fixtures": "algo_algofixture",
+            "markets": "algo_marketprediction",
+            "picks": "algo_pick",
+        }
+
+    def _pipeline_profiles(self, target_date):
+        performance_profile = self._performance_profile()
+        strategy_profile = self._strategy_profile(target_date, performance_profile)
+        return performance_profile, strategy_profile
+
+    def _pipeline_env(self, algo_run):
+        result = algo_run.result or {}
+        performance_profile = result.get("performance_profile") or self._performance_profile()
+        strategy_profile = result.get("strategy_profile") or self._strategy_profile(
+            algo_run.target_date,
+            performance_profile,
+        )
+        return self._runner_env({
+            "OVERRIDE_DATE": algo_run.target_date.isoformat(),
+            "ALGO_PERFORMANCE_PROFILE": json.dumps(performance_profile),
+            "ALGO_STRATEGY_PROFILE": json.dumps(strategy_profile),
+        })
+
+    def prepare_fanout_run(self, algo_run: AlgoRun):
+        algo_run.status = AlgoRun.Status.RUNNING
+        algo_run.started_at = timezone.now()
+        performance_profile, strategy_profile = self._pipeline_profiles(algo_run.target_date)
+        env = self._runner_env({
+            "OVERRIDE_DATE": algo_run.target_date.isoformat(),
+            "ALGO_PERFORMANCE_PROFILE": json.dumps(performance_profile),
+            "ALGO_STRATEGY_PROFILE": json.dumps(strategy_profile),
+        })
+        try:
+            with temporary_env(env):
+                from .grindalgo import algo_runner
+
+                bankroll = algo_runner.get_bankroll(None)
+                fixtures = algo_runner.fetch_aps_fixtures(algo_run.target_date.isoformat())
+                max_fixtures = int(os.environ.get("APS_MAX_FIXTURES", "90"))
+                if len(fixtures) > max_fixtures:
+                    fixtures = fixtures[:max_fixtures]
+
+            Pick.objects.filter(run=algo_run).delete()
+            AlgoFixture.objects.filter(run=algo_run).delete()
+            MarketPrediction.objects.filter(run=algo_run).delete()
+
+            rows = []
+            for fixture in fixtures:
+                match_id = str(fixture.get("match_id") or fixture.get("aps_id") or "")
+                rows.append(
+                    AlgoFixture(
+                        run=algo_run,
+                        match_date=algo_run.target_date,
+                        fixture=fixture.get("fixture", ""),
+                        home_team=fixture.get("hname", ""),
+                        away_team=fixture.get("aname", ""),
+                        home_logo=fixture.get("home_logo", ""),
+                        away_logo=fixture.get("away_logo", ""),
+                        league=fixture.get("league", ""),
+                        league_logo=fixture.get("league_logo", ""),
+                        country=fixture.get("country", ""),
+                        country_flag=fixture.get("country_flag", ""),
+                        round=fixture.get("round", ""),
+                        league_type=fixture.get("league_type", ""),
+                        kickoff=fixture.get("kickoff", ""),
+                        match_id=match_id,
+                        source_payload=fixture,
+                        status=AlgoFixture.Status.PENDING,
+                    )
+                )
+            AlgoFixture.objects.bulk_create(rows, ignore_conflicts=True, batch_size=500)
+
+            algo_run.fd_fixtures = 0
+            algo_run.aps_fixtures = len(rows)
+            algo_run.bankroll = bankroll
+            if rows:
+                algo_run.result = {
+                    "status": AlgoRun.Status.RUNNING,
+                    "date": algo_run.target_date.isoformat(),
+                    "publish_policy": "celery_fanout_pipeline",
+                    "strategy_profile": strategy_profile,
+                    "performance_profile": performance_profile,
+                    "storage": self._run_storage_payload(),
+                }
+            else:
+                algo_run.status = AlgoRun.Status.REST_DAY
+                algo_run.finished_at = timezone.now()
+                algo_run.result = {
+                    "status": AlgoRun.Status.REST_DAY,
+                    "date": algo_run.target_date.isoformat(),
+                    "picks_count": 0,
+                    "strategy_profile": strategy_profile,
+                    "storage": self._run_storage_payload(),
+                }
+            algo_run.save()
+            return list(
+                AlgoFixture.objects.filter(run=algo_run)
+                .order_by("id")
+                .values_list("id", flat=True)
+            )
+        except Exception as exc:
+            algo_run.status = AlgoRun.Status.FAILED
+            algo_run.error = str(exc)
+            algo_run.finished_at = timezone.now()
+            algo_run.save()
+            return []
+
+    def score_fixture_for_run(self, fixture_id):
+        fixture = AlgoFixture.objects.select_related("run").get(id=fixture_id)
+        algo_run = fixture.run
+        if algo_run.status not in {AlgoRun.Status.RUNNING, AlgoRun.Status.PENDING}:
+            return {"fixture_id": fixture.id, "status": "skipped", "run_status": algo_run.status}
+
+        try:
+            with temporary_env(self._pipeline_env(algo_run)):
+                from .grindalgo import algo_runner
+
+                algo_runner.clear_runtime_caches()
+                source_payload = dict(fixture.source_payload or {})
+                scored_fixture, confs, real_odds = algo_runner.score_aps_fixture_for_pipeline(source_payload)
+                summary = algo_runner.serialize_fixture_summaries(
+                    [scored_fixture],
+                    [confs],
+                    [real_odds],
+                )[0]
+                summary["source_payload"] = scored_fixture
+                self._persist_fixture_summary(algo_run, summary)
+                market_count = self._persist_fixture_market_predictions(algo_run, summary)
+                algo_runner.clear_runtime_caches()
+            return {"fixture_id": fixture.id, "status": "scored", "market_count": market_count}
+        except Exception as exc:
+            fixture.status = AlgoFixture.Status.FAILED
+            fixture.error = str(exc)[:2000]
+            fixture.save(update_fields=["status", "error", "updated_at"])
+            return {"fixture_id": fixture.id, "status": "failed", "error": str(exc)}
+
+    def publish_fanout_run(self, algo_run: AlgoRun):
+        if not isinstance(algo_run, AlgoRun):
+            algo_run = AlgoRun.objects.get(id=algo_run)
+        algo_run.refresh_from_db()
+        bankroll = algo_run.bankroll or 10000
+        picks = self._publish_selected_predictions(algo_run, bankroll)
+        scored_count = AlgoFixture.objects.filter(run=algo_run, status=AlgoFixture.Status.SCORED).count()
+        failed_count = AlgoFixture.objects.filter(run=algo_run, status=AlgoFixture.Status.FAILED).count()
+        aggregate = MarketPrediction.objects.filter(run=algo_run).aggregate(
+            market_count=Count("id"),
+            markets_70_plus=Count("id", filter=Q(confidence__gte=70)),
+            markets_65_plus=Count("id", filter=Q(confidence__gte=65)),
+        )
+        algo_run.status = AlgoRun.Status.SUCCESS if scored_count else AlgoRun.Status.NO_DATA
+        algo_run.total_scored = scored_count
+        algo_run.picks_count = len(picks)
+        algo_run.bankers = sum(1 for pick in picks if pick.tier == Pick.Tier.BANKER)
+        algo_run.value_gems = sum(1 for pick in picks if pick.tier == Pick.Tier.VALUE_GEM)
+        algo_run.wild_cards = sum(1 for pick in picks if pick.tier == Pick.Tier.WILD_CARD)
+        result = algo_run.result or {}
+        algo_run.result = {
+            "status": algo_run.status,
+            "date": algo_run.target_date.isoformat(),
+            "fd_fixtures": 0,
+            "aps_fixtures": algo_run.aps_fixtures,
+            "total_scored": scored_count,
+            "failed_fixtures": failed_count,
+            "picks_count": len(picks),
+            "no_bet": len(picks) == 0,
+            "publish_policy": "celery_fanout_pipeline",
+            "strategy_profile": result.get("strategy_profile", {}),
+            "market_count": aggregate.get("market_count") or 0,
+            "markets_70_plus": aggregate.get("markets_70_plus") or 0,
+            "markets_65_plus": aggregate.get("markets_65_plus") or 0,
+            "fixture_count": scored_count,
+            "bankers": algo_run.bankers,
+            "value_gems": algo_run.value_gems,
+            "wild_cards": algo_run.wild_cards,
+            "bankroll": float(bankroll),
+            "storage": self._run_storage_payload(),
+        }
+        algo_run.finished_at = timezone.now()
+        algo_run.save()
+        return algo_run
+
+    def recover_fanout_run(self, algo_run, *, rescore_failed=False):
+        if not isinstance(algo_run, AlgoRun):
+            algo_run = AlgoRun.objects.get(id=algo_run)
+        rescored = []
+        if rescore_failed:
+            fixture_ids = list(
+                AlgoFixture.objects.filter(
+                    run=algo_run,
+                    status__in=[AlgoFixture.Status.PENDING, AlgoFixture.Status.FAILED],
+                ).values_list("id", flat=True)
+            )
+            for fixture_id in fixture_ids:
+                rescored.append(self.score_fixture_for_run(fixture_id))
+        published = self.publish_fanout_run(algo_run)
+        return {
+            "run_id": published.id,
+            "target_date": published.target_date.isoformat(),
+            "status": published.status,
+            "rescored": rescored,
+            "picks_count": published.picks_count,
+            "bankers": published.bankers,
+            "value_gems": published.value_gems,
+            "wild_cards": published.wild_cards,
+        }
+
+    def run_staged(self, algo_run: AlgoRun) -> AlgoRun:
+        algo_run.status = AlgoRun.Status.RUNNING
+        algo_run.started_at = timezone.now()
+        algo_run.save(update_fields=["status", "started_at", "updated_at"])
+
+        performance_profile = self._performance_profile()
+        strategy_profile = self._strategy_profile(algo_run.target_date, performance_profile)
+        env = self._runner_env({
+            "OVERRIDE_DATE": algo_run.target_date.isoformat(),
+            "ALGO_PERFORMANCE_PROFILE": json.dumps(performance_profile),
+            "ALGO_STRATEGY_PROFILE": json.dumps(strategy_profile),
+        })
+
+        try:
+            with temporary_env(env):
+                from .grindalgo import algo_runner
+
+                algo_runner.clear_runtime_caches()
+                algo_runner.log_memory("staged_start")
+                bankroll = algo_runner.get_bankroll(None)
+                fixtures = algo_runner.fetch_aps_fixtures(algo_run.target_date.isoformat())
+                max_fixtures = int(os.environ.get("APS_MAX_FIXTURES", "90"))
+                if len(fixtures) > max_fixtures:
+                    fixtures = fixtures[:max_fixtures]
+
+                algo_run.aps_fixtures = len(fixtures)
+                algo_run.fd_fixtures = 0
+                algo_run.bankroll = bankroll
+                algo_run.save(update_fields=["aps_fixtures", "fd_fixtures", "bankroll", "updated_at"])
+
+                Pick.objects.filter(run=algo_run).delete()
+                AlgoFixture.objects.filter(run=algo_run).delete()
+                MarketPrediction.objects.filter(run=algo_run).delete()
+
+                if not fixtures:
+                    algo_run.status = AlgoRun.Status.REST_DAY
+                    algo_run.result = {
+                        "status": AlgoRun.Status.REST_DAY,
+                        "date": algo_run.target_date.isoformat(),
+                        "picks_count": 0,
+                        "strategy_profile": strategy_profile,
+                        "storage": {
+                            "fixtures": "algo_algofixture",
+                            "markets": "algo_marketprediction",
+                            "picks": "algo_pick",
+                        },
+                    }
+                    return algo_run
+
+                scored_count = 0
+                market_count = 0
+                markets_70_plus = 0
+                markets_65_plus = 0
+                for index, fixture in enumerate(fixtures, start=1):
+                    try:
+                        scored_fixture, confs, real_odds = algo_runner.score_aps_fixture_for_pipeline(fixture)
+                        summary = algo_runner.serialize_fixture_summaries(
+                            [scored_fixture],
+                            [confs],
+                            [real_odds],
+                        )[0]
+                        self._persist_fixture_summary(algo_run, summary)
+                        market_count += self._persist_fixture_market_predictions(algo_run, summary)
+                        markets_70_plus += summary.get("markets_70_plus", 0)
+                        markets_65_plus += summary.get("markets_65_plus", 0)
+                        scored_count += 1
+                        if index % 10 == 0 or index == len(fixtures):
+                            algo_runner.log_memory(f"staged_scored_{index}_of_{len(fixtures)}")
+                    except Exception as exc:
+                        self._persist_failed_fixture(algo_run, fixture, exc)
+
+                picks = self._publish_selected_predictions(algo_run, bankroll)
+                algo_runner.clear_runtime_caches()
+                algo_runner.log_memory("staged_end")
+
+            algo_run.status = AlgoRun.Status.SUCCESS if scored_count else AlgoRun.Status.NO_DATA
+            algo_run.total_scored = scored_count
+            algo_run.picks_count = len(picks)
+            algo_run.bankers = sum(1 for pick in picks if pick.tier == Pick.Tier.BANKER)
+            algo_run.value_gems = sum(1 for pick in picks if pick.tier == Pick.Tier.VALUE_GEM)
+            algo_run.wild_cards = sum(1 for pick in picks if pick.tier == Pick.Tier.WILD_CARD)
+            algo_run.result = {
+                "status": algo_run.status,
+                "date": algo_run.target_date.isoformat(),
+                "fd_fixtures": 0,
+                "aps_fixtures": len(fixtures),
+                "total_scored": scored_count,
+                "picks_count": len(picks),
+                "no_bet": len(picks) == 0,
+                "publish_policy": "staged_db_pipeline",
+                "strategy_profile": strategy_profile,
+                "market_count": market_count,
+                "markets_70_plus": markets_70_plus,
+                "markets_65_plus": markets_65_plus,
+                "fixture_count": scored_count,
+                "bankers": algo_run.bankers,
+                "value_gems": algo_run.value_gems,
+                "wild_cards": algo_run.wild_cards,
+                "bankroll": bankroll,
+                "storage": {
+                    "fixtures": "algo_algofixture",
+                    "markets": "algo_marketprediction",
+                    "picks": "algo_pick",
+                },
+            }
+        except Exception as exc:
+            algo_run.status = AlgoRun.Status.FAILED
+            algo_run.error = str(exc)
+        finally:
+            algo_run.finished_at = timezone.now()
+            algo_run.save()
+
+        return algo_run
+
+    def _slim_result_payload(self, result):
+        slim = dict(result or {})
+        slim.pop("fixture_summaries", None)
+        slim.pop("selected_picks", None)
+        slim.pop("settled_picks", None)
+        slim.pop("settled_internal_predictions", None)
+        slim["storage"] = {
+            "fixtures": "algo_algofixture",
+            "markets": "algo_marketprediction",
+            "picks": "algo_pick",
+        }
+        return slim
+
     def _sync_settled_picks(self, result):
         settled_picks = result.get("settled_picks") or []
         settled_at = timezone.now()
@@ -186,24 +853,62 @@ class AlgoRunnerService:
         except (TypeError, ValueError):
             return 90
 
+    def _performance_max_records(self):
+        raw = self._runner_env().get("ALGO_PERFORMANCE_MAX_RECORDS", 20000)
+        try:
+            return max(1000, min(int(raw), 100000))
+        except (TypeError, ValueError):
+            return 20000
+
     def _performance_profile(self):
         since = timezone.localdate() - timedelta(days=self._performance_window_days())
+        max_records = self._performance_max_records()
         predictions = (
             MarketPrediction.objects.filter(
                 match_date__gte=since,
                 status__in=[MarketPrediction.Status.WIN, MarketPrediction.Status.LOSS],
             )
+            .only(
+                "id",
+                "run_id",
+                "match_date",
+                "match_id",
+                "fixture",
+                "market",
+                "league",
+                "status",
+                "confidence",
+                "published",
+                "pnl_simulated",
+                "created_at",
+                "run__target_date",
+            )
             .select_related("run")
-            .order_by("-match_date", "-run__target_date", "-created_at", "-id")
+            .order_by("-match_date", "-run__target_date", "-created_at", "-id")[:max_records]
         )
         if predictions.exists():
-            return self._performance_profile_from_predictions(predictions, since)
+            return self._performance_profile_from_predictions(predictions, since, max_records)
 
         picks = (
             Pick.objects.filter(status__in=[Pick.Status.WIN, Pick.Status.LOSS])
             .filter(Q(match_date__gte=since) | Q(match_date__isnull=True, run__target_date__gte=since))
+            .only(
+                "id",
+                "run_id",
+                "match_date",
+                "match_id",
+                "fixture",
+                "market",
+                "league",
+                "status",
+                "confidence",
+                "stake",
+                "pnl",
+                "created_at",
+                "run__target_date",
+            )
             .select_related("run")
-            .order_by("-match_date", "-run__target_date", "-created_at", "-id")
+            .order_by("-match_date", "-run__target_date", "-created_at", "-id")[:max_records]
         )
         return self._performance_profile_from_picks(picks)
 
@@ -347,9 +1052,9 @@ class AlgoRunnerService:
             }
         return payload
 
-    def _performance_profile_from_predictions(self, predictions, since):
+    def _performance_profile_from_predictions(self, predictions, since, max_records):
         latest = {}
-        for prediction in predictions:
+        for prediction in predictions.iterator(chunk_size=1000):
             key = (
                 prediction.match_date or prediction.run.target_date,
                 str(prediction.match_id or "").strip(),
@@ -362,10 +1067,25 @@ class AlgoRunnerService:
         older_picks = (
             Pick.objects.filter(status__in=[Pick.Status.WIN, Pick.Status.LOSS])
             .filter(Q(match_date__gte=since) | Q(match_date__isnull=True, run__target_date__gte=since))
+            .only(
+                "id",
+                "run_id",
+                "match_date",
+                "match_id",
+                "fixture",
+                "market",
+                "league",
+                "status",
+                "confidence",
+                "stake",
+                "pnl",
+                "created_at",
+                "run__target_date",
+            )
             .select_related("run")
-            .order_by("-match_date", "-run__target_date", "-created_at", "-id")
+            .order_by("-match_date", "-run__target_date", "-created_at", "-id")[:max_records]
         )
-        for pick in older_picks:
+        for pick in older_picks.iterator(chunk_size=1000):
             key = (
                 pick.match_date or pick.run.target_date,
                 str(pick.match_id or "").strip(),
@@ -410,7 +1130,7 @@ class AlgoRunnerService:
 
     def _performance_profile_from_picks(self, picks):
         latest = {}
-        for pick in picks:
+        for pick in picks.iterator(chunk_size=1000):
             key = (
                 pick.match_date or pick.run.target_date,
                 str(pick.match_id or "").strip(),
@@ -722,9 +1442,14 @@ class AlgoRunnerService:
             algo_run.value_gems = result.get("value_gems", 0)
             algo_run.wild_cards = result.get("wild_cards", 0)
             algo_run.bankroll = result.get("bankroll")
-            algo_run.result = result
             self._persist_selected_picks(algo_run, result)
+            self._persist_fixtures(algo_run, result)
             self._persist_market_predictions(algo_run, result)
+            slim_result = self._slim_result_payload(result)
+            result.clear()
+            result.update(slim_result)
+            gc.collect()
+            algo_run.result = result
         except Exception as exc:
             algo_run.status = AlgoRun.Status.FAILED
             algo_run.error = str(exc)

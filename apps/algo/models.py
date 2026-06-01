@@ -107,6 +107,60 @@ class PickBack(models.Model):
         return f"{self.user} backed {self.pick}"
 
 
+class AlgoFixture(models.Model):
+    class Status(models.TextChoices):
+        PENDING = "pending", "Pending"
+        SCORED = "scored", "Scored"
+        FAILED = "failed", "Failed"
+
+    run = models.ForeignKey(AlgoRun, on_delete=models.CASCADE, related_name="fixtures")
+    match_date = models.DateField()
+    fixture = models.CharField(max_length=255)
+    home_team = models.CharField(max_length=255, blank=True)
+    away_team = models.CharField(max_length=255, blank=True)
+    home_logo = models.URLField(blank=True)
+    away_logo = models.URLField(blank=True)
+    league = models.CharField(max_length=255, blank=True)
+    league_logo = models.URLField(blank=True)
+    country = models.CharField(max_length=100, blank=True)
+    country_flag = models.URLField(blank=True)
+    round = models.CharField(max_length=255, blank=True)
+    league_type = models.CharField(max_length=50, blank=True)
+    kickoff = models.CharField(max_length=50, blank=True)
+    match_id = models.CharField(max_length=100)
+    market_count = models.PositiveIntegerField(default=0)
+    markets_70_plus = models.PositiveIntegerField(default=0)
+    markets_65_plus = models.PositiveIntegerField(default=0)
+    home_recent_form = models.JSONField(default=dict, blank=True)
+    away_recent_form = models.JSONField(default=dict, blank=True)
+    fixture_context = models.JSONField(default=dict, blank=True)
+    team_news = models.JSONField(default=dict, blank=True)
+    corner_profile = models.JSONField(default=dict, blank=True)
+    insights = models.JSONField(default=dict, blank=True)
+    source_payload = models.JSONField(default=dict, blank=True)
+    status = models.CharField(max_length=20, choices=Status.choices, default=Status.PENDING)
+    error = models.TextField(blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["match_date", "country", "league", "kickoff", "fixture"]
+        indexes = [
+            models.Index(fields=["match_date", "status"]),
+            models.Index(fields=["run", "match_id"]),
+            models.Index(fields=["country", "league"]),
+        ]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["run", "match_id"],
+                name="unique_algo_fixture_per_run_match",
+            )
+        ]
+
+    def __str__(self):
+        return self.fixture
+
+
 class MarketPrediction(models.Model):
     class Status(models.TextChoices):
         PENDING = "pending", "Pending"

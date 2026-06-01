@@ -4,9 +4,9 @@ from django.template.response import TemplateResponse
 from django.urls import path
 from django.utils import timezone
 
-from .models import AlgoRun, MarketPrediction, Pick, PickBack, StrategyReview
+from .models import AlgoFixture, AlgoRun, MarketPrediction, Pick, PickBack, StrategyReview
 from .performance import performance_dashboard
-from .tasks import generate_daily_picks, run_monthly_auditor, settle_daily_results
+from .tasks import generate_daily_picks, recover_daily_run, run_monthly_auditor, settle_daily_results
 
 
 class PickInline(admin.TabularInline):
@@ -65,6 +65,26 @@ class MarketPredictionInline(admin.TabularInline):
     show_change_link = True
 
 
+class AlgoFixtureInline(admin.TabularInline):
+    model = AlgoFixture
+    extra = 0
+    can_delete = False
+    fields = (
+        "match_date",
+        "fixture",
+        "country",
+        "league",
+        "kickoff",
+        "match_id",
+        "market_count",
+        "markets_70_plus",
+        "markets_65_plus",
+        "status",
+    )
+    readonly_fields = fields
+    show_change_link = True
+
+
 @admin.action(description="Queue pick generation for selected run dates")
 def queue_pick_generation(modeladmin, request, queryset):
     task_ids = []
@@ -101,6 +121,18 @@ def queue_auditor(modeladmin, request, queryset):
     )
 
 
+@admin.action(description="Recover/publish selected runs from stored fixture scores")
+def queue_run_recovery(modeladmin, request, queryset):
+    task_ids = []
+    for algo_run in queryset:
+        task = recover_daily_run.delay(algo_run.id, False)
+        task_ids.append(task.id)
+    messages.success(
+        request,
+        f"Queued {len(task_ids)} recovery task(s): {', '.join(task_ids)}",
+    )
+
+
 @admin.register(AlgoRun)
 class AlgoRunAdmin(admin.ModelAdmin):
     change_list_template = "admin/algo/algorun/change_list.html"
@@ -119,7 +151,7 @@ class AlgoRunAdmin(admin.ModelAdmin):
     list_filter = ("status", "target_date")
     search_fields = ("error",)
     readonly_fields = ("created_at", "updated_at", "started_at", "finished_at")
-    actions = (queue_pick_generation, queue_result_settlement, queue_auditor)
+    actions = (queue_pick_generation, queue_result_settlement, queue_auditor, queue_run_recovery)
     fieldsets = (
         (
             "Daily Run",
@@ -151,7 +183,7 @@ class AlgoRunAdmin(admin.ModelAdmin):
         ("Result Payload", {"fields": ("result", "error"), "classes": ("collapse",)}),
         ("Timestamps", {"fields": ("created_at", "updated_at"), "classes": ("collapse",)}),
     )
-    inlines = [PickInline, MarketPredictionInline]
+    inlines = [PickInline, AlgoFixtureInline, MarketPredictionInline]
 
     def get_urls(self):
         urls = super().get_urls()
@@ -407,6 +439,78 @@ class MarketPredictionAdmin(admin.ModelAdmin):
         messages.success(request, f"Marked {updated} internal prediction(s) as void.")
 
     actions = ("queue_settlement_for_prediction_dates", "mark_void")
+
+
+@admin.register(AlgoFixture)
+class AlgoFixtureAdmin(admin.ModelAdmin):
+    date_hierarchy = "match_date"
+    list_display = (
+        "id",
+        "match_date",
+        "fixture",
+        "country",
+        "league",
+        "kickoff",
+        "market_count",
+        "markets_70_plus",
+        "markets_65_plus",
+        "status",
+    )
+    list_filter = ("status", "match_date", "country", "league")
+    search_fields = ("fixture", "home_team", "away_team", "league", "country", "match_id")
+    readonly_fields = ("created_at", "updated_at")
+    fieldsets = (
+        (
+            "Fixture",
+            {
+                "fields": (
+                    "run",
+                    "match_date",
+                    "fixture",
+                    "home_team",
+                    "away_team",
+                    "home_logo",
+                    "away_logo",
+                    "league",
+                    "league_logo",
+                    "country",
+                    "country_flag",
+                    "round",
+                    "league_type",
+                    "kickoff",
+                    "match_id",
+                )
+            },
+        ),
+        (
+            "Scoring",
+            {
+                "fields": (
+                    "market_count",
+                    "markets_70_plus",
+                    "markets_65_plus",
+                    "status",
+                    "error",
+                )
+            },
+        ),
+        (
+            "Context",
+            {
+                "fields": (
+                    "home_recent_form",
+                    "away_recent_form",
+                    "fixture_context",
+                    "team_news",
+                    "corner_profile",
+                    "insights",
+                    "source_payload",
+                ),
+                "classes": ("collapse",),
+            },
+        ),
+        ("Timestamps", {"fields": ("created_at", "updated_at"), "classes": ("collapse",)}),
+    )
 
 
 @admin.register(PickBack)

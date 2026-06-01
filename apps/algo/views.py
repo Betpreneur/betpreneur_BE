@@ -15,7 +15,7 @@ from rest_framework.permissions import AllowAny, IsAdminUser, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from .models import AlgoRun, MarketPrediction, Pick, PickBack
+from .models import AlgoFixture, AlgoRun, MarketPrediction, Pick, PickBack
 from .performance import (
     add_pick,
     confidence_band,
@@ -164,7 +164,7 @@ def _public_record_pick_payload(pick):
 def _latest_successful_run(target_date):
     return (
         AlgoRun.objects.filter(target_date=target_date, status=AlgoRun.Status.SUCCESS)
-        .prefetch_related("picks")
+        .prefetch_related("picks", "fixtures", "market_predictions")
         .order_by("-created_at")
         .first()
     )
@@ -189,6 +189,40 @@ def _pick_identity_key(pick):
 
 
 def _fixture_summary_for_pick(pick):
+    fixture = AlgoFixture.objects.filter(run=pick.run, match_id=str(pick.match_id or "")).first()
+    if fixture:
+        markets = [
+            _market_prediction_payload(prediction)
+            for prediction in MarketPrediction.objects.filter(run=pick.run, match_id=str(pick.match_id or ""))
+            .select_related("selected_pick")
+            .order_by("-confidence", "-ev", "market")
+            if prediction.market not in EXCLUDED_MARKETS
+        ]
+        return {
+            "fixture": fixture.fixture,
+            "home_team": fixture.home_team,
+            "away_team": fixture.away_team,
+            "home_logo": fixture.home_logo,
+            "away_logo": fixture.away_logo,
+            "league": fixture.league,
+            "league_logo": fixture.league_logo,
+            "country": fixture.country,
+            "country_flag": fixture.country_flag,
+            "round": fixture.round,
+            "league_type": fixture.league_type,
+            "kickoff": fixture.kickoff,
+            "match_id": str(fixture.match_id or ""),
+            "home_recent_form": fixture.home_recent_form or {},
+            "away_recent_form": fixture.away_recent_form or {},
+            "fixture_context": fixture.fixture_context or {},
+            "team_news": fixture.team_news or {},
+            "corner_profile": fixture.corner_profile or {},
+            "insights": fixture.insights or {},
+            "market_count": fixture.market_count,
+            "markets_70_plus": fixture.markets_70_plus,
+            "markets_65_plus": fixture.markets_65_plus,
+            "markets": markets,
+        }
     for item in (pick.run.result or {}).get("fixture_summaries", []):
         if str(item.get("match_id")) == str(pick.match_id):
             return item
@@ -362,6 +396,78 @@ def _picks_by_match(algo_run):
     return grouped
 
 
+def _market_prediction_payload(prediction):
+    return {
+        "market": prediction.market,
+        "meaning": prediction.meaning,
+        "raw_confidence": prediction.raw_confidence,
+        "confidence": prediction.confidence,
+        "odds": float(prediction.odds or 0),
+        "odds_meta": prediction.odds_meta or {},
+        "ev": float(prediction.ev) if prediction.ev is not None else None,
+        "odds_source": prediction.odds_source,
+        "proven": False,
+        "eligible": prediction.eligible,
+        "risk_flags": prediction.risk_flags or [],
+        "insights": prediction.insights or {},
+        "selected": prediction.published,
+        "selected_pick_id": prediction.selected_pick_id,
+        "selected_tier": prediction.selected_pick.tier if prediction.selected_pick_id else "",
+    }
+
+
+def _fixture_summaries_for_run(algo_run):
+    fixtures = list(
+        AlgoFixture.objects.filter(run=algo_run)
+        .order_by("country", "league", "kickoff", "fixture")
+    )
+    if not fixtures:
+        return (algo_run.result or {}).get("fixture_summaries", [])
+
+    markets_by_match = {}
+    predictions = (
+        MarketPrediction.objects.filter(run=algo_run)
+        .select_related("selected_pick")
+        .order_by("match_id", "-confidence", "-ev", "market")
+    )
+    for prediction in predictions:
+        if prediction.market in EXCLUDED_MARKETS:
+            continue
+        markets_by_match.setdefault(str(prediction.match_id or ""), []).append(
+            _market_prediction_payload(prediction)
+        )
+
+    summaries = []
+    for fixture in fixtures:
+        match_id = str(fixture.match_id or "")
+        summaries.append({
+            "fixture": fixture.fixture,
+            "home_team": fixture.home_team,
+            "away_team": fixture.away_team,
+            "home_logo": fixture.home_logo,
+            "away_logo": fixture.away_logo,
+            "league": fixture.league,
+            "league_logo": fixture.league_logo,
+            "country": fixture.country,
+            "country_flag": fixture.country_flag,
+            "round": fixture.round,
+            "league_type": fixture.league_type,
+            "kickoff": fixture.kickoff,
+            "match_id": match_id,
+            "home_recent_form": fixture.home_recent_form or {},
+            "away_recent_form": fixture.away_recent_form or {},
+            "fixture_context": fixture.fixture_context or {},
+            "team_news": fixture.team_news or {},
+            "corner_profile": fixture.corner_profile or {},
+            "insights": fixture.insights or {},
+            "market_count": fixture.market_count,
+            "markets_70_plus": fixture.markets_70_plus,
+            "markets_65_plus": fixture.markets_65_plus,
+            "markets": markets_by_match.get(match_id, []),
+        })
+    return summaries
+
+
 def _all_games_payload(target_date, request=None):
     algo_run = _latest_successful_run(target_date)
     if not algo_run:
@@ -381,7 +487,7 @@ def _all_games_payload(target_date, request=None):
         }
 
     picks_by_match = _picks_by_match(algo_run)
-    fixture_summaries = (algo_run.result or {}).get("fixture_summaries", [])
+    fixture_summaries = _fixture_summaries_for_run(algo_run)
     games = [
         _game_summary_from_fixture(item, picks_by_match, request=request)
         for item in fixture_summaries
@@ -434,7 +540,7 @@ def _game_detail_payload(target_date, match_id, request=None):
     fixture_summary = next(
         (
             item
-            for item in (algo_run.result or {}).get("fixture_summaries", [])
+            for item in _fixture_summaries_for_run(algo_run)
             if str(item.get("match_id") or "") == target_match_id
         ),
         None,
@@ -454,16 +560,16 @@ def _game_detail_payload(target_date, match_id, request=None):
             "fixture": pick.fixture,
             "home_team": pick.home_team,
             "away_team": pick.away_team,
-            "home_logo": fixture_summary.get("home_logo", ""),
-            "away_logo": fixture_summary.get("away_logo", ""),
+            "home_logo": "",
+            "away_logo": "",
             "teams": {
                 "home": {
                     "name": pick.home_team,
-                    "logo": fixture_summary.get("home_logo", ""),
+                    "logo": "",
                 },
                 "away": {
                     "name": pick.away_team,
-                    "logo": fixture_summary.get("away_logo", ""),
+                    "logo": "",
                 },
             },
             "league": pick.league,
@@ -756,7 +862,7 @@ def _daily_picks_payload(target_date, request=None):
 
     fixture_summaries = {
         str(item.get("match_id")): item
-        for item in (algo_run.result or {}).get("fixture_summaries", [])
+        for item in _fixture_summaries_for_run(algo_run)
     }
     fixtures = {}
     for item in fixture_summaries.values():
