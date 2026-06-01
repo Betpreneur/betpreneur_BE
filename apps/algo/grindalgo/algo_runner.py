@@ -1932,6 +1932,95 @@ def _llm_items_from_payload(parsed):
             return value
     return []
 
+def _llm_batch_size():
+    try:
+        return max(1, min(int(os.environ.get("ALGO_LLM_BATCH_SIZE", 2)), 5))
+    except (TypeError, ValueError):
+        return 2
+
+def _deepseek_explanation_payload(model, compact_picks):
+    return {
+        "model": model,
+        "temperature": 0.2,
+        "top_p": 0.85,
+        "max_tokens": max(1600, min(6000, 700 * len(compact_picks))),
+        "response_format": {"type": "json_object"},
+        "messages": [
+            {
+                "role": "system",
+                "content": (
+                    "You are a careful football betting analyst writing for paying users. "
+                    "Use only the supplied data. Do not promise a win. Do not invent injuries, lineups, "
+                    "standings, odds movement, venue facts, or head-to-head facts beyond the provided fields. "
+                    "Return strict valid JSON only."
+                ),
+            },
+            {
+                "role": "user",
+                "content": (
+                    "Rewrite each selected pick into a customer-facing explanation.\n"
+                    "For every input item, return the same index with:\n"
+                    "- reasoning: 2-3 short sentences. Explain the football logic first, then mention confidence/odds/EV, then name the key risk if there is one.\n"
+                    "- model_verdict: 1 direct sentence that tells the user how to treat the pick, without hype.\n"
+                    "Avoid generic phrases like 'the model prefers this market from the available fixture markets'. "
+                    "Avoid listing raw stats without interpretation. If the data is thin, say so naturally.\n"
+                    "Return JSON shaped exactly as: "
+                    '{"picks":[{"index":0,"reasoning":"...","model_verdict":"..."}]}.\n'
+                    f"Data:\n{json.dumps(compact_picks, ensure_ascii=True)}"
+                ),
+            },
+        ],
+    }
+
+def _generated_explanations_from_content(content, expected_count=0):
+    parsed = _parse_llm_json(content)
+    items = _llm_items_from_payload(parsed)
+    if not items:
+        log.warning(
+            "DeepSeek explanation response had no picks list; keys=%s body=%s",
+            list(parsed.keys()) if isinstance(parsed, dict) else type(parsed).__name__,
+            _strip_llm_thinking(content).replace("\n", " ")[:500],
+        )
+    generated_by_index = {}
+    skipped = 0
+    for item in items:
+        if not isinstance(item, dict):
+            skipped += 1
+            continue
+        try:
+            index = int(item.get("index", item.get("id", item.get("pick_index"))))
+        except (TypeError, ValueError):
+            skipped += 1
+            continue
+        reasoning = str(
+            item.get("reasoning")
+            or item.get("analysis")
+            or item.get("explanation")
+            or item.get("why")
+            or ""
+        ).strip()
+        verdict = str(
+            item.get("model_verdict")
+            or item.get("verdict")
+            or item.get("summary")
+            or ""
+        ).strip()
+        if len(reasoning) < 40 or len(verdict) < 10:
+            skipped += 1
+            continue
+        generated_by_index[index] = {
+            "reasoning": reasoning[:900],
+            "model_verdict": verdict[:280],
+        }
+    if skipped or (expected_count and len(generated_by_index) != expected_count):
+        log.info(
+            "DeepSeek explanation parse accepted %s/%s items; skipped=%s",
+            len(generated_by_index),
+            expected_count or len(items),
+            skipped,
+        )
+    return generated_by_index
+
 def _deepseek_chat_completion(payload, *, retries=2):
     api_key = os.environ.get("DEEPSEEK_API_KEY", "").strip()
     if not api_key:
@@ -1991,87 +2080,24 @@ def _call_deepseek_pick_batch(picks):
         item = _compact_pick_for_llm(pick)
         item["index"] = index
         compact_picks.append(item)
-    payload = {
-        "model": model,
-        "temperature": 0.25,
-        "top_p": 0.9,
-        "max_tokens": max(1000, min(4200, 380 * len(compact_picks))),
-        "response_format": {"type": "json_object"},
-        "messages": [
-            {
-                "role": "system",
-                "content": (
-                    "You are a careful football betting analyst writing for paying users. "
-                    "Your job is to explain why the model likes a pick in plain, human language. "
-                    "Use only the supplied data. Do not promise a win. Do not invent injuries, lineups, "
-                    "standings, odds movement, venue facts, or head-to-head facts beyond the provided fields. "
-                    "Be specific, balanced, and clear about the main reason and the main risk. "
-                    "Return strict JSON only."
-                ),
-            },
-            {
-                "role": "user",
-                "content": (
-                    "Rewrite each selected pick into a customer-facing explanation that feels like a real analyst wrote it.\n"
-                    "For every input item, return the same index with:\n"
-                    "- reasoning: 3-4 short sentences. Explain the football logic first, then mention confidence/odds/EV, then name the key risk if there is one.\n"
-                    "- model_verdict: 1 direct sentence that tells the user how to treat the pick, without hype.\n"
-                    "Avoid generic phrases like 'the model prefers this market from the available fixture markets'. "
-                    "Avoid listing raw stats without interpretation. If the data is thin, say so naturally.\n"
-                    "Return JSON shaped exactly as: "
-                    '{"picks":[{"index":0,"reasoning":"...","model_verdict":"..."}]}.\n'
-                    f"Data:\n{json.dumps(compact_picks, ensure_ascii=True)}"
-                ),
-            },
-        ],
-    }
-    content = _deepseek_chat_completion(payload) or ""
-    parsed = _parse_llm_json(content)
-    items = _llm_items_from_payload(parsed)
-    if not items:
-        log.warning(
-            "DeepSeek explanation response had no picks list; keys=%s body=%s",
-            list(parsed.keys()) if isinstance(parsed, dict) else type(parsed).__name__,
-            _strip_llm_thinking(content).replace("\n", " ")[:500],
-        )
     generated_by_index = {}
-    skipped = 0
-    for item in items:
-        if not isinstance(item, dict):
-            skipped += 1
-            continue
+    batch_size = _llm_batch_size()
+    for start in range(0, len(compact_picks), batch_size):
+        chunk = compact_picks[start:start + batch_size]
+        payload = _deepseek_explanation_payload(model, chunk)
         try:
-            index = int(item.get("index", item.get("id", item.get("pick_index"))))
-        except (TypeError, ValueError):
-            skipped += 1
-            continue
-        reasoning = str(
-            item.get("reasoning")
-            or item.get("analysis")
-            or item.get("explanation")
-            or item.get("why")
-            or ""
-        ).strip()
-        verdict = str(
-            item.get("model_verdict")
-            or item.get("verdict")
-            or item.get("summary")
-            or ""
-        ).strip()
-        if len(reasoning) < 40 or len(verdict) < 10:
-            skipped += 1
-            continue
-        generated_by_index[index] = {
-            "reasoning": reasoning[:900],
-            "model_verdict": verdict[:280],
-        }
-    if skipped or len(generated_by_index) != len(picks):
-        log.info(
-            "DeepSeek explanation parse accepted %s/%s items; skipped=%s",
-            len(generated_by_index),
-            len(picks),
-            skipped,
-        )
+            content = _deepseek_chat_completion(payload) or ""
+            generated_by_index.update(
+                _generated_explanations_from_content(content, expected_count=len(chunk))
+            )
+        except Exception as exc:
+            log.warning(
+                "DeepSeek explanation chunk skipped indexes=%s: %s",
+                [item.get("index") for item in chunk],
+                exc,
+            )
+    if len(generated_by_index) != len(picks):
+        log.info("DeepSeek explanations updated from chunks %s/%s", len(generated_by_index), len(picks))
     return generated_by_index
 
 def enhance_pick_explanations_with_llm(picks):

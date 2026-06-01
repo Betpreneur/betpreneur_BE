@@ -1473,6 +1473,27 @@ class BackPickView(APIView):
             status=status.HTTP_201_CREATED if created else status.HTTP_200_OK,
         )
 
+    @extend_schema(
+        summary="Remove backed pick",
+        description="Authenticated user endpoint. Removes the current user's backed marker from one pick.",
+        tags=["Picks"],
+        request=None,
+        responses={200: PickBackResponseSerializer, 404: OpenApiTypes.OBJECT},
+    )
+    def delete(self, request, pick_id):
+        pick = get_object_or_404(Pick, id=pick_id)
+        deleted_count, _ = PickBack.objects.filter(pick=pick, user=request.user).delete()
+        return Response(
+            {
+                "pick_id": pick.id,
+                "backed": False,
+                "created": False,
+                "deleted": bool(deleted_count),
+                "backed_count": pick.backs.count(),
+            },
+            status=status.HTTP_200_OK,
+        )
+
 
 class BulkBackPickView(APIView):
     permission_classes = [IsAuthenticated]
@@ -1587,6 +1608,32 @@ class BackedPicksView(APIView):
                 "count": picks.count(),
                 "picks": PickSerializer(picks, many=True, context={"request": request}).data,
             }
+        )
+
+    @extend_schema(
+        summary="Clear user backed picks",
+        description="Authenticated user endpoint. Deletes all backed-pick markers for the current user. Pass date to clear only one matchday.",
+        tags=["Picks"],
+        parameters=[BackedPicksQuerySerializer],
+        responses={200: OpenApiTypes.OBJECT},
+    )
+    def delete(self, request):
+        query = BackedPicksQuerySerializer(data=request.query_params)
+        query.is_valid(raise_exception=True)
+        target_date = query.validated_data.get("date")
+
+        backs = PickBack.objects.filter(user=request.user)
+        if target_date:
+            backs = backs.filter(pick__match_date=target_date)
+        deleted_count, _ = backs.delete()
+
+        return Response(
+            {
+                "date": target_date,
+                "deleted_count": deleted_count,
+                "message": "Backed picks cleared.",
+            },
+            status=status.HTTP_200_OK,
         )
 
 
