@@ -4,7 +4,7 @@ from django.template.response import TemplateResponse
 from django.urls import path
 from django.utils import timezone
 
-from .models import AlgoFixture, AlgoRun, MarketPrediction, Pick, PickBack, StrategyReview
+from .models import AlgoFixture, AlgoRun, GameBack, MarketPrediction, Pick, PickBack, StrategyReview
 from .performance import performance_dashboard
 from .tasks import generate_daily_picks, recover_daily_run, run_monthly_auditor, settle_daily_results
 
@@ -518,6 +518,14 @@ class PickBackAdmin(admin.ModelAdmin):
     list_display = ("id", "pick", "user", "created_at")
     list_filter = ("created_at",)
     search_fields = ("pick__fixture", "pick__market", "user__username", "user__email")
+    readonly_fields = ("created_at",)
+
+
+@admin.register(GameBack)
+class GameBackAdmin(admin.ModelAdmin):
+    list_display = ("id", "match_id", "match_date", "fixture", "user", "created_at")
+    list_filter = ("match_date", "created_at")
+    search_fields = ("match_id", "fixture__fixture", "user__username", "user__email")
     readonly_fields = ("created_at",)
 
 

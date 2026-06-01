@@ -15,7 +15,7 @@ from rest_framework.permissions import AllowAny, IsAdminUser, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from .models import AlgoFixture, AlgoRun, MarketPrediction, Pick, PickBack
+from .models import AlgoFixture, AlgoRun, GameBack, MarketPrediction, Pick
 from .performance import (
     add_pick,
     confidence_band,
@@ -29,18 +29,18 @@ from .serializers import (
     AlgoRunSerializer,
     AuditorRunSerializer,
     BackedPicksQuerySerializer,
-    BackedPicksResponseSerializer,
-    BulkPickBackRequestSerializer,
-    BulkPickBackResponseSerializer,
+    BackedGamesResponseSerializer,
+    BulkGameBackRequestSerializer,
+    BulkGameBackResponseSerializer,
     DailyPicksQuerySerializer,
     DailyPicksResponseSerializer,
     GameAnalysisQuerySerializer,
+    GameBackResponseSerializer,
     GameDetailResponseSerializer,
     GameListResponseSerializer,
     MarketHealthQuerySerializer,
     MarketHealthResponseSerializer,
     PickSerializer,
-    PickBackResponseSerializer,
     PickDetailResponseSerializer,
     PublicSummarySerializer,
     RecordResponseSerializer,
@@ -325,6 +325,10 @@ def _game_summary_from_fixture(item, picks_by_match, request=None, include_marke
     pick_data = PickSerializer(match_picks, many=True, context={"request": request}).data
     top_market = markets[0] if markets else None
     official_pick = pick_data[0] if pick_data else None
+    backed_count = GameBack.objects.filter(match_id=match_id).count() if match_id else 0
+    backed_by_me = False
+    if request and request.user.is_authenticated and match_id:
+        backed_by_me = GameBack.objects.filter(user=request.user, match_id=match_id).exists()
 
     payload = {
         "fixture": item.get("fixture", ""),
@@ -362,6 +366,8 @@ def _game_summary_from_fixture(item, picks_by_match, request=None, include_marke
         "official_pick_count": len(match_picks),
         "official_pick": official_pick,
         "official_picks": pick_data,
+        "backed_count": backed_count,
+        "backed_by_me": backed_by_me,
         "top_market": top_market,
         "market_count": item.get("market_count", len(markets)),
         "eligible_market_count": sum(1 for market in markets if market.get("eligible")),
@@ -853,25 +859,36 @@ def _daily_picks_payload(target_date, request=None):
         key=_top_pick_sort_key,
         reverse=True,
     )
-    backed_ids = set()
-    if request and request.user.is_authenticated:
-        backed_ids = set(
-            PickBack.objects.filter(user=request.user, pick__in=picks)
-            .values_list("pick_id", flat=True)
-        )
-
     fixture_summaries = {
         str(item.get("match_id")): item
         for item in _fixture_summaries_for_run(algo_run)
     }
+    fixture_match_ids = list(dict.fromkeys(
+        [match_id for match_id in fixture_summaries if match_id]
+        + [str(pick.match_id or "") for pick in picks if str(pick.match_id or "")]
+    ))
+    backed_game_counts = dict(
+        GameBack.objects.filter(match_id__in=fixture_match_ids)
+        .values("match_id")
+        .annotate(total=Count("id"))
+        .values_list("match_id", "total")
+    )
+    backed_game_ids = set()
+    if request and request.user.is_authenticated and fixture_match_ids:
+        backed_game_ids = set(
+            GameBack.objects.filter(user=request.user, match_id__in=fixture_match_ids)
+            .values_list("match_id", flat=True)
+        )
+
     fixtures = {}
     for item in fixture_summaries.values():
+        match_id = str(item.get("match_id") or "")
         markets = [
             market
             for market in item.get("markets") or []
             if market.get("market") not in EXCLUDED_MARKETS
         ]
-        fixtures[item.get("match_id")] = {
+        fixtures[match_id] = {
             "fixture": item.get("fixture", ""),
             "home_team": item.get("home_team", ""),
             "away_team": item.get("away_team", ""),
@@ -902,7 +919,9 @@ def _daily_picks_payload(target_date, request=None):
                 "country_flag": item.get("country_flag", ""),
             },
             "kickoff": item.get("kickoff", ""),
-            "match_id": item.get("match_id", ""),
+            "match_id": match_id,
+            "backed_count": backed_game_counts.get(match_id, 0),
+            "backed_by_me": match_id in backed_game_ids,
             "market_count": item.get("market_count", 0),
             "markets_70_plus": item.get("markets_70_plus", 0),
             "markets_65_plus": item.get("markets_65_plus", 0),
@@ -945,6 +964,12 @@ def _daily_picks_payload(target_date, request=None):
                 },
                 "kickoff": pick.kickoff,
                 "match_id": pick.match_id,
+                "backed_count": GameBack.objects.filter(match_id=str(pick.match_id or "")).count() if pick.match_id else 0,
+                "backed_by_me": (
+                    GameBack.objects.filter(user=request.user, match_id=str(pick.match_id or "")).exists()
+                    if request and request.user.is_authenticated and pick.match_id
+                    else False
+                ),
                 "market_count": 0,
                 "markets_70_plus": 0,
                 "markets_65_plus": 0,
@@ -964,8 +989,9 @@ def _daily_picks_payload(target_date, request=None):
             fixtures[key].get("away_recent_form") or pick.away_recent_form
         )
         data = PickSerializer(pick, context={"request": request}).data
-        data["backed_by_me"] = pick.id in backed_ids
-        data["backed_count"] = pick.backs.count()
+        pick_match_id = str(pick.match_id or "")
+        data["backed_by_me"] = pick_match_id in backed_game_ids
+        data["backed_count"] = backed_game_counts.get(pick_match_id, 0)
         fixtures[key]["picks"].append(data)
         for market in fixtures[key]["markets"]:
             if market.get("market") == pick.market:
@@ -1449,171 +1475,168 @@ class MarketHealthView(APIView):
         })
 
 
-class BackPickView(APIView):
+def _latest_fixture_for_match(match_id, target_date=None):
+    fixtures = AlgoFixture.objects.select_related("run").filter(match_id=str(match_id))
+    if target_date:
+        fixtures = fixtures.filter(match_date=target_date)
+    return fixtures.order_by("-match_date", "-created_at").first()
+
+
+def _back_game_for_user(user, match_id, target_date=None):
+    match_id = str(match_id).strip()
+    fixture = _latest_fixture_for_match(match_id, target_date)
+    backed, created = GameBack.objects.get_or_create(
+        user=user,
+        match_id=match_id,
+        defaults={
+            "match_date": fixture.match_date if fixture else target_date,
+            "fixture": fixture,
+        },
+    )
+    if fixture and (backed.fixture_id != fixture.id or backed.match_date != fixture.match_date):
+        backed.fixture = fixture
+        backed.match_date = fixture.match_date
+        backed.save(update_fields=["fixture", "match_date"])
+    return backed, created
+
+
+def _backed_games_payload(request, target_date=None):
+    backs = GameBack.objects.select_related("fixture", "fixture__run").filter(user=request.user)
+    if target_date:
+        backs = backs.filter(match_date=target_date)
+    backs = backs.order_by("-match_date", "-created_at")
+
+    games = []
+    for back in backs:
+        fixture = back.fixture or _latest_fixture_for_match(back.match_id, back.match_date)
+        if not fixture:
+            games.append({
+                "match_id": back.match_id,
+                "match_date": back.match_date,
+                "backed": True,
+                "backed_by_me": True,
+                "backed_count": GameBack.objects.filter(match_id=back.match_id).count(),
+            })
+            continue
+        summaries = _fixture_summaries_for_run(fixture.run)
+        item = next(
+            (summary for summary in summaries if str(summary.get("match_id") or "") == str(back.match_id)),
+            None,
+        )
+        if item:
+            games.append(_game_summary_from_fixture(item, _picks_by_match(fixture.run), request=request, include_markets=True))
+    return games
+
+
+class BackGameView(APIView):
     permission_classes = [IsAuthenticated]
-    serializer_class = PickBackResponseSerializer
+    serializer_class = GameBackResponseSerializer
 
     @extend_schema(
-        summary="Back a pick",
-        description="Authenticated user endpoint. Marks that the user backed this pick. No request body is required.",
-        tags=["Picks"],
+        summary="Back a game",
+        description="Authenticated user endpoint. Marks that the user backed/saved a game by match_id. Optional date helps resolve a specific matchday.",
+        tags=["Games"],
+        parameters=[GameAnalysisQuerySerializer],
         request=None,
-        responses={200: PickBackResponseSerializer, 201: PickBackResponseSerializer},
+        responses={200: GameBackResponseSerializer, 201: GameBackResponseSerializer},
     )
-    def post(self, request, pick_id):
-        pick = get_object_or_404(Pick, id=pick_id)
-        backed, created = PickBack.objects.get_or_create(pick=pick, user=request.user)
+    def post(self, request, match_id):
+        query = GameAnalysisQuerySerializer(data=request.query_params)
+        query.is_valid(raise_exception=True)
+        target_date = query.validated_data.get("date")
+        backed, created = _back_game_for_user(request.user, match_id, target_date)
+
         return Response(
             {
-                "pick_id": pick.id,
+                "match_id": backed.match_id,
                 "backed": True,
                 "created": created,
-                "backed_count": pick.backs.count(),
+                "backed_count": GameBack.objects.filter(match_id=backed.match_id).count(),
             },
             status=status.HTTP_201_CREATED if created else status.HTTP_200_OK,
         )
 
     @extend_schema(
-        summary="Remove backed pick",
-        description="Authenticated user endpoint. Removes the current user's backed marker from one pick.",
-        tags=["Picks"],
+        summary="Remove backed game",
+        description="Authenticated user endpoint. Removes the current user's backed marker from one game by match_id.",
+        tags=["Games"],
         request=None,
-        responses={200: PickBackResponseSerializer, 404: OpenApiTypes.OBJECT},
+        responses={200: GameBackResponseSerializer},
     )
-    def delete(self, request, pick_id):
-        pick = get_object_or_404(Pick, id=pick_id)
-        deleted_count, _ = PickBack.objects.filter(pick=pick, user=request.user).delete()
+    def delete(self, request, match_id):
+        deleted_count, _ = GameBack.objects.filter(user=request.user, match_id=str(match_id)).delete()
         return Response(
             {
-                "pick_id": pick.id,
+                "match_id": str(match_id),
                 "backed": False,
-                "created": False,
                 "deleted": bool(deleted_count),
-                "backed_count": pick.backs.count(),
+                "backed_count": GameBack.objects.filter(match_id=str(match_id)).count(),
             },
             status=status.HTTP_200_OK,
         )
 
 
-class BulkBackPickView(APIView):
+class BackedGamesView(APIView):
     permission_classes = [IsAuthenticated]
-    serializer_class = BulkPickBackResponseSerializer
+    serializer_class = BackedGamesResponseSerializer
 
     @extend_schema(
-        summary="Back multiple picks",
-        description="Authenticated user endpoint. Marks multiple published picks as backed by the current user.",
-        tags=["Picks"],
-        request=BulkPickBackRequestSerializer,
-        responses={200: BulkPickBackResponseSerializer, 201: BulkPickBackResponseSerializer},
+        summary="Back multiple games",
+        description="Authenticated user endpoint. Marks multiple games as backed/saved by match_id.",
+        tags=["Games"],
+        request=BulkGameBackRequestSerializer,
+        responses={200: BulkGameBackResponseSerializer, 201: BulkGameBackResponseSerializer},
     )
     def post(self, request):
-        serializer = BulkPickBackRequestSerializer(data=request.data)
+        serializer = BulkGameBackRequestSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
-        pick_ids = serializer.validated_data["pick_ids"]
+        match_ids = serializer.validated_data["match_ids"]
+        target_date = serializer.validated_data.get("date")
 
-        picks = list(
-            Pick.objects.select_related("run")
-            .prefetch_related("backs")
-            .filter(id__in=pick_ids)
-            .exclude(market__in=EXCLUDED_MARKETS)
-        )
-        picks_by_id = {pick.id: pick for pick in picks}
-        missing_pick_ids = [pick_id for pick_id in pick_ids if pick_id not in picks_by_id]
-
-        existing_ids = set(
-            PickBack.objects.filter(user=request.user, pick_id__in=picks_by_id)
-            .values_list("pick_id", flat=True)
-        )
-        created_ids = []
+        created_count = 0
         results = []
-        for pick_id in pick_ids:
-            pick = picks_by_id.get(pick_id)
-            if not pick:
-                results.append({
-                    "pick_id": pick_id,
-                    "backed": False,
-                    "created": False,
-                    "error": "not_found",
-                })
-                continue
-            if pick_id in existing_ids:
-                results.append({
-                    "pick_id": pick_id,
-                    "backed": True,
-                    "created": False,
-                    "backed_count": pick.backs.count(),
-                })
-                continue
-            PickBack.objects.create(user=request.user, pick=pick)
-            created_ids.append(pick_id)
+        for match_id in match_ids:
+            backed, created = _back_game_for_user(request.user, match_id, target_date)
+            created_count += 1 if created else 0
             results.append({
-                "pick_id": pick_id,
+                "match_id": backed.match_id,
                 "backed": True,
-                "created": True,
-                "backed_count": pick.backs.count() + 1,
+                "created": created,
+                "backed_count": GameBack.objects.filter(match_id=backed.match_id).count(),
             })
 
-        backed_picks = sorted(
-            picks,
-            key=lambda pick: (
-                pick.match_date or pick.run.target_date,
-                pick.kickoff or "",
-                -(pick.confidence or 0),
-            ),
-        )
-        payload = {
-            "requested_count": len(pick_ids),
-            "backed_count": len(picks),
-            "created_count": len(created_ids),
-            "already_backed_count": len(existing_ids),
-            "missing_pick_ids": missing_pick_ids,
-            "results": results,
-            "picks": PickSerializer(backed_picks, many=True, context={"request": request}).data,
-        }
+        games = _backed_games_payload(request, target_date)
         return Response(
-            payload,
-            status=status.HTTP_201_CREATED if created_ids else status.HTTP_200_OK,
+            {
+                "requested_count": len(match_ids),
+                "game_count": len(match_ids),
+                "created_count": created_count,
+                "already_backed_count": len(match_ids) - created_count,
+                "results": results,
+                "games": games,
+            },
+            status=status.HTTP_201_CREATED if created_count else status.HTTP_200_OK,
         )
-
-
-class BackedPicksView(APIView):
-    permission_classes = [IsAuthenticated]
-    serializer_class = BackedPicksResponseSerializer
 
     @extend_schema(
-        summary="List user backed picks",
-        description="Authenticated user endpoint. Returns picks backed by the current user, with optional match date filtering.",
-        tags=["Picks"],
+        summary="List user backed games",
+        description="Authenticated user endpoint. Returns games backed/saved by the current user, with optional match date filtering.",
+        tags=["Games"],
         parameters=[BackedPicksQuerySerializer],
-        responses={200: BackedPicksResponseSerializer},
+        responses={200: BackedGamesResponseSerializer},
     )
     def get(self, request):
         query = BackedPicksQuerySerializer(data=request.query_params)
         query.is_valid(raise_exception=True)
         target_date = query.validated_data.get("date")
+        games = _backed_games_payload(request, target_date)
 
-        picks = (
-            Pick.objects.select_related("run")
-            .prefetch_related("backs")
-            .filter(backs__user=request.user)
-            .exclude(market__in=EXCLUDED_MARKETS)
-        )
-        if target_date:
-            picks = picks.filter(match_date=target_date)
-        picks = picks.distinct().order_by("-match_date", "kickoff", "-confidence", "-ev")
-
-        return Response(
-            {
-                "date": target_date,
-                "count": picks.count(),
-                "picks": PickSerializer(picks, many=True, context={"request": request}).data,
-            }
-        )
+        return Response({"date": target_date, "count": len(games), "games": games})
 
     @extend_schema(
-        summary="Clear user backed picks",
-        description="Authenticated user endpoint. Deletes all backed-pick markers for the current user. Pass date to clear only one matchday.",
-        tags=["Picks"],
+        summary="Clear user backed games",
+        description="Authenticated user endpoint. Deletes all backed-game markers for the current user. Pass date to clear only one matchday.",
+        tags=["Games"],
         parameters=[BackedPicksQuerySerializer],
         responses={200: OpenApiTypes.OBJECT},
     )
@@ -1622,16 +1645,15 @@ class BackedPicksView(APIView):
         query.is_valid(raise_exception=True)
         target_date = query.validated_data.get("date")
 
-        backs = PickBack.objects.filter(user=request.user)
+        backs = GameBack.objects.filter(user=request.user)
         if target_date:
-            backs = backs.filter(pick__match_date=target_date)
+            backs = backs.filter(match_date=target_date)
         deleted_count, _ = backs.delete()
-
         return Response(
             {
                 "date": target_date,
                 "deleted_count": deleted_count,
-                "message": "Backed picks cleared.",
+                "message": "Backed games cleared.",
             },
             status=status.HTTP_200_OK,
         )

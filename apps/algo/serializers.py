@@ -1,6 +1,6 @@
 from rest_framework import serializers
 
-from .models import AlgoRun, Pick, PickBack
+from .models import AlgoRun, GameBack, Pick
 
 
 class PickSerializer(serializers.ModelSerializer):
@@ -51,7 +51,10 @@ class PickSerializer(serializers.ModelSerializer):
         )
 
     def get_backed_count(self, obj) -> int:
-        return obj.backs.count()
+        match_id = str(obj.match_id or "")
+        if not match_id:
+            return 0
+        return GameBack.objects.filter(match_id=match_id).count()
 
     def _recent_form_payload(self, form) -> dict:
         form = dict(form or {})
@@ -73,9 +76,10 @@ class PickSerializer(serializers.ModelSerializer):
 
     def get_backed_by_me(self, obj) -> bool:
         request = self.context.get("request")
-        if not request or not request.user.is_authenticated:
+        match_id = str(obj.match_id or "")
+        if not request or not request.user.is_authenticated or not match_id:
             return False
-        return obj.backs.filter(user=request.user).exists()
+        return GameBack.objects.filter(user=request.user, match_id=match_id).exists()
 
     def get_tier(self, obj) -> str:
         confidence = obj.confidence or 0
@@ -367,42 +371,39 @@ class RecordResponseSerializer(serializers.Serializer):
     records = PublicRecordPickSerializer(many=True)
 
 
-class PickBackSerializer(serializers.ModelSerializer):
-    class Meta:
-        model = PickBack
-        fields = ("id", "pick", "created_at")
-        read_only_fields = fields
-
-
-class PickBackResponseSerializer(serializers.Serializer):
-    pick_id = serializers.IntegerField()
-    backed = serializers.BooleanField()
-    created = serializers.BooleanField()
-    backed_count = serializers.IntegerField()
-
-
-class BulkPickBackRequestSerializer(serializers.Serializer):
-    pick_ids = serializers.ListField(
-        child=serializers.IntegerField(min_value=1),
+class BulkGameBackRequestSerializer(serializers.Serializer):
+    match_ids = serializers.ListField(
+        child=serializers.CharField(allow_blank=False),
         min_length=1,
         max_length=50,
     )
+    date = serializers.DateField(required=False)
 
-    def validate_pick_ids(self, value):
-        return list(dict.fromkeys(value))
+    def validate_match_ids(self, value):
+        cleaned = list(dict.fromkeys(str(item).strip() for item in value if str(item).strip()))
+        if not cleaned:
+            raise serializers.ValidationError("At least one match_id is required.")
+        return cleaned
 
 
-class BulkPickBackResponseSerializer(serializers.Serializer):
+class BulkGameBackResponseSerializer(serializers.Serializer):
     requested_count = serializers.IntegerField()
-    backed_count = serializers.IntegerField()
+    game_count = serializers.IntegerField()
     created_count = serializers.IntegerField()
     already_backed_count = serializers.IntegerField()
-    missing_pick_ids = serializers.ListField(child=serializers.IntegerField())
     results = serializers.JSONField()
-    picks = PickSerializer(many=True)
+    games = serializers.JSONField()
 
 
-class BackedPicksResponseSerializer(serializers.Serializer):
+class GameBackResponseSerializer(serializers.Serializer):
+    match_id = serializers.CharField()
+    backed = serializers.BooleanField()
+    created = serializers.BooleanField(required=False)
+    deleted = serializers.BooleanField(required=False)
+    backed_count = serializers.IntegerField()
+
+
+class BackedGamesResponseSerializer(serializers.Serializer):
     date = serializers.DateField(required=False, allow_null=True)
     count = serializers.IntegerField()
-    picks = PickSerializer(many=True)
+    games = serializers.JSONField()

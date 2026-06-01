@@ -161,6 +161,35 @@ class AlgoFixture(models.Model):
         return self.fixture
 
 
+class GameBack(models.Model):
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="backed_games",
+    )
+    match_id = models.CharField(max_length=100)
+    match_date = models.DateField(null=True, blank=True)
+    fixture = models.ForeignKey(
+        AlgoFixture,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="backs",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        unique_together = ("user", "match_id")
+        ordering = ["-created_at"]
+        indexes = [
+            models.Index(fields=["user", "match_date"]),
+            models.Index(fields=["match_id"]),
+        ]
+
+    def __str__(self):
+        return f"{self.user} backed game {self.match_id}"
+
+
 class MarketPrediction(models.Model):
     class Status(models.TextChoices):
         PENDING = "pending", "Pending"
