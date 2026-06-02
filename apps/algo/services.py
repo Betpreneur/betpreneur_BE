@@ -59,6 +59,13 @@ class AlgoRunnerService:
             env.update(extra)
         return env
 
+    def _runner_env_int(self, name, default):
+        value = self._runner_env().get(name, default)
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return default
+
     def _text(self, value):
         return "" if value is None else str(value)
 
@@ -339,41 +346,87 @@ class AlgoRunnerService:
             ),
         }
 
-    def _select_prediction_ids(self, algo_run):
-        max_daily = self._runner_env().get("ALGO_MAX_DAILY_PICKS", 15)
-        try:
-            max_daily = max(1, int(max_daily))
-        except (TypeError, ValueError):
-            max_daily = 15
+    def _prediction_tier(self, prediction):
+        if prediction.confidence >= 80:
+            return Pick.Tier.BANKER
+        if prediction.confidence >= 70:
+            return Pick.Tier.VALUE_GEM
+        if prediction.confidence >= 60:
+            return Pick.Tier.WILD_CARD
+        return None
 
-        qs = (
+    def _market_daily_limit(self, market, max_daily):
+        if market == "DC: 12":
+            return max(0, self._runner_env_int("ALGO_MAX_DAILY_DC12_PICKS", 1))
+        default_limit = 2 if max_daily <= 10 else 3
+        return max(1, self._runner_env_int("ALGO_MAX_DAILY_SAME_MARKET_PICKS", default_limit))
+
+    def _prediction_rank(self, prediction):
+        ev = float(prediction.ev or 0)
+        odds = float(prediction.odds or 0)
+        confidence = float(prediction.confidence or 0)
+        market_penalty = -4.0 if prediction.market == "DC: 12" else 0.0
+        return (
+            confidence + (ev * 18.0) + market_penalty,
+            confidence,
+            ev,
+            -odds,
+        )
+
+    def _select_prediction_ids(self, algo_run):
+        max_daily = max(1, self._runner_env_int("ALGO_MAX_DAILY_PICKS", 15))
+        min_daily = min(
+            max_daily,
+            max(0, self._runner_env_int("ALGO_MIN_DAILY_PICKS", min(6, max_daily))),
+        )
+
+        predictions = list(
             MarketPrediction.objects.filter(run=algo_run, eligible=True)
             .exclude(market__in=["DC: 1X", "DC: X2"])
             .exclude(ev__isnull=True)
             .order_by("-confidence", "-ev", "odds")
         )
+        predictions.sort(key=self._prediction_rank, reverse=True)
+
         buckets = {
             Pick.Tier.BANKER: [],
             Pick.Tier.VALUE_GEM: [],
             Pick.Tier.WILD_CARD: [],
         }
         used_matches = set()
-        for prediction in qs:
+        market_counts = defaultdict(int)
+
+        def add_prediction(prediction):
             if prediction.match_id in used_matches:
-                continue
-            tier = None
-            if prediction.confidence >= 80:
-                tier = Pick.Tier.BANKER
-            elif prediction.confidence >= 70:
-                tier = Pick.Tier.VALUE_GEM
-            elif prediction.confidence >= 60:
-                tier = Pick.Tier.WILD_CARD
+                return False
+            tier = self._prediction_tier(prediction)
             if not tier:
-                continue
+                return False
+            if prediction.market == "DC: 12" and tier == Pick.Tier.WILD_CARD:
+                return False
             buckets[tier].append(prediction.id)
             used_matches.add(prediction.match_id)
-            if sum(len(items) for items in buckets.values()) >= max_daily:
+            market_counts[prediction.market] += 1
+            return True
+
+        def selected_count():
+            return sum(len(items) for items in buckets.values())
+
+        for prediction in predictions:
+            if selected_count() >= max_daily:
                 break
+            if market_counts[prediction.market] >= self._market_daily_limit(prediction.market, max_daily):
+                continue
+            add_prediction(prediction)
+
+        if selected_count() < min_daily:
+            for prediction in predictions:
+                if selected_count() >= min_daily:
+                    break
+                if prediction.market == "DC: 12":
+                    continue
+                add_prediction(prediction)
+
         return buckets
 
     def _publish_selected_predictions(self, algo_run, bankroll, use_llm=False):
