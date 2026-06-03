@@ -239,13 +239,38 @@ def _market_sort_value(market):
     )
 
 
+def _market_display_score(market):
+    confidence = float(market.get("confidence") or 0)
+    ev = market.get("ev")
+    ev_score = float(ev) * 18.0 if ev is not None else -8.0
+    odds = float(market.get("odds") or 0)
+    score = confidence + ev_score
+    risk_flags = set(market.get("risk_flags") or [])
+    insights = market.get("insights") or {}
+    avoid_reason = str(insights.get("avoid_reason") or "")
+
+    if market.get("market") == "DC: 12":
+        score -= 8.0
+        if "draw_boundary_risk" in risk_flags or "Draw pressure" in avoid_reason:
+            score -= 8.0
+    if "thin_edge" in risk_flags:
+        score -= 3.0
+    if "goal_line_boundary" in risk_flags:
+        score -= 4.0
+    if "market_cooling" in risk_flags or "strategy_cooling" in risk_flags:
+        score -= 3.0
+    if "market_recovered" in risk_flags or "strategy_promoted" in risk_flags:
+        score += 3.0
+    if not market.get("eligible"):
+        score -= 12.0
+    return score, confidence, ev_score, -odds
+
+
 def _game_market_rank(market):
     return (
         1 if market.get("selected") else 0,
         1 if market.get("eligible") else 0,
-        market.get("confidence") or 0,
-        market.get("ev") if market.get("ev") is not None else -999,
-        market.get("odds") or 0,
+        *_market_display_score(market),
     )
 
 
@@ -296,6 +321,91 @@ def _tier_for_confidence(confidence):
     return "watchlist"
 
 
+def _format_game_form_line(label, form):
+    form = _recent_form_payload(form)
+    games = int(form.get("games") or 0)
+    return (
+        f"{label}: {form.get('wins', 0)}W-{form.get('draws', 0)}D-{form.get('losses', 0)}L"
+        f" in {games}, {form.get('avg_scored', 0)} scored and {form.get('avg_conceded', 0)} conceded per match"
+    )
+
+
+def _market_evidence_for_game(market, item):
+    market_name = market.get("market", "")
+    home_form = item.get("home_recent_form") or {}
+    away_form = item.get("away_recent_form") or {}
+    corner_profile = item.get("corner_profile") or {}
+    fixture_context = item.get("fixture_context") or {}
+    goal_model = fixture_context.get("goal_model") or {}
+    expected_total = goal_model.get("expected_total")
+    draw_confidence = goal_model.get("draw_confidence")
+
+    if market_name.startswith("Corners "):
+        home_corners = corner_profile.get("home") or {}
+        away_corners = corner_profile.get("away") or {}
+        return (
+            f"The corner model projects about {corner_profile.get('expected_total', 'unknown')} total corners. "
+            f"{item.get('home_team', 'Home')} average {home_corners.get('avg_for', 'unknown')} corners for and "
+            f"{home_corners.get('avg_against', 'unknown')} against; "
+            f"{item.get('away_team', 'Away')} average {away_corners.get('avg_for', 'unknown')} for and "
+            f"{away_corners.get('avg_against', 'unknown')} against."
+        )
+    if market_name.startswith("Under"):
+        expected_note = f" Expected goals sit around {expected_total}." if expected_total is not None else ""
+        return (
+            f"The goal profile leans controlled. {_format_game_form_line('Home', home_form)}. "
+            f"{_format_game_form_line('Away', away_form)}.{expected_note}"
+        )
+    if market_name.startswith("Over") or "BTTS" in market_name or market_name.startswith("GG"):
+        expected_note = f" Expected goals sit around {expected_total}." if expected_total is not None else ""
+        return (
+            f"The attacking profile supports goals. {_format_game_form_line('Home', home_form)}. "
+            f"{_format_game_form_line('Away', away_form)}.{expected_note}"
+        )
+    if market_name == "DC: 12":
+        draw_note = f" Draw-risk confidence is {draw_confidence}%." if draw_confidence is not None else ""
+        return (
+            f"This result market needs either team to win, so draw risk is the key threat. "
+            f"{_format_game_form_line('Home', home_form)}. {_format_game_form_line('Away', away_form)}.{draw_note}"
+        )
+    if market_name.endswith("Win") or market_name.startswith("AH ") or market_name.startswith("DNB"):
+        return (
+            f"The result market is based on recent team balance. {_format_game_form_line('Home', home_form)}. "
+            f"{_format_game_form_line('Away', away_form)}."
+        )
+    return (
+        f"Recent team context: {_format_game_form_line('Home', home_form)}. "
+        f"{_format_game_form_line('Away', away_form)}."
+    )
+
+
+def _market_reasoning_for_game(market, item):
+    ev = market.get("ev")
+    ev_text = f"{ev:+.3f} expected value" if ev is not None else "no priced EV"
+    odds_source = market.get("odds_source") or "unknown"
+    return (
+        f"{market.get('market')} rates at {market.get('confidence')}% confidence with "
+        f"{market.get('odds')} odds and {ev_text}. "
+        f"{_market_evidence_for_game(market, item)} "
+        f"Pricing is based on {odds_source} odds."
+    )
+
+
+def _market_verdict_for_game(market):
+    risk_flags = set(market.get("risk_flags") or [])
+    if not market.get("eligible"):
+        return "Watchlist only; it did not clear the publish gate."
+    if market.get("market") == "DC: 12":
+        return "Playable only when the draw risk stays controlled; avoid overusing this market."
+    if "thin_edge" in risk_flags or "goal_line_boundary" in risk_flags:
+        return "Playable, but the edge is narrow and should be treated cautiously."
+    if market.get("confidence", 0) >= 80:
+        return "Strong model candidate from this fixture."
+    if market.get("confidence", 0) >= 70:
+        return "Solid model candidate with enough confidence to monitor closely."
+    return "Lower-confidence candidate; useful for analysis but not a headline pick."
+
+
 def _normalise_fixture_markets(item, picks_by_match):
     markets = []
     match_picks = picks_by_match.get(str(item.get("match_id") or ""), [])
@@ -314,6 +424,9 @@ def _normalise_fixture_markets(item, picks_by_match):
             payload.setdefault("selected", False)
             payload.setdefault("selected_pick_id", None)
             payload.setdefault("selected_tier", "")
+        payload["reasoning"] = _market_reasoning_for_game(payload, item)
+        payload["model_verdict"] = _market_verdict_for_game(payload)
+        payload["display_score"] = round(_market_display_score(payload)[0], 3)
         markets.append(payload)
     return sorted(markets, key=_game_market_rank, reverse=True)
 
@@ -387,6 +500,8 @@ def _game_summary_from_fixture(item, picks_by_match, request=None, include_marke
             "key_signals": (item.get("insights") or {}).get("key_signals", []),
             "risk_warnings": (item.get("insights") or {}).get("risk_warnings", []),
             "top_market": top_market,
+            "reasoning": (top_market or {}).get("reasoning", ""),
+            "model_verdict": (top_market or {}).get("model_verdict", ""),
         }
     return payload
 
