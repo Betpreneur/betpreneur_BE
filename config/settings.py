@@ -142,7 +142,9 @@ DEFAULT_FROM_EMAIL = config("DEFAULT_FROM_EMAIL", default="noreply@betpreneur.lo
 
 GRIND_ALGO = {
     "APS_KEY": config("APS_KEY", default=""),
-    "APS_MAX_FIXTURES": config("APS_MAX_FIXTURES", default="90"),
+    "APS_MAX_FIXTURES": config("APS_MAX_FIXTURES", default="0"),
+    "APS_TRACK_ALL_LEAGUES": config("APS_TRACK_ALL_LEAGUES", default="True"),
+    "APS_EXTRA_TRACKED_LEAGUES": config("APS_EXTRA_TRACKED_LEAGUES", default=""),
     "GEMINI_API_KEY": config("GEMINI_API_KEY", default=""),
     "GEMINI_MODEL": config("GEMINI_MODEL", default="gemini-2.5-flash"),
     "MINIMAX_API_KEY": config("MINIMAX_API_KEY", default=""),

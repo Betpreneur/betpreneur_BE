@@ -91,7 +91,9 @@ def clear_runtime_caches():
     ):
         cache.clear()
 
-# ── API-FOOTBALL TRACKED LEAGUES ─────────────────────────────────
+# ── API-FOOTBALL LEAGUE FALLBACK LIST ────────────────────────────
+# By default the runner tracks every non-finished API-Football fixture for the
+# day. This list is only used when APS_TRACK_ALL_LEAGUES=False.
 APS_TRACKED_LEAGUES = {
     7:   "Asian Cup",
     848: "UEFA Europa Conference League",
@@ -136,6 +138,26 @@ APS_TRACKED_LEAGUES = {
     3:   "UEFA Europa League",
     2:   "UEFA Champions League",
 }
+
+def tracked_leagues():
+    leagues = dict(APS_TRACKED_LEAGUES)
+    raw = os.environ.get("APS_EXTRA_TRACKED_LEAGUES", "")
+    for item in raw.split(","):
+        item = item.strip()
+        if not item:
+            continue
+        if ":" in item:
+            league_id, name = item.split(":", 1)
+        else:
+            league_id, name = item, f"Extra League {item}"
+        try:
+            leagues[int(league_id.strip())] = name.strip() or f"Extra League {league_id.strip()}"
+        except (TypeError, ValueError):
+            log.warning("Ignoring invalid APS_EXTRA_TRACKED_LEAGUES item: %s", item)
+    return leagues
+
+def aps_track_all_leagues():
+    return _env_bool("APS_TRACK_ALL_LEAGUES", True)
 
 MARKET_MEANINGS = {
     "Home Win":"Home team to win","Away Win":"Away team to win",
@@ -232,11 +254,13 @@ def fetch_aps_fixtures(target_date):
     fixtures = []
     seen = set()
     aps_all = aps_get("/fixtures", {"date": target_date, "timezone": "Africa/Lagos"})
+    track_all = aps_track_all_leagues()
+    tracked = tracked_leagues() if not track_all else {}
     for f in aps_all:
         league_id = f.get("league",{}).get("id")
         status    = f.get("fixture",{}).get("status",{}).get("short","")
         if status in ("FT","AET","PEN","CANC","ABD"): continue
-        if league_id not in APS_TRACKED_LEAGUES: continue
+        if not track_all and league_id not in tracked: continue
         hname = f["teams"]["home"]["name"]
         aname = f["teams"]["away"]["name"]
         key   = normalize(f"{hname}{aname}")
@@ -265,7 +289,7 @@ def fetch_aps_fixtures(target_date):
             "date":     target_date,
             "season":   f["league"].get("season"),
         })
-    log.info(f"API-Football tracked fixtures: {len(fixtures)}")
+    log.info(f"API-Football candidate fixtures: {len(fixtures)}")
     return fixtures
 
 # ── PHASE 3: PREDICTIONS FETCH ────────────────────────────────────
@@ -3172,8 +3196,8 @@ def run_daily_algo():
     fixtures = fetch_aps_fixtures(target_date)
     log_memory("fixtures_fetched")
 
-    MAX_FIXTURES = int(os.environ.get("APS_MAX_FIXTURES", "90"))
-    if len(fixtures) > MAX_FIXTURES:
+    MAX_FIXTURES = int(os.environ.get("APS_MAX_FIXTURES", "0") or 0)
+    if MAX_FIXTURES > 0 and len(fixtures) > MAX_FIXTURES:
         log.warning(f"Capping API-Football games: {len(fixtures)} -> {MAX_FIXTURES}")
         fixtures = fixtures[:MAX_FIXTURES]
 

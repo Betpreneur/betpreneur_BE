@@ -66,6 +66,15 @@ class AlgoRunnerService:
         except (TypeError, ValueError):
             return default
 
+    def _limit_fixtures(self, fixtures):
+        try:
+            max_fixtures = int(os.environ.get("APS_MAX_FIXTURES", "0") or 0)
+        except (TypeError, ValueError):
+            max_fixtures = 0
+        if max_fixtures > 0 and len(fixtures) > max_fixtures:
+            return fixtures[:max_fixtures]
+        return fixtures
+
     def _text(self, value):
         return "" if value is None else str(value)
 
@@ -585,9 +594,7 @@ class AlgoRunnerService:
 
                 bankroll = algo_runner.get_bankroll(None)
                 fixtures = algo_runner.fetch_aps_fixtures(algo_run.target_date.isoformat())
-                max_fixtures = int(os.environ.get("APS_MAX_FIXTURES", "90"))
-                if len(fixtures) > max_fixtures:
-                    fixtures = fixtures[:max_fixtures]
+                fixtures = self._limit_fixtures(fixtures)
 
             Pick.objects.filter(run=algo_run).delete()
             AlgoFixture.objects.filter(run=algo_run).delete()
@@ -774,9 +781,7 @@ class AlgoRunnerService:
                 algo_runner.log_memory("staged_start")
                 bankroll = algo_runner.get_bankroll(None)
                 fixtures = algo_runner.fetch_aps_fixtures(algo_run.target_date.isoformat())
-                max_fixtures = int(os.environ.get("APS_MAX_FIXTURES", "90"))
-                if len(fixtures) > max_fixtures:
-                    fixtures = fixtures[:max_fixtures]
+                fixtures = self._limit_fixtures(fixtures)
 
                 algo_run.aps_fixtures = len(fixtures)
                 algo_run.fd_fixtures = 0
