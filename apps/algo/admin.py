@@ -1,7 +1,9 @@
 from django.contrib import admin
 from django.contrib import messages
+from django.db.models import Avg, Count, Q
 from django.template.response import TemplateResponse
-from django.urls import path
+from django.urls import path, reverse
+from django.utils.html import format_html
 from django.utils import timezone
 
 from .models import AlgoFixture, AlgoRun, GameBack, MarketPrediction, Pick, PickBack, StrategyReview
@@ -146,6 +148,7 @@ class AlgoRunAdmin(admin.ModelAdmin):
         "bankers",
         "value_gems",
         "wild_cards",
+        "data_center_link",
         "created_at",
     )
     list_filter = ("status", "target_date")
@@ -193,8 +196,18 @@ class AlgoRunAdmin(admin.ModelAdmin):
                 self.admin_site.admin_view(self.performance_view),
                 name="algo_algorun_performance",
             ),
+            path(
+                "<path:object_id>/data-center/",
+                self.admin_site.admin_view(self.data_center_view),
+                name="algo_algorun_data_center",
+            ),
         ]
         return custom_urls + urls
+
+    @admin.display(description="Data Center")
+    def data_center_link(self, obj):
+        url = reverse("admin:algo_algorun_data_center", args=[obj.pk])
+        return format_html('<a class="button" href="{}">Open</a>', url)
 
     def performance_view(self, request):
         try:
@@ -210,6 +223,180 @@ class AlgoRunAdmin(admin.ModelAdmin):
             "opts": self.model._meta,
         }
         return TemplateResponse(request, "admin/algo/algorun/performance.html", context)
+
+    def _rate(self, wins, losses):
+        settled = wins + losses
+        return round((wins / settled) * 100, 1) if settled else 0.0
+
+    def _status_summary(self, queryset, pnl_field=None):
+        aggregate = queryset.aggregate(
+            total=Count("id"),
+            wins=Count("id", filter=Q(status=MarketPrediction.Status.WIN)),
+            losses=Count("id", filter=Q(status=MarketPrediction.Status.LOSS)),
+            voids=Count("id", filter=Q(status=MarketPrediction.Status.VOID)),
+            pending=Count("id", filter=Q(status=MarketPrediction.Status.PENDING)),
+        )
+        wins = aggregate["wins"] or 0
+        losses = aggregate["losses"] or 0
+        summary = {
+            "total": aggregate["total"] or 0,
+            "wins": wins,
+            "losses": losses,
+            "voids": aggregate["voids"] or 0,
+            "pending": aggregate["pending"] or 0,
+            "settled": wins + losses,
+            "accuracy": self._rate(wins, losses),
+        }
+        if pnl_field:
+            summary["pnl"] = queryset.aggregate(total=Avg(pnl_field)).get("total")
+        return summary
+
+    def _market_rows(self, predictions):
+        rows = []
+        aggregates = (
+            predictions.values("market")
+            .annotate(
+                total=Count("id"),
+                wins=Count("id", filter=Q(status=MarketPrediction.Status.WIN)),
+                losses=Count("id", filter=Q(status=MarketPrediction.Status.LOSS)),
+                voids=Count("id", filter=Q(status=MarketPrediction.Status.VOID)),
+                pending=Count("id", filter=Q(status=MarketPrediction.Status.PENDING)),
+                published_count=Count("id", filter=Q(published=True)),
+                eligible_count=Count("id", filter=Q(eligible=True)),
+                avg_confidence=Avg("confidence"),
+                avg_ev=Avg("ev"),
+            )
+            .order_by("market")
+        )
+        for item in aggregates:
+            wins = item["wins"] or 0
+            losses = item["losses"] or 0
+            total = item["total"] or 0
+            rows.append({
+                "market": item["market"],
+                "total": total,
+                "wins": wins,
+                "losses": losses,
+                "settled": wins + losses,
+                "voids": item["voids"] or 0,
+                "pending": item["pending"] or 0,
+                "published_count": item["published_count"] or 0,
+                "eligible_count": item["eligible_count"] or 0,
+                "accuracy": self._rate(wins, losses),
+                "avg_confidence": round(float(item["avg_confidence"] or 0), 1),
+                "avg_ev": round(float(item["avg_ev"] or 0), 3),
+            })
+        return sorted(rows, key=lambda row: (row["settled"], row["accuracy"]), reverse=True)
+
+    def _fixture_rows(self, algo_run, predictions):
+        fixtures = {
+            str(fixture.match_id or ""): fixture
+            for fixture in AlgoFixture.objects.filter(run=algo_run).order_by("country", "league", "kickoff", "fixture")
+        }
+        grouped = {}
+        for prediction in predictions.order_by("match_id", "-published", "-confidence", "-ev", "market"):
+            key = str(prediction.match_id or "")
+            fixture = fixtures.get(key)
+            row = grouped.setdefault(
+                key,
+                {
+                    "match_id": key,
+                    "fixture": fixture.fixture if fixture else prediction.fixture,
+                    "country": fixture.country if fixture else "",
+                    "league": fixture.league if fixture else prediction.league,
+                    "kickoff": fixture.kickoff if fixture else prediction.kickoff,
+                    "score": prediction.score or "",
+                    "markets": [],
+                    "wins": 0,
+                    "losses": 0,
+                    "voids": 0,
+                    "pending": 0,
+                    "published": [],
+                },
+            )
+            if prediction.score and not row["score"]:
+                row["score"] = prediction.score
+            row["markets"].append(prediction)
+            if prediction.published:
+                row["published"].append(prediction)
+            if prediction.status == MarketPrediction.Status.WIN:
+                row["wins"] += 1
+            elif prediction.status == MarketPrediction.Status.LOSS:
+                row["losses"] += 1
+            elif prediction.status == MarketPrediction.Status.VOID:
+                row["voids"] += 1
+            else:
+                row["pending"] += 1
+
+        rows = []
+        for row in grouped.values():
+            row["total"] = len(row["markets"])
+            row["accuracy"] = self._rate(row["wins"], row["losses"])
+            row["top_market"] = row["markets"][0] if row["markets"] else None
+            rows.append(row)
+        return sorted(rows, key=lambda row: (row["country"], row["league"], row["kickoff"], row["fixture"]))
+
+    def data_center_view(self, request, object_id):
+        algo_run = self.get_object(request, object_id)
+        if algo_run is None:
+            from django.http import Http404
+
+            raise Http404("Algo run not found")
+
+        predictions = MarketPrediction.objects.filter(run=algo_run).select_related("selected_pick")
+        published_predictions = predictions.filter(published=True)
+        picks = Pick.objects.filter(run=algo_run)
+        market_rows = self._market_rows(predictions)
+        fixture_rows = self._fixture_rows(algo_run, predictions)
+        settled_market_rows = [row for row in market_rows if row["wins"] + row["losses"] > 0]
+        best_market = max(settled_market_rows, key=lambda row: (row["accuracy"], row["wins"] + row["losses"], row["wins"]), default=None)
+        worst_market = min(settled_market_rows, key=lambda row: (row["accuracy"], -(row["wins"] + row["losses"])), default=None)
+
+        high_value_upsets = list(
+            predictions.filter(
+                status=MarketPrediction.Status.LOSS,
+                confidence__gte=70,
+            )
+            .order_by("-confidence", "-ev")[:25]
+        )
+        hidden_wins = list(
+            predictions.filter(
+                status=MarketPrediction.Status.WIN,
+                published=False,
+                eligible=True,
+                confidence__gte=70,
+            )
+            .order_by("-confidence", "-ev")[:25]
+        )
+
+        context = {
+            **self.admin_site.each_context(request),
+            "title": f"Daily Data Center - {algo_run.target_date}",
+            "opts": self.model._meta,
+            "algo_run": algo_run,
+            "summary": self._status_summary(predictions),
+            "published_summary": self._status_summary(published_predictions),
+            "pick_summary": {
+                "total": picks.count(),
+                "wins": picks.filter(status=Pick.Status.WIN).count(),
+                "losses": picks.filter(status=Pick.Status.LOSS).count(),
+                "voids": picks.filter(status=Pick.Status.VOID).count(),
+                "pending": picks.filter(status=Pick.Status.PENDING).count(),
+            },
+            "fixture_count": AlgoFixture.objects.filter(run=algo_run).count(),
+            "market_rows": market_rows,
+            "fixture_rows": fixture_rows,
+            "best_market": best_market,
+            "worst_market": worst_market,
+            "high_value_upsets": high_value_upsets,
+            "hidden_wins": hidden_wins,
+        }
+        context["pick_summary"]["settled"] = context["pick_summary"]["wins"] + context["pick_summary"]["losses"]
+        context["pick_summary"]["accuracy"] = self._rate(
+            context["pick_summary"]["wins"],
+            context["pick_summary"]["losses"],
+        )
+        return TemplateResponse(request, "admin/algo/algorun/data_center.html", context)
 
 
 @admin.register(Pick)

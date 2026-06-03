@@ -1,0 +1,263 @@
+{% extends "admin/base_site.html" %}
+{% load i18n admin_urls %}
+
+{% block extrastyle %}
+{{ block.super }}
+<style>
+  .dc-wrap { max-width: 1600px; }
+  .dc-header { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 16px; }
+  .dc-grid { display: grid; grid-template-columns: repeat(4, minmax(180px, 1fr)); gap: 12px; margin: 16px 0 22px; }
+  .dc-card { background: var(--body-bg); border: 1px solid var(--border-color); border-radius: 6px; padding: 14px; }
+  .dc-card .label { color: var(--body-quiet-color); font-size: 12px; text-transform: uppercase; letter-spacing: .04em; }
+  .dc-card .value { font-size: 26px; font-weight: 700; margin-top: 6px; color: var(--body-fg); }
+  .dc-card .sub { color: var(--body-quiet-color); margin-top: 4px; }
+  .dc-section { margin: 24px 0; }
+  .dc-table { width: 100%; border-collapse: collapse; }
+  .dc-table th, .dc-table td { padding: 8px 10px; border-bottom: 1px solid var(--hairline-color); vertical-align: top; }
+  .dc-table th { text-align: left; background: var(--darkened-bg); }
+  .dc-num { text-align: right; white-space: nowrap; }
+  .dc-badge { display: inline-block; border-radius: 999px; padding: 2px 8px; font-size: 12px; font-weight: 600; }
+  .dc-win { background: #e7f6ed; color: #17633a; }
+  .dc-loss { background: #fdeceb; color: #9b1c1c; }
+  .dc-void { background: #eef1f5; color: #45505c; }
+  .dc-pending { background: #fff5d9; color: #6f5200; }
+  .dc-published { background: #e8f1ff; color: #174a8b; }
+  .dc-muted { color: var(--body-quiet-color); }
+  .dc-two { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+  details summary { cursor: pointer; color: var(--link-fg); font-weight: 600; }
+  @media (max-width: 1000px) {
+    .dc-grid, .dc-two { grid-template-columns: 1fr; }
+  }
+</style>
+{% endblock %}
+
+{% block breadcrumbs %}
+<div class="breadcrumbs">
+  <a href="{% url 'admin:index' %}">{% translate 'Home' %}</a>
+  &rsaquo; <a href="{% url 'admin:app_list' app_label=opts.app_label %}">{{ opts.app_config.verbose_name }}</a>
+  &rsaquo; <a href="{% url 'admin:algo_algorun_changelist' %}">Algo runs</a>
+  &rsaquo; <a href="{% url 'admin:algo_algorun_change' algo_run.pk %}">{{ algo_run }}</a>
+  &rsaquo; Data Center
+</div>
+{% endblock %}
+
+{% block content %}
+<div id="content-main" class="dc-wrap">
+  <div class="dc-header">
+    <div>
+      <h1>{{ title }}</h1>
+      <p class="dc-muted">Run #{{ algo_run.id }} · status {{ algo_run.status }} · created {{ algo_run.created_at }}</p>
+    </div>
+    <div>
+      <a class="button" href="{% url 'admin:algo_algorun_change' algo_run.pk %}">Open Run</a>
+      <a class="button" href="{% url 'admin:algo_marketprediction_changelist' %}?match_date__exact={{ algo_run.target_date }}">Market Rows</a>
+      <a class="button" href="{% url 'admin:algo_pick_changelist' %}?match_date__exact={{ algo_run.target_date }}">Published Picks</a>
+    </div>
+  </div>
+
+  <div class="dc-grid">
+    <div class="dc-card">
+      <div class="label">All Market Accuracy</div>
+      <div class="value">{{ summary.accuracy }}%</div>
+      <div class="sub">{{ summary.wins }}W / {{ summary.losses }}L · {{ summary.settled }} settled</div>
+    </div>
+    <div class="dc-card">
+      <div class="label">Published Pick Accuracy</div>
+      <div class="value">{{ pick_summary.accuracy }}%</div>
+      <div class="sub">{{ pick_summary.wins }}W / {{ pick_summary.losses }}L · {{ pick_summary.total }} picks</div>
+    </div>
+    <div class="dc-card">
+      <div class="label">Games Analyzed</div>
+      <div class="value">{{ fixture_count }}</div>
+      <div class="sub">{{ summary.total }} market predictions</div>
+    </div>
+    <div class="dc-card">
+      <div class="label">Unsettled / Void</div>
+      <div class="value">{{ summary.pending }} / {{ summary.voids }}</div>
+      <div class="sub">Pending / void market predictions</div>
+    </div>
+  </div>
+
+  <div class="dc-two">
+    <div class="dc-card">
+      <div class="label">Most Successful Market</div>
+      {% if best_market %}
+        <div class="value">{{ best_market.market }}</div>
+        <div class="sub">{{ best_market.accuracy }}% · {{ best_market.wins }}W / {{ best_market.losses }}L · {{ best_market.settled }} settled</div>
+      {% else %}
+        <div class="value">N/A</div>
+        <div class="sub">No settled markets yet.</div>
+      {% endif %}
+    </div>
+    <div class="dc-card">
+      <div class="label">Weakest Market Today</div>
+      {% if worst_market %}
+        <div class="value">{{ worst_market.market }}</div>
+        <div class="sub">{{ worst_market.accuracy }}% · {{ worst_market.wins }}W / {{ worst_market.losses }}L · {{ worst_market.settled }} settled</div>
+      {% else %}
+        <div class="value">N/A</div>
+        <div class="sub">No settled markets yet.</div>
+      {% endif %}
+    </div>
+  </div>
+
+  <div class="dc-section">
+    <h2>Market Performance</h2>
+    <table class="dc-table">
+      <thead>
+        <tr>
+          <th>Market</th>
+          <th class="dc-num">Total</th>
+          <th class="dc-num">Settled</th>
+          <th class="dc-num">Wins</th>
+          <th class="dc-num">Losses</th>
+          <th class="dc-num">Void</th>
+          <th class="dc-num">Pending</th>
+          <th class="dc-num">Accuracy</th>
+          <th class="dc-num">Published</th>
+          <th class="dc-num">Eligible</th>
+          <th class="dc-num">Avg Conf</th>
+          <th class="dc-num">Avg EV</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for row in market_rows %}
+          <tr>
+            <td>{{ row.market }}</td>
+            <td class="dc-num">{{ row.total }}</td>
+            <td class="dc-num">{{ row.settled }}</td>
+            <td class="dc-num">{{ row.wins }}</td>
+            <td class="dc-num">{{ row.losses }}</td>
+            <td class="dc-num">{{ row.voids }}</td>
+            <td class="dc-num">{{ row.pending }}</td>
+            <td class="dc-num"><strong>{{ row.accuracy }}%</strong></td>
+            <td class="dc-num">{{ row.published_count }}</td>
+            <td class="dc-num">{{ row.eligible_count }}</td>
+            <td class="dc-num">{{ row.avg_confidence }}</td>
+            <td class="dc-num">{{ row.avg_ev }}</td>
+          </tr>
+        {% empty %}
+          <tr><td colspan="12">No market predictions for this run.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+
+  <div class="dc-section">
+    <h2>Games And Settled Markets</h2>
+    <table class="dc-table">
+      <thead>
+        <tr>
+          <th>Game</th>
+          <th>Competition</th>
+          <th>Kickoff</th>
+          <th>Score</th>
+          <th class="dc-num">Markets</th>
+          <th class="dc-num">Accuracy</th>
+          <th>Published</th>
+          <th>Details</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for row in fixture_rows %}
+          <tr>
+            <td>
+              <strong>{{ row.fixture }}</strong><br>
+              <span class="dc-muted">{{ row.match_id }}</span>
+            </td>
+            <td>{{ row.country }} · {{ row.league }}</td>
+            <td>{{ row.kickoff }}</td>
+            <td>{{ row.score|default:"-" }}</td>
+            <td class="dc-num">{{ row.total }}</td>
+            <td class="dc-num">{{ row.accuracy }}%</td>
+            <td>
+              {% for pick in row.published %}
+                <span class="dc-badge dc-published">{{ pick.market }} · {{ pick.status }}</span>
+              {% empty %}
+                <span class="dc-muted">None</span>
+              {% endfor %}
+            </td>
+            <td>
+              <details>
+                <summary>{{ row.wins }}W / {{ row.losses }}L / {{ row.voids }}V / {{ row.pending }}P</summary>
+                <table class="dc-table">
+                  <thead>
+                    <tr>
+                      <th>Market</th>
+                      <th class="dc-num">Conf</th>
+                      <th class="dc-num">Odds</th>
+                      <th class="dc-num">EV</th>
+                      <th>Status</th>
+                      <th>Result</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {% for market in row.markets %}
+                      <tr>
+                        <td>{% if market.published %}<strong>{{ market.market }}</strong>{% else %}{{ market.market }}{% endif %}</td>
+                        <td class="dc-num">{{ market.confidence }}%</td>
+                        <td class="dc-num">{{ market.odds }}</td>
+                        <td class="dc-num">{{ market.ev|default:"-" }}</td>
+                        <td><span class="dc-badge dc-{{ market.status }}">{{ market.status }}</span></td>
+                        <td>{{ market.result|default:market.score }}</td>
+                      </tr>
+                    {% endfor %}
+                  </tbody>
+                </table>
+              </details>
+            </td>
+          </tr>
+        {% empty %}
+          <tr><td colspan="8">No games for this run.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+
+  <div class="dc-two">
+    <div class="dc-section">
+      <h2>High Value Upsets</h2>
+      <table class="dc-table">
+        <thead>
+          <tr><th>Game</th><th>Market</th><th class="dc-num">Conf</th><th class="dc-num">EV</th><th>Score</th></tr>
+        </thead>
+        <tbody>
+          {% for item in high_value_upsets %}
+            <tr>
+              <td>{{ item.fixture }}</td>
+              <td>{{ item.market }}</td>
+              <td class="dc-num">{{ item.confidence }}%</td>
+              <td class="dc-num">{{ item.ev|default:"-" }}</td>
+              <td>{{ item.score }}</td>
+            </tr>
+          {% empty %}
+            <tr><td colspan="5">No high-confidence losses yet.</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+
+    <div class="dc-section">
+      <h2>Hidden Internal Wins</h2>
+      <table class="dc-table">
+        <thead>
+          <tr><th>Game</th><th>Market</th><th class="dc-num">Conf</th><th class="dc-num">EV</th><th>Score</th></tr>
+        </thead>
+        <tbody>
+          {% for item in hidden_wins %}
+            <tr>
+              <td>{{ item.fixture }}</td>
+              <td>{{ item.market }}</td>
+              <td class="dc-num">{{ item.confidence }}%</td>
+              <td class="dc-num">{{ item.ev|default:"-" }}</td>
+              <td>{{ item.score }}</td>
+            </tr>
+          {% empty %}
+            <tr><td colspan="5">No eligible hidden wins yet.</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+{% endblock %}
