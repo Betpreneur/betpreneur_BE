@@ -288,52 +288,51 @@ class AlgoRunAdmin(admin.ModelAdmin):
             })
         return sorted(rows, key=lambda row: (row["settled"], row["accuracy"]), reverse=True)
 
-    def _fixture_rows(self, algo_run, predictions):
+    def _prediction_top_rank(self, prediction):
+        from .views import _market_display_score
+
+        payload = {
+            "market": prediction.market,
+            "confidence": prediction.confidence,
+            "odds": float(prediction.odds or 0),
+            "ev": float(prediction.ev) if prediction.ev is not None else None,
+            "eligible": prediction.eligible,
+            "risk_flags": prediction.risk_flags or [],
+            "insights": prediction.insights or {},
+        }
+        return (
+            1 if prediction.published else 0,
+            1 if prediction.eligible else 0,
+            *_market_display_score(payload),
+        )
+
+    def _top_predictions(self, predictions):
+        top_by_game = {}
+        for prediction in predictions:
+            key = str(prediction.match_id or "").strip() or prediction.fixture
+            current = top_by_game.get(key)
+            if current is None or self._prediction_top_rank(prediction) > self._prediction_top_rank(current):
+                top_by_game[key] = prediction
+        return list(top_by_game.values())
+
+    def _fixture_rows(self, algo_run, top_predictions):
         fixtures = {
             str(fixture.match_id or ""): fixture
             for fixture in AlgoFixture.objects.filter(run=algo_run).order_by("country", "league", "kickoff", "fixture")
         }
-        grouped = {}
-        for prediction in predictions.order_by("match_id", "-published", "-confidence", "-ev", "market"):
+        rows = []
+        for prediction in top_predictions:
             key = str(prediction.match_id or "")
             fixture = fixtures.get(key)
-            row = grouped.setdefault(
-                key,
-                {
-                    "match_id": key,
-                    "fixture": fixture.fixture if fixture else prediction.fixture,
-                    "country": fixture.country if fixture else "",
-                    "league": fixture.league if fixture else prediction.league,
-                    "kickoff": fixture.kickoff if fixture else prediction.kickoff,
-                    "score": prediction.score or "",
-                    "markets": [],
-                    "wins": 0,
-                    "losses": 0,
-                    "voids": 0,
-                    "pending": 0,
-                    "published": [],
-                },
-            )
-            if prediction.score and not row["score"]:
-                row["score"] = prediction.score
-            row["markets"].append(prediction)
-            if prediction.published:
-                row["published"].append(prediction)
-            if prediction.status == MarketPrediction.Status.WIN:
-                row["wins"] += 1
-            elif prediction.status == MarketPrediction.Status.LOSS:
-                row["losses"] += 1
-            elif prediction.status == MarketPrediction.Status.VOID:
-                row["voids"] += 1
-            else:
-                row["pending"] += 1
-
-        rows = []
-        for row in grouped.values():
-            row["total"] = len(row["markets"])
-            row["accuracy"] = self._rate(row["wins"], row["losses"])
-            row["top_market"] = row["markets"][0] if row["markets"] else None
-            rows.append(row)
+            rows.append({
+                "match_id": key,
+                "fixture": fixture.fixture if fixture else prediction.fixture,
+                "country": fixture.country if fixture else "",
+                "league": fixture.league if fixture else prediction.league,
+                "kickoff": fixture.kickoff if fixture else prediction.kickoff,
+                "score": prediction.score or "",
+                "top_market": prediction,
+            })
         return sorted(rows, key=lambda row: (row["country"], row["league"], row["kickoff"], row["fixture"]))
 
     def data_center_view(self, request, object_id):
@@ -344,26 +343,29 @@ class AlgoRunAdmin(admin.ModelAdmin):
             raise Http404("Algo run not found")
 
         predictions = MarketPrediction.objects.filter(run=algo_run).select_related("selected_pick")
+        all_prediction_count = predictions.count()
+        top_prediction_list = self._top_predictions(list(predictions))
+        top_prediction_ids = [prediction.id for prediction in top_prediction_list]
+        top_predictions = MarketPrediction.objects.filter(id__in=top_prediction_ids).select_related("selected_pick")
         published_predictions = predictions.filter(published=True)
         picks = Pick.objects.filter(run=algo_run)
-        market_rows = self._market_rows(predictions)
-        fixture_rows = self._fixture_rows(algo_run, predictions)
+        market_rows = self._market_rows(top_predictions)
+        fixture_rows = self._fixture_rows(algo_run, top_prediction_list)
         settled_market_rows = [row for row in market_rows if row["wins"] + row["losses"] > 0]
         best_market = max(settled_market_rows, key=lambda row: (row["accuracy"], row["wins"] + row["losses"], row["wins"]), default=None)
         worst_market = min(settled_market_rows, key=lambda row: (row["accuracy"], -(row["wins"] + row["losses"])), default=None)
 
         high_value_upsets = list(
-            predictions.filter(
+            top_predictions.filter(
                 status=MarketPrediction.Status.LOSS,
                 confidence__gte=70,
             )
             .order_by("-confidence", "-ev")[:25]
         )
         hidden_wins = list(
-            predictions.filter(
+            top_predictions.filter(
                 status=MarketPrediction.Status.WIN,
                 published=False,
-                eligible=True,
                 confidence__gte=70,
             )
             .order_by("-confidence", "-ev")[:25]
@@ -374,7 +376,7 @@ class AlgoRunAdmin(admin.ModelAdmin):
             "title": f"Daily Data Center - {algo_run.target_date}",
             "opts": self.model._meta,
             "algo_run": algo_run,
-            "summary": self._status_summary(predictions),
+            "summary": self._status_summary(top_predictions),
             "published_summary": self._status_summary(published_predictions),
             "pick_summary": {
                 "total": picks.count(),
@@ -384,6 +386,7 @@ class AlgoRunAdmin(admin.ModelAdmin):
                 "pending": picks.filter(status=Pick.Status.PENDING).count(),
             },
             "fixture_count": AlgoFixture.objects.filter(run=algo_run).count(),
+            "all_prediction_count": all_prediction_count,
             "market_rows": market_rows,
             "fixture_rows": fixture_rows,
             "best_market": best_market,

@@ -57,9 +57,9 @@
 
   <div class="dc-grid">
     <div class="dc-card">
-      <div class="label">All Market Accuracy</div>
+      <div class="label">Top Market Accuracy</div>
       <div class="value">{{ summary.accuracy }}%</div>
-      <div class="sub">{{ summary.wins }}W / {{ summary.losses }}L · {{ summary.settled }} settled</div>
+      <div class="sub">{{ summary.wins }}W / {{ summary.losses }}L · {{ summary.settled }} settled top markets</div>
     </div>
     <div class="dc-card">
       <div class="label">Published Pick Accuracy</div>
@@ -69,40 +69,40 @@
     <div class="dc-card">
       <div class="label">Games Analyzed</div>
       <div class="value">{{ fixture_count }}</div>
-      <div class="sub">{{ summary.total }} market predictions</div>
+      <div class="sub">{{ summary.total }} top markets · {{ all_prediction_count }} internal market rows</div>
     </div>
     <div class="dc-card">
       <div class="label">Unsettled / Void</div>
       <div class="value">{{ summary.pending }} / {{ summary.voids }}</div>
-      <div class="sub">Pending / void market predictions</div>
+      <div class="sub">Pending / void top markets</div>
     </div>
   </div>
 
   <div class="dc-two">
     <div class="dc-card">
-      <div class="label">Most Successful Market</div>
+      <div class="label">Most Successful Top Market</div>
       {% if best_market %}
         <div class="value">{{ best_market.market }}</div>
         <div class="sub">{{ best_market.accuracy }}% · {{ best_market.wins }}W / {{ best_market.losses }}L · {{ best_market.settled }} settled</div>
       {% else %}
         <div class="value">N/A</div>
-        <div class="sub">No settled markets yet.</div>
+        <div class="sub">No settled top markets yet.</div>
       {% endif %}
     </div>
     <div class="dc-card">
-      <div class="label">Weakest Market Today</div>
+      <div class="label">Weakest Top Market Today</div>
       {% if worst_market %}
         <div class="value">{{ worst_market.market }}</div>
         <div class="sub">{{ worst_market.accuracy }}% · {{ worst_market.wins }}W / {{ worst_market.losses }}L · {{ worst_market.settled }} settled</div>
       {% else %}
         <div class="value">N/A</div>
-        <div class="sub">No settled markets yet.</div>
+        <div class="sub">No settled top markets yet.</div>
       {% endif %}
     </div>
   </div>
 
   <div class="dc-section">
-    <h2>Market Performance</h2>
+    <h2>Top Market Performance</h2>
     <table class="dc-table">
       <thead>
         <tr>
@@ -114,8 +114,8 @@
           <th class="dc-num">Void</th>
           <th class="dc-num">Pending</th>
           <th class="dc-num">Accuracy</th>
-          <th class="dc-num">Published</th>
-          <th class="dc-num">Eligible</th>
+          <th class="dc-num">Published Tops</th>
+          <th class="dc-num">Eligible Tops</th>
           <th class="dc-num">Avg Conf</th>
           <th class="dc-num">Avg EV</th>
         </tr>
@@ -137,14 +137,14 @@
             <td class="dc-num">{{ row.avg_ev }}</td>
           </tr>
         {% empty %}
-          <tr><td colspan="12">No market predictions for this run.</td></tr>
+          <tr><td colspan="12">No top-market predictions for this run.</td></tr>
         {% endfor %}
       </tbody>
     </table>
   </div>
 
   <div class="dc-section">
-    <h2>Games And Settled Markets</h2>
+    <h2>Games And Top Market Results</h2>
     <table class="dc-table">
       <thead>
         <tr>
@@ -152,10 +152,11 @@
           <th>Competition</th>
           <th>Kickoff</th>
           <th>Score</th>
-          <th class="dc-num">Markets</th>
-          <th class="dc-num">Accuracy</th>
+          <th>Top Market</th>
+          <th class="dc-num">Confidence</th>
+          <th class="dc-num">Odds / EV</th>
+          <th>Status</th>
           <th>Published</th>
-          <th>Details</th>
         </tr>
       </thead>
       <tbody>
@@ -168,47 +169,23 @@
             <td>{{ row.country }} · {{ row.league }}</td>
             <td>{{ row.kickoff }}</td>
             <td>{{ row.score|default:"-" }}</td>
-            <td class="dc-num">{{ row.total }}</td>
-            <td class="dc-num">{{ row.accuracy }}%</td>
             <td>
-              {% for pick in row.published %}
-                <span class="dc-badge dc-published">{{ pick.market }} · {{ pick.status }}</span>
-              {% empty %}
-                <span class="dc-muted">None</span>
-              {% endfor %}
+              <strong>{{ row.top_market.market }}</strong><br>
+              <span class="dc-muted">{{ row.top_market.meaning }}</span>
             </td>
+            <td class="dc-num">{{ row.top_market.confidence }}%</td>
+            <td class="dc-num">{{ row.top_market.odds }} / {{ row.top_market.ev|default:"-" }}</td>
+            <td><span class="dc-badge dc-{{ row.top_market.status }}">{{ row.top_market.status }}</span></td>
             <td>
-              <details>
-                <summary>{{ row.wins }}W / {{ row.losses }}L / {{ row.voids }}V / {{ row.pending }}P</summary>
-                <table class="dc-table">
-                  <thead>
-                    <tr>
-                      <th>Market</th>
-                      <th class="dc-num">Conf</th>
-                      <th class="dc-num">Odds</th>
-                      <th class="dc-num">EV</th>
-                      <th>Status</th>
-                      <th>Result</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {% for market in row.markets %}
-                      <tr>
-                        <td>{% if market.published %}<strong>{{ market.market }}</strong>{% else %}{{ market.market }}{% endif %}</td>
-                        <td class="dc-num">{{ market.confidence }}%</td>
-                        <td class="dc-num">{{ market.odds }}</td>
-                        <td class="dc-num">{{ market.ev|default:"-" }}</td>
-                        <td><span class="dc-badge dc-{{ market.status }}">{{ market.status }}</span></td>
-                        <td>{{ market.result|default:market.score }}</td>
-                      </tr>
-                    {% endfor %}
-                  </tbody>
-                </table>
-              </details>
+              {% if row.top_market.published %}
+                <span class="dc-badge dc-published">Published top pick</span>
+              {% else %}
+                <span class="dc-muted">None</span>
+              {% endif %}
             </td>
           </tr>
         {% empty %}
-          <tr><td colspan="8">No games for this run.</td></tr>
+          <tr><td colspan="9">No games with top-market predictions for this run.</td></tr>
         {% endfor %}
       </tbody>
     </table>
@@ -216,7 +193,7 @@
 
   <div class="dc-two">
     <div class="dc-section">
-      <h2>High Value Upsets</h2>
+      <h2>High Value Top-Market Upsets</h2>
       <table class="dc-table">
         <thead>
           <tr><th>Game</th><th>Market</th><th class="dc-num">Conf</th><th class="dc-num">EV</th><th>Score</th></tr>
@@ -231,14 +208,14 @@
               <td>{{ item.score }}</td>
             </tr>
           {% empty %}
-            <tr><td colspan="5">No high-confidence losses yet.</td></tr>
+            <tr><td colspan="5">No high-confidence top-market losses yet.</td></tr>
           {% endfor %}
         </tbody>
       </table>
     </div>
 
     <div class="dc-section">
-      <h2>Hidden Internal Wins</h2>
+      <h2>Hidden Top-Market Wins</h2>
       <table class="dc-table">
         <thead>
           <tr><th>Game</th><th>Market</th><th class="dc-num">Conf</th><th class="dc-num">EV</th><th>Score</th></tr>
@@ -253,7 +230,7 @@
               <td>{{ item.score }}</td>
             </tr>
           {% empty %}
-            <tr><td colspan="5">No eligible hidden wins yet.</td></tr>
+            <tr><td colspan="5">No non-published top-market wins yet.</td></tr>
           {% endfor %}
         </tbody>
       </table>
