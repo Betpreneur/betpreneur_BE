@@ -74,7 +74,15 @@ RUN mkdir -p /home/appuser/.cache/pip /home/appuser/staticfiles /home/appuser/me
 
 
 # ------------------------------
-# Stage 4: Production
+# Stage 4: Celery Worker
+# ------------------------------
+FROM application AS worker
+
+CMD ["celery", "-A", "config", "worker", "--loglevel=info", "--concurrency=1", "--max-tasks-per-child=1", "--prefetch-multiplier=1"]
+
+
+# ------------------------------
+# Stage 5: Production
 # ------------------------------
 FROM application AS production
 
