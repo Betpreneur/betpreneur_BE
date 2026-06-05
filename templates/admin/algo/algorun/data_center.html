@@ -22,6 +22,16 @@
   .dc-void { background: #eef1f5; color: #45505c; }
   .dc-pending { background: #fff5d9; color: #6f5200; }
   .dc-published { background: #e8f1ff; color: #174a8b; }
+  .dc-trusted { background: #e7f6ed; color: #17633a; }
+  .dc-probation { background: #fff5d9; color: #6f5200; }
+  .dc-restricted { background: #fdeceb; color: #9b1c1c; }
+  .dc-unknown { background: #eef1f5; color: #45505c; }
+  .dc-active, .dc-recovered { background: #e7f6ed; color: #17633a; }
+  .dc-cooling { background: #fff5d9; color: #6f5200; }
+  .dc-suppressed { background: #fdeceb; color: #9b1c1c; }
+  .dc-watchlist { background: #fff5d9; color: #6f5200; }
+  .dc-no_edge { background: #fdeceb; color: #9b1c1c; }
+  .dc-playable, .dc-strong { background: #e7f6ed; color: #17633a; }
   .dc-muted { color: var(--body-quiet-color); }
   .dc-two { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
   details summary { cursor: pointer; color: var(--link-fg); font-weight: 600; }
@@ -102,6 +112,96 @@
   </div>
 
   <div class="dc-section">
+    <h2>Trust And Calibration</h2>
+    <div class="dc-two">
+      <div class="dc-card">
+        <div class="label">League-Market Trust</div>
+        <table class="dc-table">
+          <thead>
+            <tr><th>Status</th><th class="dc-num">Top Markets</th><th class="dc-num">Published</th><th class="dc-num">Accuracy</th></tr>
+          </thead>
+          <tbody>
+            {% for row in league_trust_rows %}
+              <tr>
+                <td><span class="dc-badge dc-{{ row.status }}">{{ row.status }}</span></td>
+                <td class="dc-num">{{ row.total }}</td>
+                <td class="dc-num">{{ row.published }}</td>
+                <td class="dc-num">{{ row.accuracy }}%</td>
+              </tr>
+            {% empty %}
+              <tr><td colspan="4">No league trust data yet.</td></tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      <div class="dc-card">
+        <div class="label">Top-Market Calibration Trust</div>
+        <table class="dc-table">
+          <thead>
+            <tr><th>Status</th><th class="dc-num">Top Markets</th><th class="dc-num">Published</th><th class="dc-num">Accuracy</th></tr>
+          </thead>
+          <tbody>
+            {% for row in calibration_trust_rows %}
+              <tr>
+                <td><span class="dc-badge dc-{{ row.status }}">{{ row.status }}</span></td>
+                <td class="dc-num">{{ row.total }}</td>
+                <td class="dc-num">{{ row.published }}</td>
+                <td class="dc-num">{{ row.accuracy }}%</td>
+              </tr>
+            {% empty %}
+              <tr><td colspan="4">No calibration trust data yet.</td></tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+    <div class="dc-section">
+      <div class="dc-card">
+        <div class="label">Confidence Calibration</div>
+        <table class="dc-table">
+          <thead>
+            <tr><th>Band</th><th>Status</th><th class="dc-num">Sample</th><th class="dc-num">Hit</th><th class="dc-num">ROI</th></tr>
+          </thead>
+          <tbody>
+            {% for row in confidence_band_rows %}
+              <tr>
+                <td>{{ row.band }}</td>
+                <td><span class="dc-badge dc-{{ row.state }}">{{ row.state }}</span></td>
+                <td class="dc-num">{{ row.count }}</td>
+                <td class="dc-num">{{ row.hit_rate }}%</td>
+                <td class="dc-num">{{ row.roi_flat }}%</td>
+              </tr>
+            {% empty %}
+              <tr><td colspan="5">No confidence calibration data yet.</td></tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <div class="dc-section">
+    <h2>Recommendation Blocks</h2>
+    <table class="dc-table">
+      <thead>
+        <tr><th>Reason</th><th class="dc-num">Top Markets</th><th class="dc-num">Eligible</th><th class="dc-num">Published</th></tr>
+      </thead>
+      <tbody>
+        {% for row in rejection_rows %}
+          <tr>
+            <td>{{ row.reason }}</td>
+            <td class="dc-num">{{ row.total }}</td>
+            <td class="dc-num">{{ row.eligible }}</td>
+            <td class="dc-num">{{ row.published }}</td>
+          </tr>
+        {% empty %}
+          <tr><td colspan="4">No recommendation block reasons for this run.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+
+  <div class="dc-section">
     <h2>Top Market Performance</h2>
     <table class="dc-table">
       <thead>
@@ -155,6 +255,8 @@
           <th>Top Market</th>
           <th class="dc-num">Confidence</th>
           <th class="dc-num">Odds / EV</th>
+          <th>Trust</th>
+          <th>Recommendation</th>
           <th>Status</th>
           <th>Published</th>
         </tr>
@@ -175,6 +277,16 @@
             </td>
             <td class="dc-num">{{ row.top_market.confidence }}%</td>
             <td class="dc-num">{{ row.top_market.odds }} / {{ row.top_market.ev|default:"-" }}</td>
+            <td>
+              <span class="dc-badge dc-{{ row.league_trust }}">{{ row.league_trust }}</span><br>
+              <span class="dc-badge dc-{{ row.calibration_trust }}">{{ row.calibration_trust }}</span>
+            </td>
+            <td>
+              <span class="dc-badge dc-{{ row.recommendation.recommendation_status }}">{{ row.recommendation.recommendation_status }}</span>
+              {% if row.recommendation.recommendation_reasons %}
+                <br><span class="dc-muted">{{ row.recommendation.recommendation_reasons|join:", " }}</span>
+              {% endif %}
+            </td>
             <td><span class="dc-badge dc-{{ row.top_market.status }}">{{ row.top_market.status }}</span></td>
             <td>
               {% if row.top_market.published %}
@@ -185,7 +297,7 @@
             </td>
           </tr>
         {% empty %}
-          <tr><td colspan="9">No games with top-market predictions for this run.</td></tr>
+          <tr><td colspan="11">No games with top-market predictions for this run.</td></tr>
         {% endfor %}
       </tbody>
     </table>

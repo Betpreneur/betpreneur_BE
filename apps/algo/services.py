@@ -12,6 +12,11 @@ from django.db.models import Count, Q
 from django.utils import timezone
 
 from .models import AlgoFixture, AlgoRun, MarketPrediction, Pick, StrategyReview
+from .recommendation_policy import (
+    assess_calibration_trust,
+    assess_league_market_trust,
+    assess_recommendation,
+)
 
 
 @contextmanager
@@ -366,28 +371,61 @@ class AlgoRunnerService:
 
     def _market_daily_limit(self, market, max_daily):
         if market == "DC: 12":
-            return max(0, self._runner_env_int("ALGO_MAX_DAILY_DC12_PICKS", 1))
-        default_limit = 2 if max_daily <= 10 else 3
-        return max(1, self._runner_env_int("ALGO_MAX_DAILY_SAME_MARKET_PICKS", default_limit))
+            return max(0, self._runner_env_int("ALGO_MAX_DAILY_DC12_PICKS", 0))
+        return max(0, self._runner_env_int("ALGO_MAX_DAILY_SAME_MARKET_PICKS", 0))
 
     def _prediction_rank(self, prediction):
         ev = float(prediction.ev or 0)
         odds = float(prediction.odds or 0)
         confidence = float(prediction.confidence or 0)
-        market_penalty = -4.0 if prediction.market == "DC: 12" else 0.0
         return (
-            confidence + (ev * 18.0) + market_penalty,
+            confidence + (ev * 18.0),
             confidence,
             ev,
             -odds,
         )
 
+    def _league_trust_for_prediction(self, prediction, performance=None):
+        performance = performance or self._performance_profile()
+        market_stats = (performance.get("markets") or {}).get(prediction.market) or {}
+        league_market_key = f"{prediction.league}::{prediction.market}"
+        league_market_stats = (performance.get("league_markets") or {}).get(league_market_key) or {}
+        return assess_league_market_trust(league_market_stats, market_stats)
+
+    def _confidence_band(self, confidence):
+        confidence = int(confidence or 0)
+        if confidence >= 80:
+            return "80+"
+        if confidence >= 75:
+            return "75-79"
+        if confidence >= 70:
+            return "70-74"
+        if confidence >= 65:
+            return "65-69"
+        return "Below 65"
+
+    def _calibration_trust_for_prediction(self, prediction, performance=None):
+        performance = performance or self._performance_profile()
+        band = self._confidence_band(prediction.confidence)
+        band_stats = (performance.get("confidence_bands") or {}).get(band) or {}
+        return assess_calibration_trust(band_stats)
+
+    def _recommendation_candidate(self, prediction, performance=None):
+        insights = dict(prediction.insights or {})
+        insights["league_trust"] = self._league_trust_for_prediction(prediction, performance)
+        insights["calibration_trust"] = self._calibration_trust_for_prediction(prediction, performance)
+        return {
+            "confidence": prediction.confidence,
+            "ev": prediction.ev,
+            "odds_source": prediction.odds_source,
+            "risk_flags": prediction.risk_flags or [],
+            "eligible": prediction.eligible,
+            "insights": insights,
+        }
+
     def _select_prediction_ids(self, algo_run):
         max_daily = max(1, self._runner_env_int("ALGO_MAX_DAILY_PICKS", 15))
-        min_daily = min(
-            max_daily,
-            max(0, self._runner_env_int("ALGO_MIN_DAILY_PICKS", min(6, max_daily))),
-        )
+        performance = (algo_run.result or {}).get("performance_profile") or self._performance_profile()
 
         predictions = list(
             MarketPrediction.objects.filter(run=algo_run, eligible=True)
@@ -408,10 +446,10 @@ class AlgoRunnerService:
         def add_prediction(prediction):
             if prediction.match_id in used_matches:
                 return False
+            if not assess_recommendation(self._recommendation_candidate(prediction, performance))["recommended"]:
+                return False
             tier = self._prediction_tier(prediction)
             if not tier:
-                return False
-            if prediction.market == "DC: 12" and tier == Pick.Tier.WILD_CARD:
                 return False
             buckets[tier].append(prediction.id)
             used_matches.add(prediction.match_id)
@@ -424,25 +462,48 @@ class AlgoRunnerService:
         for prediction in predictions:
             if selected_count() >= max_daily:
                 break
-            if market_counts[prediction.market] >= self._market_daily_limit(prediction.market, max_daily):
+            market_limit = self._market_daily_limit(prediction.market, max_daily)
+            if market_limit and market_counts[prediction.market] >= market_limit:
                 continue
             add_prediction(prediction)
 
-        if selected_count() < min_daily:
-            for prediction in predictions:
-                if selected_count() >= min_daily:
-                    break
-                if prediction.market == "DC: 12":
-                    continue
-                add_prediction(prediction)
-
         return buckets
+
+    def _refresh_recommendation_rejections(self, algo_run):
+        updates = []
+        performance = (algo_run.result or {}).get("performance_profile") or self._performance_profile()
+        for prediction in MarketPrediction.objects.filter(run=algo_run, published=False):
+            candidate = self._recommendation_candidate(prediction, performance)
+            assessment = assess_recommendation(candidate)
+            rejection_reason = (
+                ", ".join(assessment["recommendation_reasons"][:4])
+                if not assessment["recommended"]
+                else "not_top_pick"
+            )
+            insights = dict(prediction.insights or {})
+            changed = False
+            if insights.get("league_trust") != candidate["insights"].get("league_trust"):
+                insights["league_trust"] = candidate["insights"].get("league_trust")
+                prediction.insights = insights
+                changed = True
+            if insights.get("calibration_trust") != candidate["insights"].get("calibration_trust"):
+                insights["calibration_trust"] = candidate["insights"].get("calibration_trust")
+                prediction.insights = insights
+                changed = True
+            if prediction.rejection_reason != rejection_reason:
+                prediction.rejection_reason = rejection_reason
+                changed = True
+            if changed:
+                updates.append(prediction)
+        if updates:
+            MarketPrediction.objects.bulk_update(updates, ["rejection_reason", "insights"], batch_size=500)
 
     def _publish_selected_predictions(self, algo_run, bankroll, use_llm=False):
         MarketPrediction.objects.filter(run=algo_run, published=True).update(
             published=False,
             selected_pick=None,
         )
+        self._refresh_recommendation_rejections(algo_run)
         selected_ids = self._select_prediction_ids(algo_run)
         flat_ids = [pk for ids in selected_ids.values() for pk in ids]
         if not flat_ids:
@@ -481,9 +542,14 @@ class AlgoRunnerService:
                 continue
             prediction.published = True
             prediction.selected_pick = pick
+            prediction.rejection_reason = ""
             updates.append(prediction)
         if updates:
-            MarketPrediction.objects.bulk_update(updates, ["published", "selected_pick"], batch_size=500)
+            MarketPrediction.objects.bulk_update(
+                updates,
+                ["published", "selected_pick", "rejection_reason"],
+                batch_size=500,
+            )
         return picks
 
     def explain_picks_for_run(self, algo_run):
@@ -719,8 +785,9 @@ class AlgoRunnerService:
             "failed_fixtures": failed_count,
             "picks_count": len(picks),
             "no_bet": len(picks) == 0,
-            "publish_policy": "celery_fanout_pipeline",
+            "publish_policy": "strict_accuracy_gate",
             "strategy_profile": result.get("strategy_profile", {}),
+            "performance_profile": result.get("performance_profile", {}),
             "market_count": aggregate.get("market_count") or 0,
             "markets_70_plus": aggregate.get("markets_70_plus") or 0,
             "markets_65_plus": aggregate.get("markets_65_plus") or 0,
@@ -849,6 +916,7 @@ class AlgoRunnerService:
                 "no_bet": len(picks) == 0,
                 "publish_policy": "staged_db_pipeline",
                 "strategy_profile": strategy_profile,
+                "performance_profile": performance_profile,
                 "market_count": market_count,
                 "markets_70_plus": markets_70_plus,
                 "markets_65_plus": markets_65_plus,
@@ -994,6 +1062,7 @@ class AlgoRunnerService:
         performance = performance or self._performance_profile()
         market_actions = {}
         league_market_actions = {}
+        confidence_band_actions = {}
         league_warnings = set()
 
         for market, stats in (performance.get("markets") or {}).items():
@@ -1015,6 +1084,11 @@ class AlgoRunnerService:
             if count >= 2:
                 league_warnings.add(league)
 
+        for band, stats in (performance.get("confidence_bands") or {}).items():
+            action = self._strategy_action_for_stats(stats)
+            if action:
+                confidence_band_actions[band] = {"action": action, **stats}
+
         markets_suppressed = sorted(
             market for market, item in market_actions.items() if item.get("action") == "suppress"
         )
@@ -1033,12 +1107,15 @@ class AlgoRunnerService:
             reasons.append(f"Promoting recovered markets: {', '.join(markets_promoted[:6])}.")
         if league_warnings:
             reasons.append(f"League warnings active: {', '.join(sorted(league_warnings)[:6])}.")
+        if confidence_band_actions:
+            reasons.append(f"Confidence calibration watch: {', '.join(sorted(confidence_band_actions)[:6])}.")
         reason = " ".join(reasons) or "No major market restrictions; using adaptive market memory."
 
         profile = {
             "date": target_date.isoformat(),
             "markets": market_actions,
             "league_markets": league_market_actions,
+            "confidence_bands": confidence_band_actions,
             "league_warnings": sorted(league_warnings),
             "daily_policy": "adaptive_market_memory",
             "reason": reason,
@@ -1158,10 +1235,19 @@ class AlgoRunnerService:
 
         market_stats = defaultdict(self._empty_market_stats)
         league_market_stats = defaultdict(self._empty_market_stats)
+        confidence_band_stats = defaultdict(self._empty_market_stats)
 
         for record in latest.values():
-            keys = [record.market, f"{record.league}::{record.market}"]
-            stat_groups = [market_stats[keys[0]], league_market_stats[keys[1]]]
+            keys = [
+                record.market,
+                f"{record.league}::{record.market}",
+                self._confidence_band(record.confidence),
+            ]
+            stat_groups = [
+                market_stats[keys[0]],
+                league_market_stats[keys[1]],
+                confidence_band_stats[keys[2]],
+            ]
             for stats in stat_groups:
                 stats["count"] += 1
                 if record.status == Pick.Status.WIN:
@@ -1187,6 +1273,7 @@ class AlgoRunnerService:
         return {
             "markets": self._finalize_market_stats(market_stats),
             "league_markets": self._finalize_market_stats(league_market_stats),
+            "confidence_bands": self._finalize_market_stats(confidence_band_stats),
         }
 
     def _performance_profile_from_picks(self, picks):
@@ -1203,10 +1290,19 @@ class AlgoRunnerService:
 
         market_stats = defaultdict(self._empty_market_stats)
         league_market_stats = defaultdict(self._empty_market_stats)
+        confidence_band_stats = defaultdict(self._empty_market_stats)
 
         for pick in latest.values():
-            keys = [pick.market, f"{pick.league}::{pick.market}"]
-            stat_groups = [market_stats[keys[0]], league_market_stats[keys[1]]]
+            keys = [
+                pick.market,
+                f"{pick.league}::{pick.market}",
+                self._confidence_band(pick.confidence),
+            ]
+            stat_groups = [
+                market_stats[keys[0]],
+                league_market_stats[keys[1]],
+                confidence_band_stats[keys[2]],
+            ]
             for stats in stat_groups:
                 stats["count"] += 1
                 if pick.status == Pick.Status.WIN:
@@ -1223,6 +1319,7 @@ class AlgoRunnerService:
         return {
             "markets": self._finalize_market_stats(market_stats),
             "league_markets": self._finalize_market_stats(league_market_stats),
+            "confidence_bands": self._finalize_market_stats(confidence_band_stats),
         }
 
     def _api_football_headers(self):

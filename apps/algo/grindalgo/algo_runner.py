@@ -1249,8 +1249,8 @@ def algo_high_draw_risk_confidence():
         _env_int("ALGO_DC12_MAX_DRAW_CONFIDENCE", 30),
     )
 
-def algo_min_daily_picks():
-    return _env_int("ALGO_MIN_DAILY_PICKS", 6)
+def publish_wild_cards():
+    return _env_bool("ALGO_PUBLISH_WILD_CARDS", False)
 
 def algo_floor_confidence():
     return _env_int("ALGO_FLOOR_CONFIDENCE", 58)
@@ -1314,6 +1314,7 @@ def load_performance_profile():
     return {
         "markets": data.get("markets", {}) or {},
         "league_markets": data.get("league_markets", {}) or {},
+        "confidence_bands": data.get("confidence_bands", {}) or {},
     }
 
 def load_strategy_profile():
@@ -1340,6 +1341,113 @@ def market_profile(profile, market, league=None):
         or profile.get("markets", {}).get(market)
         or {}
     )
+
+def league_market_profile(profile, market, league=None):
+    league_key = f"{league}::{market}" if league else ""
+    return profile.get("league_markets", {}).get(league_key) or {}
+
+def overall_market_profile(profile, market):
+    return profile.get("markets", {}).get(market) or {}
+
+def _trust_int(value, default=0):
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+def _trust_float(value, default=0.0):
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+def build_league_market_trust(league_stats=None, market_stats=None):
+    league_stats = league_stats or {}
+    market_stats = market_stats or {}
+    min_sample = _env_int("ALGO_LEAGUE_MARKET_MIN_SAMPLE", 8)
+    league_count = _trust_int(league_stats.get("count"))
+    market_count = _trust_int(market_stats.get("count"))
+    league_hit_rate = _trust_float(league_stats.get("hit_rate"))
+    market_hit_rate = _trust_float(market_stats.get("hit_rate"))
+    league_roi = _trust_float(league_stats.get("roi_flat"))
+    market_roi = _trust_float(market_stats.get("roi_flat"))
+    league_state = str(league_stats.get("state") or "")
+    market_state = str(market_stats.get("state") or "")
+
+    reasons = []
+    if league_count < min_sample:
+        status = "probation"
+        reasons.append("limited_league_market_sample")
+    elif league_state == "suppressed" or league_hit_rate < 45 or league_roi < -8:
+        status = "restricted"
+        reasons.append("weak_league_market_record")
+    elif league_state == "cooling" or league_hit_rate < 52 or league_roi < 0:
+        status = "probation"
+        reasons.append("league_market_under_watch")
+    else:
+        status = "trusted"
+
+    if market_count >= min_sample:
+        if market_state == "suppressed" or market_hit_rate < 45 or market_roi < -8:
+            status = "restricted"
+            reasons.append("weak_overall_market_record")
+        elif status == "trusted" and (market_state == "cooling" or market_hit_rate < 52 or market_roi < 0):
+            status = "probation"
+            reasons.append("overall_market_under_watch")
+
+    return {
+        "status": status,
+        "reasons": list(dict.fromkeys(reasons)),
+        "league_sample": league_count,
+        "market_sample": market_count,
+        "league_hit_rate": league_hit_rate,
+        "market_hit_rate": market_hit_rate,
+        "league_roi": league_roi,
+        "market_roi": market_roi,
+    }
+
+def confidence_band(confidence):
+    confidence = _trust_int(confidence)
+    if confidence >= 80:
+        return "80+"
+    if confidence >= 75:
+        return "75-79"
+    if confidence >= 70:
+        return "70-74"
+    if confidence >= 65:
+        return "65-69"
+    return "Below 65"
+
+def build_calibration_trust(band_stats=None):
+    band_stats = band_stats or {}
+    min_sample = _env_int("ALGO_CONFIDENCE_BAND_MIN_SAMPLE", 20)
+    count = _trust_int(band_stats.get("count"))
+    hit_rate = _trust_float(band_stats.get("hit_rate"))
+    roi_flat = _trust_float(band_stats.get("roi_flat"))
+    state = str(band_stats.get("state") or "")
+    avg_confidence = _trust_float(band_stats.get("avg_confidence"))
+
+    reasons = []
+    if count < min_sample:
+        status = "probation"
+        reasons.append("limited_confidence_band_sample")
+    elif state == "suppressed" or hit_rate < 48 or roi_flat < -10:
+        status = "restricted"
+        reasons.append("weak_confidence_band_record")
+    elif state == "cooling" or hit_rate < 55 or roi_flat < -2:
+        status = "probation"
+        reasons.append("confidence_band_under_watch")
+    else:
+        status = "trusted"
+
+    return {
+        "status": status,
+        "reasons": list(dict.fromkeys(reasons)),
+        "sample": count,
+        "hit_rate": hit_rate,
+        "roi": roi_flat,
+        "avg_confidence": avg_confidence,
+    }
 
 def strategy_market_profile(strategy, market, league=None):
     league_key = f"{league}::{market}" if league else ""
@@ -1786,11 +1894,13 @@ def build_fixture_insights(fx):
         "risk_warnings": _compact_items(risk_warnings, 8),
     }
 
-def build_market_insights(market, confidence, odds, ev, risk_flags=None, fixture_context=None, home_form=None, away_form=None, corner_profile=None, profile_data=None, eligible=False):
+def build_market_insights(market, confidence, odds, ev, risk_flags=None, fixture_context=None, home_form=None, away_form=None, corner_profile=None, profile_data=None, eligible=False, league_trust=None, calibration_trust=None):
     risk_flags = list(risk_flags or [])
     fixture_context = fixture_context or {}
     goal_model = fixture_context.get("goal_model") or {}
     profile_data = profile_data or {}
+    league_trust = league_trust or {}
+    calibration_trust = calibration_trust or {}
     key_signals = []
     confidence_drivers = []
     avoid_reasons = []
@@ -1808,6 +1918,16 @@ def build_market_insights(market, confidence, odds, ev, risk_flags=None, fixture
         _append_unique(confidence_drivers if profile_data.get("state") == "recovered" else avoid_reasons, f"Market state: {profile_data.get('state')}.")
     if profile_data.get("hit_rate"):
         _append_unique(confidence_drivers, f"Historical hit rate {profile_data.get('hit_rate')}%.")
+    if league_trust.get("status"):
+        _append_unique(
+            confidence_drivers if league_trust.get("status") == "trusted" else avoid_reasons,
+            f"League-market trust: {league_trust.get('status')}.",
+        )
+    if calibration_trust.get("status"):
+        _append_unique(
+            confidence_drivers if calibration_trust.get("status") == "trusted" else avoid_reasons,
+            f"Confidence calibration: {calibration_trust.get('status')}.",
+        )
 
     if "goal_line_boundary" in risk_flags:
         _append_unique(avoid_reasons, "Goal projection is too close to the selected line.")
@@ -1836,6 +1956,8 @@ def build_market_insights(market, confidence, odds, ev, risk_flags=None, fixture
         "confidence_drivers": _compact_items(confidence_drivers),
         "risk_warnings": _compact_items(risk_flags, 10),
         "avoid_reason": "; ".join(_compact_items(avoid_reasons, 5)),
+        "league_trust": league_trust,
+        "calibration_trust": calibration_trust,
     }
 
 def _market_evidence(pick):
@@ -2167,6 +2289,9 @@ def select_picks(all_confs, scored_fxs, odds_list):
             odds_meta = ((real_odds.get("_meta") or {}).get(key) if key else None) or (real_odds.get("_meta") or {}).get(market) or {}
             odds_is_real = bool(real_odd)
             profile_data = market_profile(profile, market, fx.get("league"))
+            league_profile_data = league_market_profile(profile, market, fx.get("league"))
+            market_profile_data = overall_market_profile(profile, market)
+            confidence_band_data = (profile.get("confidence_bands") or {}).get(confidence_band(conf)) or {}
             strategy_data = strategy_market_profile(strategy, market, fx.get("league"))
             calibrated_conf = apply_strategy_confidence(calibrate_confidence(conf, profile_data), strategy_data)
             odds = real_odd or est_odds(calibrated_conf)
@@ -2215,6 +2340,8 @@ def select_picks(all_confs, scored_fxs, odds_list):
                 fx.get("corner_profile", {}),
                 profile_data,
                 eligible=passes_publish_gate(candidate),
+                league_trust=build_league_market_trust(league_profile_data, market_profile_data),
+                calibration_trust=build_calibration_trust(confidence_band_data),
             )
             if passes_publish_gate(candidate):
                 pool.append(candidate)
@@ -2243,15 +2370,16 @@ def select_picks(all_confs, scored_fxs, odds_list):
             seen_v.add(p["fixture"]); value_gems.append(p)
         if len(value_gems)>=MAX_VALUE_GEMS: break
 
-    # ── WILD CARDS: volume bucket. Internally split into lean vs high-upside profiles ──
+    # Wild cards remain internally scored, but are opt-in for publication.
     used_all = used_b | seen_v
     wild_pool = []
-    for p in pool:
-        if p["fixture"] in used_all:
-            continue
-        profile_name = _wild_profile(p)
-        if profile_name:
-            wild_pool.append(_tag_profile(p, profile_name))
+    if publish_wild_cards():
+        for p in pool:
+            if p["fixture"] in used_all:
+                continue
+            profile_name = _wild_profile(p)
+            if profile_name:
+                wild_pool.append(_tag_profile(p, profile_name))
     wild_cands = sorted(
         wild_pool,
         key=lambda x:(x.get("selection_profile") == "lean", x["conf"], x["ev"] or 0, -x["odds"]),
@@ -2262,30 +2390,6 @@ def select_picks(all_confs, scored_fxs, odds_list):
         if p["fixture"] not in seen_w:
             seen_w.add(p["fixture"]); wild_cards.append(p)
         if len(wild_cards)>=MAX_WILD_CARDS: break
-
-    selected_fixtures = used_b | seen_v | seen_w
-    min_daily = max(0, min(algo_min_daily_picks(), algo_max_daily_picks()))
-    if len(bankers) + len(value_gems) + len(wild_cards) < min_daily:
-        fallback_cands = sorted(
-            [
-                _tag_profile(p, "best_available")
-                for p in pool
-                if p["fixture"] not in selected_fixtures and _best_available_quality(p)
-            ],
-            key=lambda x: (
-                x["conf"],
-                x["ev"] if x.get("ev") is not None else -999,
-                -x["odds"],
-            ),
-            reverse=True,
-        )
-        for p in fallback_cands:
-            if p["fixture"] in selected_fixtures:
-                continue
-            wild_cards.append(p)
-            selected_fixtures.add(p["fixture"])
-            if len(bankers) + len(value_gems) + len(wild_cards) >= min_daily:
-                break
 
     max_daily = max(1, algo_max_daily_picks())
     selected = bankers + value_gems + wild_cards
@@ -2389,6 +2493,9 @@ def serialize_fixture_markets(confs, real_odds=None, league=None, corner_profile
         real_odd = (real_odds.get(key) if key else None) or real_odds.get(market)
         odds_meta = ((real_odds.get("_meta") or {}).get(key) if key else None) or (real_odds.get("_meta") or {}).get(market) or {}
         profile_data = market_profile(profile, market, league)
+        league_profile_data = league_market_profile(profile, market, league)
+        market_profile_data = overall_market_profile(profile, market)
+        confidence_band_data = (profile.get("confidence_bands") or {}).get(confidence_band(confidence)) or {}
         strategy_data = strategy_market_profile(strategy, market, league)
         calibrated_confidence = apply_strategy_confidence(calibrate_confidence(confidence, profile_data), strategy_data)
         odds = real_odd or est_odds(calibrated_confidence)
@@ -2438,6 +2545,8 @@ def serialize_fixture_markets(confs, real_odds=None, league=None, corner_profile
                 corner_profile or {},
                 profile_data,
                 eligible=eligible,
+                league_trust=build_league_market_trust(league_profile_data, market_profile_data),
+                calibration_trust=build_calibration_trust(confidence_band_data),
             ),
         })
     return markets
@@ -3259,7 +3368,7 @@ def run_daily_algo():
               "fd_fixtures":0,"aps_fixtures":len(fixtures),
               "total_scored":len(all_confs),"picks_count":picks_count,
               "no_bet": picks_count == 0,
-              "publish_policy":"best_available_with_risk_controls",
+              "publish_policy":"strict_accuracy_gate",
               "strategy_profile": load_strategy_profile(),
               "market_count":sum(len(confs) for confs in all_confs),
               "markets_70_plus":sum(1 for confs in all_confs for value in confs.values() if value >= 70),

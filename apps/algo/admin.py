@@ -8,6 +8,7 @@ from django.utils import timezone
 
 from .models import AlgoFixture, AlgoRun, GameBack, MarketPrediction, Pick, PickBack, StrategyReview
 from .performance import performance_dashboard
+from .recommendation_policy import assess_recommendation
 from .tasks import generate_daily_picks, recover_daily_run, run_monthly_auditor, settle_daily_results
 
 
@@ -288,6 +289,88 @@ class AlgoRunAdmin(admin.ModelAdmin):
             })
         return sorted(rows, key=lambda row: (row["settled"], row["accuracy"]), reverse=True)
 
+    def _trust_status(self, prediction, key):
+        return ((prediction.insights or {}).get(key) or {}).get("status") or "unknown"
+
+    def _recommendation_assessment(self, prediction):
+        return assess_recommendation({
+            "confidence": prediction.confidence,
+            "ev": prediction.ev,
+            "odds_source": prediction.odds_source,
+            "risk_flags": prediction.risk_flags or [],
+            "eligible": prediction.eligible,
+            "insights": prediction.insights or {},
+        })
+
+    def _trust_rows(self, predictions, key):
+        grouped = {}
+        for prediction in predictions:
+            status = self._trust_status(prediction, key)
+            row = grouped.setdefault(status, {
+                "status": status,
+                "total": 0,
+                "published": 0,
+                "eligible": 0,
+                "wins": 0,
+                "losses": 0,
+                "pending": 0,
+            })
+            row["total"] += 1
+            row["published"] += 1 if prediction.published else 0
+            row["eligible"] += 1 if prediction.eligible else 0
+            if prediction.status == MarketPrediction.Status.WIN:
+                row["wins"] += 1
+            elif prediction.status == MarketPrediction.Status.LOSS:
+                row["losses"] += 1
+            elif prediction.status == MarketPrediction.Status.PENDING:
+                row["pending"] += 1
+
+        rows = []
+        order = {"trusted": 0, "probation": 1, "restricted": 2, "unknown": 3}
+        for row in grouped.values():
+            row["settled"] = row["wins"] + row["losses"]
+            row["accuracy"] = self._rate(row["wins"], row["losses"])
+            rows.append(row)
+        return sorted(rows, key=lambda row: (order.get(row["status"], 99), -row["total"]))
+
+    def _rejection_rows(self, predictions):
+        grouped = {}
+        for prediction in predictions:
+            assessment = self._recommendation_assessment(prediction)
+            reasons = assessment.get("recommendation_reasons") or []
+            reason = prediction.rejection_reason or (reasons[0] if reasons else "recommended_or_published")
+            row = grouped.setdefault(reason, {
+                "reason": reason,
+                "total": 0,
+                "published": 0,
+                "eligible": 0,
+            })
+            row["total"] += 1
+            row["published"] += 1 if prediction.published else 0
+            row["eligible"] += 1 if prediction.eligible else 0
+        return sorted(grouped.values(), key=lambda row: row["total"], reverse=True)
+
+    def _confidence_band_rows(self, algo_run):
+        bands = ((algo_run.result or {}).get("performance_profile") or {}).get("confidence_bands") or {}
+        if not bands:
+            review = StrategyReview.objects.filter(target_date=algo_run.target_date).first()
+            bands = ((review.profile if review else {}) or {}).get("confidence_bands") or {}
+        order = {"80+": 0, "75-79": 1, "70-74": 2, "65-69": 3, "Below 65": 4}
+        rows = []
+        for band, stats in bands.items():
+            rows.append({
+                "band": band,
+                "count": stats.get("count", 0),
+                "wins": stats.get("wins", 0),
+                "losses": stats.get("losses", 0),
+                "hit_rate": stats.get("hit_rate", 0),
+                "roi_flat": stats.get("roi_flat", 0),
+                "state": stats.get("state", "unknown"),
+                "recent_10_hit_rate": stats.get("recent_10_hit_rate", 0),
+                "loss_streak": stats.get("loss_streak", 0),
+            })
+        return sorted(rows, key=lambda row: order.get(row["band"], 99))
+
     def _prediction_top_rank(self, prediction):
         from .views import _market_display_score
 
@@ -306,6 +389,24 @@ class AlgoRunAdmin(admin.ModelAdmin):
             *_market_display_score(payload),
         )
 
+    def _prediction_top_rank_row(self, row):
+        from .views import _market_display_score
+
+        payload = {
+            "market": row.get("market"),
+            "confidence": row.get("confidence"),
+            "odds": float(row.get("odds") or 0),
+            "ev": float(row.get("ev")) if row.get("ev") is not None else None,
+            "eligible": row.get("eligible"),
+            "risk_flags": [],
+            "insights": {},
+        }
+        return (
+            1 if row.get("published") else 0,
+            1 if row.get("eligible") else 0,
+            *_market_display_score(payload),
+        )
+
     def _top_predictions(self, predictions):
         top_by_game = {}
         for prediction in predictions:
@@ -314,6 +415,15 @@ class AlgoRunAdmin(admin.ModelAdmin):
             if current is None or self._prediction_top_rank(prediction) > self._prediction_top_rank(current):
                 top_by_game[key] = prediction
         return list(top_by_game.values())
+
+    def _top_prediction_ids_from_rows(self, rows):
+        top_by_game = {}
+        for row in rows:
+            key = str(row.get("match_id") or "").strip() or row.get("fixture")
+            current = top_by_game.get(key)
+            if current is None or self._prediction_top_rank_row(row) > self._prediction_top_rank_row(current):
+                top_by_game[key] = row
+        return [row["id"] for row in top_by_game.values()]
 
     def _fixture_rows(self, algo_run, top_predictions):
         fixtures = {
@@ -332,6 +442,9 @@ class AlgoRunAdmin(admin.ModelAdmin):
                 "kickoff": fixture.kickoff if fixture else prediction.kickoff,
                 "score": prediction.score or "",
                 "top_market": prediction,
+                "league_trust": self._trust_status(prediction, "league_trust"),
+                "calibration_trust": self._trust_status(prediction, "calibration_trust"),
+                "recommendation": self._recommendation_assessment(prediction),
             })
         return sorted(rows, key=lambda row: (row["country"], row["league"], row["kickoff"], row["fixture"]))
 
@@ -342,15 +455,57 @@ class AlgoRunAdmin(admin.ModelAdmin):
 
             raise Http404("Algo run not found")
 
-        predictions = MarketPrediction.objects.filter(run=algo_run).select_related("selected_pick")
+        predictions = MarketPrediction.objects.filter(run=algo_run)
         all_prediction_count = predictions.count()
-        top_prediction_list = self._top_predictions(list(predictions))
-        top_prediction_ids = [prediction.id for prediction in top_prediction_list]
-        top_predictions = MarketPrediction.objects.filter(id__in=top_prediction_ids).select_related("selected_pick")
+        ranking_rows = predictions.values(
+            "id",
+            "match_id",
+            "fixture",
+            "market",
+            "confidence",
+            "odds",
+            "ev",
+            "eligible",
+            "published",
+        )
+        top_prediction_ids = self._top_prediction_ids_from_rows(ranking_rows)
+        top_predictions = (
+            MarketPrediction.objects.filter(id__in=top_prediction_ids)
+            .select_related("selected_pick")
+            .only(
+                "id",
+                "run_id",
+                "selected_pick_id",
+                "match_date",
+                "fixture",
+                "league",
+                "kickoff",
+                "match_id",
+                "market",
+                "meaning",
+                "confidence",
+                "odds",
+                "ev",
+                "odds_source",
+                "eligible",
+                "published",
+                "rejection_reason",
+                "risk_flags",
+                "insights",
+                "status",
+                "score",
+                "pnl_simulated",
+            )
+        )
+        top_prediction_list = list(top_predictions)
         published_predictions = predictions.filter(published=True)
         picks = Pick.objects.filter(run=algo_run)
         market_rows = self._market_rows(top_predictions)
         fixture_rows = self._fixture_rows(algo_run, top_prediction_list)
+        league_trust_rows = self._trust_rows(top_prediction_list, "league_trust")
+        calibration_trust_rows = self._trust_rows(top_prediction_list, "calibration_trust")
+        rejection_rows = self._rejection_rows(top_prediction_list)
+        confidence_band_rows = self._confidence_band_rows(algo_run)
         settled_market_rows = [row for row in market_rows if row["wins"] + row["losses"] > 0]
         best_market = max(settled_market_rows, key=lambda row: (row["accuracy"], row["wins"] + row["losses"], row["wins"]), default=None)
         worst_market = min(settled_market_rows, key=lambda row: (row["accuracy"], -(row["wins"] + row["losses"])), default=None)
@@ -389,6 +544,10 @@ class AlgoRunAdmin(admin.ModelAdmin):
             "all_prediction_count": all_prediction_count,
             "market_rows": market_rows,
             "fixture_rows": fixture_rows,
+            "league_trust_rows": league_trust_rows,
+            "calibration_trust_rows": calibration_trust_rows,
+            "rejection_rows": rejection_rows,
+            "confidence_band_rows": confidence_band_rows,
             "best_market": best_market,
             "worst_market": worst_market,
             "high_value_upsets": high_value_upsets,
@@ -507,6 +666,9 @@ class MarketPredictionAdmin(admin.ModelAdmin):
         "eligible",
         "published",
         "market_state",
+        "league_trust_state",
+        "calibration_state",
+        "rejection_short",
         "status",
         "score",
         "pnl_simulated",
@@ -610,6 +772,20 @@ class MarketPredictionAdmin(admin.ModelAdmin):
         if "market_recovered" in flags:
             return "recovered"
         return "active"
+
+    @admin.display(description="League Trust")
+    def league_trust_state(self, obj):
+        return ((obj.insights or {}).get("league_trust") or {}).get("status", "unknown")
+
+    @admin.display(description="Calibration")
+    def calibration_state(self, obj):
+        return ((obj.insights or {}).get("calibration_trust") or {}).get("status", "unknown")
+
+    @admin.display(description="Blocked By")
+    def rejection_short(self, obj):
+        if obj.published:
+            return "published"
+        return (obj.rejection_reason or "")[:80]
 
     @admin.action(description="Queue settlement for selected prediction dates")
     def queue_settlement_for_prediction_dates(self, request, queryset):

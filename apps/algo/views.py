@@ -16,6 +16,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from .models import AlgoFixture, AlgoRun, GameBack, MarketPrediction, Pick
+from .recommendation_policy import assess_recommendation
 from .performance import (
     add_pick,
     confidence_band,
@@ -393,8 +394,11 @@ def _market_reasoning_for_game(market, item):
 
 def _market_verdict_for_game(market):
     risk_flags = set(market.get("risk_flags") or [])
-    if not market.get("eligible"):
-        return "Watchlist only; it did not clear the publish gate."
+    recommendation_status = market.get("recommendation_status")
+    if recommendation_status == "no_edge":
+        return "No bet; this market does not clear the accuracy-first recommendation gate."
+    if recommendation_status == "watchlist":
+        return "Watchlist only; useful for internal tracking, but not strong enough to recommend."
     if market.get("market") == "DC: 12":
         return "Playable only when the draw risk stays controlled; avoid overusing this market."
     if "thin_edge" in risk_flags or "goal_line_boundary" in risk_flags:
@@ -424,6 +428,7 @@ def _normalise_fixture_markets(item, picks_by_match):
             payload.setdefault("selected", False)
             payload.setdefault("selected_pick_id", None)
             payload.setdefault("selected_tier", "")
+        payload.update(assess_recommendation(payload))
         payload["reasoning"] = _market_reasoning_for_game(payload, item)
         payload["model_verdict"] = _market_verdict_for_game(payload)
         payload["display_score"] = round(_market_display_score(payload)[0], 3)
@@ -437,6 +442,7 @@ def _game_summary_from_fixture(item, picks_by_match, request=None, include_marke
     match_picks = sorted(picks_by_match.get(match_id, []), key=_top_pick_sort_key, reverse=True)
     pick_data = PickSerializer(match_picks, many=True, context={"request": request}).data
     top_market = markets[0] if markets else None
+    recommended_market = next((market for market in markets if market.get("recommended")), None)
     official_pick = pick_data[0] if pick_data else None
     backed_count = GameBack.objects.filter(match_id=match_id).count() if match_id else 0
     backed_by_me = False
@@ -482,6 +488,13 @@ def _game_summary_from_fixture(item, picks_by_match, request=None, include_marke
         "backed_count": backed_count,
         "backed_by_me": backed_by_me,
         "top_market": top_market,
+        "best_market": top_market,
+        "recommended_market": recommended_market,
+        "recommendation_status": (
+            recommended_market.get("recommendation_status")
+            if recommended_market
+            else (top_market or {}).get("recommendation_status", "no_edge")
+        ),
         "market_count": item.get("market_count", len(markets)),
         "eligible_market_count": sum(1 for market in markets if market.get("eligible")),
         "markets_70_plus": item.get("markets_70_plus", 0),
@@ -500,8 +513,10 @@ def _game_summary_from_fixture(item, picks_by_match, request=None, include_marke
             "key_signals": (item.get("insights") or {}).get("key_signals", []),
             "risk_warnings": (item.get("insights") or {}).get("risk_warnings", []),
             "top_market": top_market,
-            "reasoning": (top_market or {}).get("reasoning", ""),
-            "model_verdict": (top_market or {}).get("model_verdict", ""),
+            "best_market": top_market,
+            "recommended_market": recommended_market,
+            "reasoning": (recommended_market or top_market or {}).get("reasoning", ""),
+            "model_verdict": (recommended_market or top_market or {}).get("model_verdict", ""),
         }
     return payload
 
@@ -600,6 +615,7 @@ def _all_games_payload(target_date, request=None):
             "summary": {
                 "game_count": 0,
                 "published_game_count": 0,
+                "recommended_game_count": 0,
                 "market_count": 0,
                 "eligible_market_count": 0,
                 "top_pick_count": 0,
@@ -633,6 +649,7 @@ def _all_games_payload(target_date, request=None):
         "summary": {
             "game_count": len(games),
             "published_game_count": sum(1 for game in games if game.get("published")),
+            "recommended_game_count": sum(1 for game in games if game.get("recommended_market")),
             "market_count": (algo_run.result or {}).get("market_count", sum(game.get("market_count", 0) for game in games)),
             "eligible_market_count": sum(game.get("eligible_market_count", 0) for game in games),
             "top_pick_count": sum(len(items) for items in picks_by_match.values()),
