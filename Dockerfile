@@ -89,5 +89,9 @@ FROM application AS production
 # Expose port
 EXPOSE 8000
 
+
+HEALTHCHECK --interval=30s --timeout=10s --start-period=120s --retries=5 \
+    CMD curl --fail --silent http://127.0.0.1:8000/api/health/ >/dev/null || exit 1
+
 # Run migrations, collect static assets, and start server
 CMD ["sh", "-c", "echo '[startup] running migrations' && python manage.py migrate --noinput && echo '[startup] collecting static files' && python manage.py collectstatic --noinput && echo '[startup] starting gunicorn on 0.0.0.0:8000' && exec gunicorn config.wsgi:application --bind 0.0.0.0:8000 --workers ${WEB_CONCURRENCY:-2} --worker-class gthread --threads ${WEB_THREADS:-2} --timeout ${GUNICORN_TIMEOUT:-120} --graceful-timeout 30 --keep-alive 5 --access-logfile - --error-logfile -"]
