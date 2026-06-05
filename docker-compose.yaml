@@ -23,8 +23,12 @@ services:
       GUNICORN_TIMEOUT: ${GUNICORN_TIMEOUT:-120}
     volumes:
       - media:/home/appuser/media
-    networks:
-      - betpreneur_network
+    healthcheck:
+      test: ["CMD-SHELL", "curl --fail --silent http://127.0.0.1:8000/api/health/ >/dev/null || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 90s
 
   celery-worker:
     build:
@@ -40,8 +44,6 @@ services:
     command: celery -A config worker --loglevel=info --concurrency=1 --max-tasks-per-child=1 --prefetch-multiplier=1
     volumes:
       - media:/home/appuser/media
-    networks:
-      - betpreneur_network
 
   celery-beat:
     build:
@@ -55,12 +57,6 @@ services:
       DJANGO_SETTINGS_MODULE: config.settings
       TZ: Africa/Lagos
     command: celery -A config beat --loglevel=info --schedule=/tmp/celerybeat-schedule
-    networks:
-      - betpreneur_network
-
-networks:
-  betpreneur_network:
-    driver: bridge
 
 volumes:
   media:
