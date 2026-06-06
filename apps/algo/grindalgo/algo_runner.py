@@ -68,6 +68,37 @@ def _env_int(name, default):
     except (TypeError, ValueError):
         return default
 
+BLOCKED_PICK_COUNTRIES = {
+    "argentina", "bahrain", "bangladesh", "belize", "bhutan", "bolivia", "brazil",
+    "brunei", "cambodia", "canada", "chile", "china", "colombia", "costa rica",
+    "cuba", "dominican republic", "ecuador", "el salvador", "guatemala", "guyana",
+    "haiti", "honduras", "hong kong", "india", "indonesia", "iran", "iraq",
+    "israel", "japan", "jordan", "kazakhstan", "korea republic", "kuwait",
+    "kyrgyzstan", "laos", "lebanon", "malaysia", "maldives", "mexico",
+    "mongolia", "myanmar", "nepal", "nicaragua", "north korea", "oman",
+    "pakistan", "palestine", "panama", "paraguay", "peru", "philippines",
+    "puerto rico", "qatar", "saudi arabia", "singapore", "south korea",
+    "sri lanka", "suriname", "syria", "tajikistan", "thailand",
+    "trinidad and tobago", "turkmenistan", "united arab emirates", "united states",
+    "uruguay", "uzbekistan", "venezuela", "vietnam", "yemen",
+}
+
+BLOCKED_PICK_LEAGUES = {
+    "allsvenskan", "j1 league", "j2 league", "j3 league", "j-league",
+    "chinese super league", "china league", "mls", "major league soccer",
+    "usl", "liga mx",
+}
+
+def blocked_pick_context(country=None, league=None):
+    country_norm = normalize(country or "")
+    league_norm = normalize(league or "")
+    reasons = []
+    if country_norm and country_norm in BLOCKED_PICK_COUNTRIES:
+        reasons.append("blocked_country")
+    if league_norm and any(item and item in league_norm for item in BLOCKED_PICK_LEAGUES):
+        reasons.append("blocked_league")
+    return reasons
+
 def _rss_mb():
     try:
         # Linux reports ru_maxrss in kilobytes.
@@ -1585,6 +1616,11 @@ def candidate_risk_flags(raw_conf, conf, market, odds, odds_is_real, ev, profile
         flags.append(flag)
     if team_news and not team_news.get("available"):
         flags.append("team_news_unavailable")
+    for reason in blocked_pick_context(
+        fixture_context.get("country"),
+        fixture_context.get("league"),
+    ):
+        flags.append(reason)
 
     return flags
 
@@ -1644,6 +1680,8 @@ def market_threshold(market):
     return MARKET_THRESHOLDS.get(market, WILD_MIN)
 
 def passes_publish_gate(candidate):
+    if blocked_pick_context(candidate.get("country"), candidate.get("league")):
+        return False
     if candidate["market"] in EXCLUDED_MARKETS:
         return False
     if candidate["market"] == "DC: 12" and candidate["conf"] < VALUE_MIN:
@@ -2324,7 +2362,11 @@ def select_picks(all_confs, scored_fxs, odds_list):
             }
             candidate["risk_flags"] = candidate_risk_flags(
                 conf, calibrated_conf, market, odds, odds_is_real, ev, profile_data, odds_meta,
-                fx.get("fixture_context", {}),
+                {
+                    **(fx.get("fixture_context", {}) or {}),
+                    "country": fx.get("country", ""),
+                    "league": fx.get("league", ""),
+                },
                 fx.get("team_news", {}),
                 strategy_data,
             )
@@ -2503,7 +2545,11 @@ def serialize_fixture_markets(confs, real_odds=None, league=None, corner_profile
         ev = round((calibrated_confidence / 100) * odds - 1, 3) if odds_is_real else None
         risk_flags = candidate_risk_flags(
             confidence, calibrated_confidence, market, odds, odds_is_real, ev, profile_data, odds_meta,
-            fixture_context or {},
+            {
+                **(fixture_context or {}),
+                "league": league or (fixture_context or {}).get("league", ""),
+                "country": (fixture_context or {}).get("country", ""),
+            },
             team_news or {},
             strategy_data,
         )
@@ -2517,8 +2563,14 @@ def serialize_fixture_markets(confs, real_odds=None, league=None, corner_profile
             "strategy_profile": strategy_data,
             "corner_profile": corner_profile or {},
             "odds_meta": odds_meta,
-            "fixture_context": fixture_context or {},
+            "fixture_context": {
+                **(fixture_context or {}),
+                "league": league or (fixture_context or {}).get("league", ""),
+                "country": (fixture_context or {}).get("country", ""),
+            },
             "team_news": team_news or {},
+            "league": league or "",
+            "country": (fixture_context or {}).get("country", ""),
         }
         eligible = passes_publish_gate(gate_candidate)
         markets.append({
@@ -2555,6 +2607,11 @@ def serialize_fixture_summaries(scored_fxs, all_confs, odds_list=None):
     summaries = []
     odds_list = odds_list or [{} for _ in scored_fxs]
     for fx, confs, real_odds in zip(scored_fxs, all_confs, odds_list):
+        fixture_context = {
+            **(fx.get("fixture_context", {}) or {}),
+            "country": fx.get("country", ""),
+            "league": fx.get("league", ""),
+        }
         summaries.append({
             "fixture": fx.get("fixture", ""),
             "home_team": fx.get("hname", ""),
@@ -2571,7 +2628,7 @@ def serialize_fixture_summaries(scored_fxs, all_confs, odds_list=None):
             "match_id": str(fx.get("match_id") or ""),
             "home_recent_form": fx.get("home_recent_form", {}),
             "away_recent_form": fx.get("away_recent_form", {}),
-            "fixture_context": fx.get("fixture_context", {}),
+            "fixture_context": fixture_context,
             "team_news": fx.get("team_news", {}),
             "market_count": len(confs),
             "markets_70_plus": sum(1 for value in confs.values() if value >= 70),
@@ -2582,7 +2639,7 @@ def serialize_fixture_summaries(scored_fxs, all_confs, odds_list=None):
                 real_odds,
                 fx.get("league"),
                 fx.get("corner_profile", {}),
-                fx.get("fixture_context", {}),
+                fixture_context,
                 fx.get("team_news", {}),
                 fx.get("home_recent_form", {}),
                 fx.get("away_recent_form", {}),

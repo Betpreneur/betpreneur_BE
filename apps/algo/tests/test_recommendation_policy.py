@@ -81,6 +81,34 @@ class RecommendationPolicyTests(TestCase):
         self.assertEqual(selected[Pick.Tier.VALUE_GEM], [])
         self.assertEqual(selected[Pick.Tier.WILD_CARD], [])
 
+    def test_blocked_country_or_league_cannot_be_recommended(self):
+        blocked_country = {
+            "confidence": 85,
+            "ev": 0.09,
+            "odds_source": "api_football",
+            "country": "Japan",
+            "league": "J1 League",
+            "eligible": True,
+            "risk_flags": [],
+            "insights": {
+                "league_trust": {"status": "trusted"},
+                "calibration_trust": {"status": "trusted"},
+            },
+        }
+        blocked_league = {
+            **blocked_country,
+            "country": "Sweden",
+            "league": "Allsvenskan",
+        }
+
+        country_assessment = assess_recommendation(blocked_country)
+        league_assessment = assess_recommendation(blocked_league)
+
+        self.assertFalse(country_assessment["recommended"])
+        self.assertIn("blocked_country", country_assessment["recommendation_reasons"])
+        self.assertFalse(league_assessment["recommended"])
+        self.assertIn("blocked_league", league_assessment["recommendation_reasons"])
+
     def test_games_keep_best_market_but_show_no_recommendation(self):
         fixture = {
             "fixture": "Home vs Away",

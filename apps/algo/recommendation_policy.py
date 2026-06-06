@@ -3,6 +3,8 @@ from django.conf import settings
 
 HARD_STOP_FLAGS = {
     "best_price_far_above_consensus",
+    "blocked_country",
+    "blocked_league",
     "below_dc12_value_threshold",
     "below_market_threshold",
     "draw_boundary_risk",
@@ -20,6 +22,93 @@ HARD_STOP_FLAGS = {
     "team_news_heavy_absences",
     "thin_edge",
     "wide_odds_market",
+}
+
+BLOCKED_PICK_COUNTRIES = {
+    "argentina",
+    "bahrain",
+    "bangladesh",
+    "belize",
+    "bhutan",
+    "bolivia",
+    "brazil",
+    "brunei",
+    "cambodia",
+    "canada",
+    "chile",
+    "china",
+    "colombia",
+    "costa rica",
+    "cuba",
+    "dominican republic",
+    "ecuador",
+    "el salvador",
+    "guatemala",
+    "guyana",
+    "haiti",
+    "honduras",
+    "hong kong",
+    "india",
+    "indonesia",
+    "iran",
+    "iraq",
+    "israel",
+    "japan",
+    "jordan",
+    "kazakhstan",
+    "korea republic",
+    "kuwait",
+    "kyrgyzstan",
+    "laos",
+    "lebanon",
+    "malaysia",
+    "maldives",
+    "mexico",
+    "mongolia",
+    "myanmar",
+    "nepal",
+    "nicaragua",
+    "north korea",
+    "oman",
+    "pakistan",
+    "palestine",
+    "panama",
+    "paraguay",
+    "peru",
+    "philippines",
+    "puerto rico",
+    "qatar",
+    "saudi arabia",
+    "singapore",
+    "south korea",
+    "sri lanka",
+    "suriname",
+    "syria",
+    "tajikistan",
+    "thailand",
+    "trinidad and tobago",
+    "turkmenistan",
+    "united arab emirates",
+    "united states",
+    "uruguay",
+    "uzbekistan",
+    "venezuela",
+    "vietnam",
+    "yemen",
+}
+
+BLOCKED_PICK_LEAGUES = {
+    "allsvenskan",
+    "j1 league",
+    "j2 league",
+    "j3 league",
+    "j-league",
+    "chinese super league",
+    "china league",
+    "mls",
+    "major league soccer",
+    "usl",
+    "liga mx",
 }
 
 
@@ -46,6 +135,10 @@ def _int_setting(name, default):
         return int(_setting(name, default))
     except (TypeError, ValueError):
         return int(default)
+
+
+def _normalise_text(value):
+    return " ".join(str(value or "").strip().lower().split())
 
 
 def _value(candidate, name, default=None):
@@ -137,6 +230,8 @@ def assess_recommendation(candidate):
     ev = _value(candidate, "ev")
     ev = float(ev) if ev is not None else None
     odds_source = str(_value(candidate, "odds_source", "") or "").lower()
+    league = _normalise_text(_value(candidate, "league", ""))
+    country = _normalise_text(_value(candidate, "country", ""))
     risk_flags = {str(flag) for flag in (_value(candidate, "risk_flags", []) or [])}
     insights = _value(candidate, "insights", {}) or {}
     league_trust = insights.get("league_trust") or {}
@@ -153,6 +248,10 @@ def assess_recommendation(candidate):
     allow_wild_cards = _bool_setting("ALGO_PUBLISH_WILD_CARDS", False)
 
     reasons = []
+    if country and country in BLOCKED_PICK_COUNTRIES:
+        reasons.append("blocked_country")
+    if league and any(item in league for item in BLOCKED_PICK_LEAGUES):
+        reasons.append("blocked_league")
     if not eligible:
         reasons.append("below_publish_gate")
     reasons.extend(sorted(risk_flags & HARD_STOP_FLAGS))

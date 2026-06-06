@@ -145,6 +145,11 @@ class AlgoRunnerService:
         rows = []
         for fixture in fixture_summaries:
             match_id = str(fixture.get("match_id") or "").strip()
+            fixture_context = {
+                **(fixture.get("fixture_context") or {}),
+                "country": fixture.get("country", ""),
+                "league": fixture.get("league", ""),
+            }
             for market in fixture.get("markets") or []:
                 selected_pick = selected_lookup.get((match_id, market.get("market", "")))
                 published = bool(selected_pick)
@@ -174,7 +179,7 @@ class AlgoRunnerService:
                         insights=market.get("insights") or {},
                         home_recent_form=fixture.get("home_recent_form") or {},
                         away_recent_form=fixture.get("away_recent_form") or {},
-                        fixture_context=fixture.get("fixture_context") or {},
+                        fixture_context=fixture_context,
                         team_news=fixture.get("team_news") or {},
                     )
                 )
@@ -266,6 +271,11 @@ class AlgoRunnerService:
         match_id = str(fixture.get("match_id") or "")
         MarketPrediction.objects.filter(run=algo_run, match_id=match_id).delete()
         rows = []
+        fixture_context = {
+            **(fixture.get("fixture_context") or {}),
+            "country": fixture.get("country", ""),
+            "league": fixture.get("league", ""),
+        }
         for market in fixture.get("markets") or []:
             rows.append(
                 MarketPrediction(
@@ -292,7 +302,7 @@ class AlgoRunnerService:
                     insights=market.get("insights") or {},
                     home_recent_form=fixture.get("home_recent_form") or {},
                     away_recent_form=fixture.get("away_recent_form") or {},
-                    fixture_context=fixture.get("fixture_context") or {},
+                    fixture_context=fixture_context,
                     team_news=fixture.get("team_news") or {},
                 )
             )
@@ -418,6 +428,8 @@ class AlgoRunnerService:
             "confidence": prediction.confidence,
             "ev": prediction.ev,
             "odds_source": prediction.odds_source,
+            "league": prediction.league,
+            "country": (prediction.fixture_context or {}).get("country", ""),
             "risk_flags": prediction.risk_flags or [],
             "eligible": prediction.eligible,
             "insights": insights,
