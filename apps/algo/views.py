@@ -1,9 +1,12 @@
 from datetime import timedelta
 import csv
+import hashlib
+import json
 import logging
 
 from celery.result import AsyncResult
-from django.http import HttpResponse
+from django.conf import settings
+from django.http import HttpResponse, HttpResponseNotModified
 from django.shortcuts import get_object_or_404
 from django.db.models import Count, Q, Sum
 from django.utils import timezone
@@ -63,6 +66,55 @@ PICK_TIER_RANK = {
     Pick.Tier.WILD_CARD: 1,
 }
 EXCLUDED_MARKETS = {"DC: 1X", "DC: X2"}
+
+
+def _payload_etag(payload):
+    raw = json.dumps(payload, sort_keys=True, default=str, separators=(",", ":")).encode()
+    return f'"{hashlib.sha256(raw).hexdigest()}"'
+
+
+def _cached_response(
+    payload,
+    *,
+    request=None,
+    seconds=None,
+    status_code=status.HTTP_200_OK,
+    private=True,
+):
+    ttl = int(seconds if seconds is not None else getattr(settings, "ALGO_READ_CACHE_SECONDS", 300))
+    etag = _payload_etag(payload)
+    if request is not None and request.headers.get("If-None-Match") == etag:
+        response = HttpResponseNotModified()
+    else:
+        response = Response(payload, status=status_code)
+    response["ETag"] = etag
+    visibility = "private" if private else "public"
+    response["Cache-Control"] = (
+        f"{visibility}, max-age={ttl}, stale-while-revalidate={ttl}, stale-if-error=86400"
+    )
+    if private:
+        response["Vary"] = "Authorization, Cookie"
+    return response
+
+
+def _private_cached_response(payload, *, request=None, seconds=None, status_code=status.HTTP_200_OK):
+    return _cached_response(
+        payload,
+        request=request,
+        seconds=seconds,
+        status_code=status_code,
+        private=True,
+    )
+
+
+def _public_cached_response(payload, *, request=None, seconds=None, status_code=status.HTTP_200_OK):
+    return _cached_response(
+        payload,
+        request=request,
+        seconds=seconds,
+        status_code=status_code,
+        private=False,
+    )
 
 
 def _effective_pick_tier(pick):
@@ -1325,7 +1377,10 @@ class PublicSummaryView(APIView):
             "-created_at",
             "-id",
         )
-        return Response(_performance_summary(_dedupe_latest_public_picks(picks), window_days))
+        return _public_cached_response(
+            _performance_summary(_dedupe_latest_public_picks(picks), window_days),
+            request=request,
+        )
 
 
 class DailyPicksView(APIView):
@@ -1343,7 +1398,7 @@ class DailyPicksView(APIView):
         query = DailyPicksQuerySerializer(data=request.query_params)
         query.is_valid(raise_exception=True)
         target_date = query.validated_data.get("date") or timezone.localdate()
-        return Response(_daily_picks_payload(target_date, request))
+        return _private_cached_response(_daily_picks_payload(target_date, request), request=request)
 
 
 class TopPickView(APIView):
@@ -1371,7 +1426,7 @@ class TopPickView(APIView):
             )
         picks_data = PickSerializer(picks, many=True, context={"request": request}).data
         top_pick = picks_data[0] if picks_data else None
-        return Response(
+        return _private_cached_response(
             {
                 "date": target_date,
                 "published": bool(picks_data),
@@ -1379,7 +1434,8 @@ class TopPickView(APIView):
                 "pick": top_pick,
                 "top_pick": top_pick,
                 "picks": picks_data,
-            }
+            },
+            request=request,
         )
 
 
@@ -1398,7 +1454,7 @@ class GamesView(APIView):
         query = GameAnalysisQuerySerializer(data=request.query_params)
         query.is_valid(raise_exception=True)
         target_date = query.validated_data.get("date") or timezone.localdate()
-        return Response(_all_games_payload(target_date, request))
+        return _private_cached_response(_all_games_payload(target_date, request), request=request)
 
 
 class GameDetailView(APIView):
@@ -1419,7 +1475,7 @@ class GameDetailView(APIView):
         payload = _game_detail_payload(target_date, match_id, request)
         if payload["game"] is None:
             return Response(payload, status=status.HTTP_404_NOT_FOUND)
-        return Response(payload)
+        return _private_cached_response(payload, request=request)
 
 
 class PickDetailView(APIView):
@@ -1821,11 +1877,12 @@ class PublicRecordView(APIView):
             "-id",
         )
         picks = _dedupe_latest_public_picks(picks_queryset)
-        return Response(
+        return _public_cached_response(
             {
                 "summary": _performance_summary(picks, window_days),
                 "records": [_public_record_pick_payload(pick) for pick in picks],
-            }
+            },
+            request=request,
         )
 
 

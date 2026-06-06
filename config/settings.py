@@ -123,6 +123,7 @@ CORS_ALLOWED_ORIGINS = [
     for origin in _cors_allowed_origins.split(",")
     if origin.strip()
 ]
+CORS_EXPOSE_HEADERS = ["ETag"]
 
 REST_FRAMEWORK = {
     "DEFAULT_AUTHENTICATION_CLASSES": (
@@ -188,11 +189,16 @@ RESEND_FROM_EMAIL = config(
     default=f"{RESEND_FROM_EMAIL_PREFIX}@{RESEND_FROM_EMAIL_DOMAIN}",
 )
 FRONTEND_URL = config("FRONTEND_URL", default="http://localhost:3000")
+ALGO_READ_CACHE_SECONDS = config("ALGO_READ_CACHE_SECONDS", default=300, cast=int)
 
 # JWT Settings
 SIMPLE_JWT = {
-    "ACCESS_TOKEN_LIFETIME": timedelta(minutes=60),
-    "REFRESH_TOKEN_LIFETIME": timedelta(days=7),
+    "ACCESS_TOKEN_LIFETIME": timedelta(
+        hours=config("JWT_ACCESS_TOKEN_HOURS", default=24, cast=int)
+    ),
+    "REFRESH_TOKEN_LIFETIME": timedelta(
+        hours=config("JWT_REFRESH_TOKEN_HOURS", default=24, cast=int)
+    ),
     "ROTATE_REFRESH_TOKENS": True,
     "BLACKLIST_AFTER_ROTATION": True,
     "UPDATE_LAST_TOKEN": True,
