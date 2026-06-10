@@ -1,4 +1,5 @@
 from statistics import mean
+import re
 
 
 APPROVE = "approve"
@@ -40,6 +41,24 @@ def _float(value, default=0.0):
 
 def _clamp(value, low=0, high=100):
     return max(low, min(high, round(value)))
+
+
+def _form_rate(form, key):
+    form = form or {}
+    games = int(form.get("games") or 0)
+    if not games:
+        return 0.0
+    return _float(form.get(key)) / 100 if str(key).endswith("_rate") else _float(form.get(key)) / games
+
+
+def _team_goal_average(form):
+    form = form or {}
+    return _float(form.get("avg_scored")) + _float(form.get("avg_conceded"))
+
+
+def _corner_line(market):
+    match = re.search(r"(\d+(?:\.\d+)?)", str(market or ""))
+    return _float(match.group(1)) if match else 0.0
 
 
 def _verdict(score, reject=False):
@@ -103,7 +122,16 @@ def value_reviewer(candidate):
 
 def risk_reviewer(candidate):
     flags = set(candidate.get("risk_flags") or [])
-    severe = sorted(flags & SEVERE_RISK_FLAGS)
+    fit = market_fit_reviewer(candidate)
+    severe_flags = set(SEVERE_RISK_FLAGS)
+    if fit["score"] >= 85:
+        severe_flags -= {
+            "low_market_hit_rate",
+            "market_suppressed",
+            "negative_market_roi",
+            "strategy_suppressed",
+        }
+    severe = sorted(flags & severe_flags)
     medium = sorted(flags & MEDIUM_RISK_FLAGS)
     context_flags = sorted(flag for flag in flags if str(flag).startswith("context:"))
     score = 88 - (len(severe) * 22) - (len(medium) * 9) - (len(context_flags) * 4)
@@ -111,11 +139,159 @@ def risk_reviewer(candidate):
     return _review("risk", score, reasons, veto=bool(severe))
 
 
+def market_fit_reviewer(candidate):
+    market = str(candidate.get("market") or "")
+    home = candidate.get("home_recent_form") or {}
+    away = candidate.get("away_recent_form") or {}
+    context = candidate.get("fixture_context") or {}
+    corner_profile = candidate.get("corner_profile") or {}
+    goal_model = context.get("goal_model") or {}
+    expected_total = _float(goal_model.get("expected_total"))
+    draw_confidence = _float(goal_model.get("draw_confidence"))
+    home_games = int(home.get("games") or 0)
+    away_games = int(away.get("games") or 0)
+    home_draw_rate = _form_rate(home, "draws")
+    away_draw_rate = _form_rate(away, "draws")
+    home_over25 = _float(home.get("over25_rate"))
+    away_over25 = _float(away.get("over25_rate"))
+    avg_goal_load = mean([_team_goal_average(home), _team_goal_average(away)])
+    score = 58
+    reasons = []
+
+    if min(home_games, away_games) < 5:
+        score -= 8
+        reasons.append("limited_fixture_form_sample")
+
+    if market == "DC: 12":
+        score = 48
+        if expected_total >= 2.25:
+            score += 12
+            reasons.append("decisive_goal_profile")
+        if draw_confidence and draw_confidence <= 24:
+            score += 18
+            reasons.append("low_draw_pressure")
+        elif draw_confidence >= 30:
+            score -= 22
+            reasons.append("high_draw_pressure")
+        if home_draw_rate + away_draw_rate <= 0.45:
+            score += 10
+            reasons.append("low_recent_draw_tendency")
+        elif home_draw_rate + away_draw_rate >= 0.7:
+            score -= 12
+            reasons.append("draw_tendency_conflict")
+        if expected_total and expected_total < 2.0:
+            score -= 12
+            reasons.append("tight_goal_profile_against_dc12")
+
+    elif market.startswith("Under"):
+        line = _corner_line(market)
+        score = 54
+        if line >= 3.5:
+            if expected_total and expected_total <= 2.85:
+                score += 18
+                reasons.append("controlled_goal_projection")
+            elif expected_total >= 3.15:
+                score -= 18
+                reasons.append("goal_projection_too_high_for_under")
+            if avg_goal_load <= 3.0:
+                score += 10
+            if mean([home_over25, away_over25]) <= 45:
+                score += 8
+        elif line <= 2.5:
+            if expected_total and expected_total <= 2.35:
+                score += 18
+                reasons.append("low_goal_projection")
+            elif expected_total >= 2.65:
+                score -= 16
+                reasons.append("under_line_boundary")
+
+    elif market.startswith("Over") or "BTTS" in market or market.startswith("GG"):
+        line = _corner_line(market)
+        score = 54
+        if line <= 1.5:
+            if expected_total >= 1.85:
+                score += 18
+                reasons.append("over15_goal_projection")
+            elif expected_total and expected_total < 1.65:
+                score -= 18
+                reasons.append("low_goal_projection_against_over")
+        elif line >= 2.5:
+            if expected_total >= 2.65:
+                score += 18
+                reasons.append("over25_goal_projection")
+            elif expected_total and expected_total < 2.45:
+                score -= 18
+                reasons.append("goal_projection_too_low_for_over25")
+            if mean([home_over25, away_over25]) >= 50:
+                score += 8
+        if avg_goal_load >= 3.0:
+            score += 8
+
+    elif market.startswith("Corners "):
+        line = _corner_line(market)
+        expected_corners = _float(corner_profile.get("expected_total"))
+        games = int(corner_profile.get("games") or 0)
+        score = 52
+        if games < 6:
+            score -= 10
+            reasons.append("limited_corner_sample")
+        if line and expected_corners:
+            edge = expected_corners - line
+            if "Over" in market:
+                if edge >= 0.75:
+                    score += 22
+                    reasons.append("corner_projection_clears_line")
+                elif edge <= 0.25:
+                    score -= 14
+                    reasons.append("corner_projection_thin_for_over")
+            elif "Under" in market:
+                if edge <= -0.75:
+                    score += 22
+                    reasons.append("corner_projection_below_line")
+                elif edge >= -0.25:
+                    score -= 14
+                    reasons.append("corner_projection_thin_for_under")
+
+    elif market.endswith("Win") or market.startswith("DNB") or market.startswith("AH "):
+        score = 54
+        home_balance = _float(home.get("avg_scored")) - _float(home.get("avg_conceded"))
+        away_balance = _float(away.get("avg_scored")) - _float(away.get("avg_conceded"))
+        if "Home" in market or market == "Home Win":
+            edge = home_balance - away_balance
+        elif "Away" in market or market == "Away Win":
+            edge = away_balance - home_balance
+        else:
+            edge = abs(home_balance - away_balance)
+        if edge >= 0.5:
+            score += 18
+            reasons.append("team_balance_supports_result_market")
+        elif edge <= 0.1:
+            score -= 10
+            reasons.append("team_balance_not_decisive")
+
+    if score >= 82:
+        reasons.append("exceptional_fixture_market_fit")
+    elif score >= 72:
+        reasons.append("strong_fixture_market_fit")
+    elif score < 55:
+        reasons.append("weak_fixture_market_fit")
+
+    return _review("market_fit", score, reasons, veto=score < 45)
+
+
 def league_market_reviewer(candidate):
     trust = ((candidate.get("insights") or {}).get("league_trust") or {})
     status = trust.get("status") or ""
-    if status == "restricted":
+    fit = market_fit_reviewer(candidate)
+    exceptional_fit = fit["score"] >= 85
+    if status == "restricted" and not exceptional_fit:
         return _review("league_market", 35, trust.get("reasons") or ["league_market_restricted"], veto=True)
+    if status == "restricted":
+        return _review(
+            "league_market",
+            58,
+            [*(trust.get("reasons") or ["league_market_restricted"]), "exceptional_fixture_fit_review"],
+        )
     if status == "probation":
         return _review("league_market", 62, trust.get("reasons") or ["league_market_probation"])
     score = 76
@@ -137,8 +313,14 @@ def market_history_reviewer(candidate):
     score = 66
     reasons = []
 
-    if status == "restricted":
+    fit = market_fit_reviewer(candidate)
+    exceptional_fit = fit["score"] >= 85
+    if status == "restricted" and not exceptional_fit:
         return _review("market_history", 38, trust.get("reasons") or ["market_history_restricted"], veto=True)
+    if status == "restricted":
+        score = 54
+        reasons.extend(trust.get("reasons") or ["market_history_restricted"])
+        reasons.append("exceptional_fixture_fit_overrides_market_memory")
     if market_sample < 8:
         reasons.append("limited_market_history")
         score -= 8
@@ -150,8 +332,11 @@ def market_history_reviewer(candidate):
         reasons.append("weak_market_hit_rate")
     if market_roi < -8:
         reasons.append("negative_market_roi")
+    if exceptional_fit and score < 55:
+        score = 55
 
-    return _review("market_history", score, reasons, veto=market_hit_rate < 40 or market_roi < -15)
+    severe_history = market_hit_rate < 40 or market_roi < -15
+    return _review("market_history", score, reasons, veto=severe_history and not exceptional_fit)
 
 
 def calibration_reviewer(candidate):
@@ -197,6 +382,7 @@ def market_behaviour_reviewer(candidate):
 def council_review(candidate):
     reviewers = [
         value_reviewer(candidate),
+        market_fit_reviewer(candidate),
         risk_reviewer(candidate),
         league_market_reviewer(candidate),
         market_history_reviewer(candidate),

@@ -62,6 +62,17 @@ def _value(candidate, name, default=None):
     return getattr(candidate, name, default)
 
 
+def _reviewer_score(insights, reviewer_name):
+    review = (insights.get("council_review") or {})
+    for item in review.get("reviewers") or []:
+        if item.get("reviewer") == reviewer_name:
+            try:
+                return float(item.get("score") or 0)
+            except (TypeError, ValueError):
+                return 0.0
+    return 0.0
+
+
 def assess_league_market_trust(league_stats=None, market_stats=None):
     league_stats = league_stats or {}
     market_stats = market_stats or {}
@@ -153,6 +164,8 @@ def assess_recommendation(candidate):
     calibration_trust = insights.get("calibration_trust") or {}
     trust_status = league_trust.get("status") or ""
     calibration_status = calibration_trust.get("status") or ""
+    market_fit_score = _reviewer_score(insights, "market_fit")
+    exceptional_fixture_fit = market_fit_score >= 85
     eligible = bool(_value(candidate, "eligible", False))
     min_confidence = _float_setting("ALGO_PUBLISH_MIN_CONFIDENCE", 70)
     min_ev = _float_setting("ALGO_PUBLISH_MIN_EV", 0.03)
@@ -167,9 +180,24 @@ def assess_recommendation(candidate):
         reasons.append("blocked_country")
     if league and any(item in league for item in BLOCKED_PICK_LEAGUES):
         reasons.append("blocked_league")
-    if not eligible:
+    if not eligible and not exceptional_fixture_fit:
         reasons.append("below_publish_gate")
-    reasons.extend(sorted(risk_flags & HARD_STOP_FLAGS))
+    elif not eligible:
+        if confidence < min_confidence + 8:
+            reasons.append("exceptional_fit_needs_higher_confidence")
+        if ev is None or ev < min_ev + 0.06:
+            reasons.append("exceptional_fit_needs_stronger_ev")
+    hard_flags = set(risk_flags & HARD_STOP_FLAGS)
+    if exceptional_fixture_fit:
+        hard_flags -= {
+            "low_market_hit_rate",
+            "market_recent_low_hit_rate",
+            "market_suppressed",
+            "negative_market_roi",
+            "strategy_suppressed",
+            "strategy_cooling",
+        }
+    reasons.extend(sorted(hard_flags))
     if odds_source == "estimated":
         reasons.append("estimated_odds")
     if ev is None:
@@ -180,8 +208,13 @@ def assess_recommendation(candidate):
         reasons.append("below_publish_confidence")
     if confidence < 70 and not allow_wild_cards:
         reasons.append("wild_cards_paused")
-    if trust_status == "restricted":
+    if trust_status == "restricted" and not exceptional_fixture_fit:
         reasons.extend(league_trust.get("reasons") or ["league_market_restricted"])
+    elif trust_status == "restricted":
+        if confidence < min_confidence + 8:
+            reasons.append("restricted_market_needs_exceptional_confidence")
+        if ev is None or ev < min_ev + 0.06:
+            reasons.append("restricted_market_needs_exceptional_ev")
     elif trust_status == "probation":
         if confidence < min_confidence + probation_confidence_extra:
             reasons.append("probation_needs_higher_confidence")

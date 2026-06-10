@@ -472,6 +472,11 @@ class AlgoRunnerService:
             "country": (prediction.fixture_context or {}).get("country", ""),
             "risk_flags": prediction.risk_flags or [],
             "eligible": prediction.eligible,
+            "market": prediction.market,
+            "home_recent_form": prediction.home_recent_form or {},
+            "away_recent_form": prediction.away_recent_form or {},
+            "fixture_context": prediction.fixture_context or {},
+            "corner_profile": (prediction.insights or {}).get("corner_profile") or {},
             "insights": insights,
         }
         insights["council_review"] = council_review(candidate)
@@ -482,7 +487,7 @@ class AlgoRunnerService:
         performance = (algo_run.result or {}).get("performance_profile") or self._performance_profile()
 
         predictions = list(
-            MarketPrediction.objects.filter(run=algo_run, eligible=True)
+            MarketPrediction.objects.filter(run=algo_run)
             .exclude(market__in=["DC: 1X", "DC: X2"])
             .exclude(ev__isnull=True)
             .order_by("-confidence", "-ev", "odds")

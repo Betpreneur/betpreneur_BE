@@ -113,11 +113,32 @@ class RecommendationPolicyTests(TestCase):
 
     def test_council_review_approves_strong_aligned_candidate(self):
         review = council_review({
+            "market": "Under 3.5",
             "confidence": 84,
             "ev": 0.09,
             "odds_source": "api_football",
             "odds_meta": {"bookmaker_count": 4, "spread_pct": 6},
             "risk_flags": [],
+            "home_recent_form": {
+                "games": 8,
+                "draws": 2,
+                "avg_scored": 1.1,
+                "avg_conceded": 1.0,
+                "over25_rate": 37.5,
+            },
+            "away_recent_form": {
+                "games": 8,
+                "draws": 2,
+                "avg_scored": 0.9,
+                "avg_conceded": 1.1,
+                "over25_rate": 37.5,
+            },
+            "fixture_context": {
+                "goal_model": {
+                    "expected_total": 2.4,
+                    "draw_confidence": 24,
+                }
+            },
             "insights": {
                 "league_trust": {
                     "status": "trusted",
@@ -138,6 +159,106 @@ class RecommendationPolicyTests(TestCase):
         self.assertEqual(review["decision"], "approve")
         self.assertGreaterEqual(review["consensus_score"], 75)
         self.assertIn(review["tier"], ["banker", "value_gem"])
+
+    def test_market_fit_can_reject_dc12_despite_strong_history(self):
+        review = council_review({
+            "market": "DC: 12",
+            "confidence": 84,
+            "ev": 0.09,
+            "odds_source": "api_football",
+            "odds_meta": {"bookmaker_count": 4},
+            "risk_flags": ["market_recovered"],
+            "home_recent_form": {
+                "games": 8,
+                "draws": 4,
+                "avg_scored": 0.8,
+                "avg_conceded": 0.8,
+            },
+            "away_recent_form": {
+                "games": 8,
+                "draws": 4,
+                "avg_scored": 0.7,
+                "avg_conceded": 0.8,
+            },
+            "fixture_context": {
+                "goal_model": {
+                    "expected_total": 1.7,
+                    "draw_confidence": 36,
+                }
+            },
+            "insights": {
+                "league_trust": {
+                    "status": "trusted",
+                    "league_hit_rate": 60,
+                    "league_roi": 2,
+                    "market_hit_rate": 79,
+                    "market_roi": 3,
+                    "market_sample": 30,
+                },
+                "calibration_trust": {
+                    "status": "trusted",
+                    "hit_rate": 78,
+                    "avg_confidence": 80,
+                },
+            },
+        })
+
+        self.assertEqual(review["decision"], "reject")
+        self.assertIn("weak_fixture_market_fit", review["reasons"])
+
+    def test_exceptional_fixture_fit_can_lift_restricted_market(self):
+        candidate = {
+            "market": "Over 2.5",
+            "confidence": 86,
+            "ev": 0.12,
+            "odds_source": "api_football",
+            "odds_meta": {"bookmaker_count": 4},
+            "eligible": False,
+            "risk_flags": ["market_suppressed", "negative_market_roi", "low_market_hit_rate"],
+            "home_recent_form": {
+                "games": 8,
+                "draws": 1,
+                "avg_scored": 2.0,
+                "avg_conceded": 1.4,
+                "over25_rate": 75,
+            },
+            "away_recent_form": {
+                "games": 8,
+                "draws": 1,
+                "avg_scored": 1.8,
+                "avg_conceded": 1.5,
+                "over25_rate": 70,
+            },
+            "fixture_context": {
+                "goal_model": {
+                    "expected_total": 3.1,
+                    "draw_confidence": 18,
+                }
+            },
+            "insights": {
+                "league_trust": {
+                    "status": "restricted",
+                    "reasons": ["weak_overall_market_record"],
+                    "league_hit_rate": 58,
+                    "league_roi": 4,
+                    "market_hit_rate": 44,
+                    "market_roi": -9,
+                    "market_sample": 40,
+                },
+                "calibration_trust": {
+                    "status": "trusted",
+                    "hit_rate": 78,
+                    "avg_confidence": 80,
+                },
+            },
+        }
+        candidate["insights"]["council_review"] = council_review(candidate)
+
+        assessment = assess_recommendation(candidate)
+
+        self.assertTrue(assessment["recommended"])
+        self.assertEqual(candidate["insights"]["council_review"]["decision"], "caution")
+        self.assertIn("exceptional_fixture_market_fit", candidate["insights"]["council_review"]["reasons"])
 
     def test_recommendation_candidate_includes_council_review(self):
         prediction = self.prediction(match_id="5", confidence=82, ev="0.090")
