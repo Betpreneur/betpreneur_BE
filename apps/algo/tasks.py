@@ -2,6 +2,7 @@ from datetime import timedelta
 from datetime import date
 
 from celery import chord, shared_task
+from django.core.exceptions import ObjectDoesNotExist
 from django.utils import timezone
 
 from .services import algo_runner_service
@@ -49,7 +50,14 @@ def generate_daily_picks(self, target_date=None):
     time_limit=1200,
 )
 def score_fixture_for_daily_run(self, fixture_id):
-    result = algo_runner_service.score_fixture_for_run(fixture_id)
+    try:
+        result = algo_runner_service.score_fixture_for_run(fixture_id)
+    except ObjectDoesNotExist as exc:
+        return {
+            "fixture_id": fixture_id,
+            "status": "skipped",
+            "error": str(exc) or "object_not_found",
+        }
     if result.get("status") == "failed" and self.request.retries < self.max_retries:
         raise self.retry(countdown=60 * (self.request.retries + 1))
     return result
