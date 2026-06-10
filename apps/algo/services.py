@@ -793,7 +793,14 @@ class AlgoRunnerService:
             return []
 
     def score_fixture_for_run(self, fixture_id):
-        fixture = AlgoFixture.objects.select_related("run").get(id=fixture_id)
+        try:
+            fixture = AlgoFixture.objects.select_related("run").get(id=fixture_id)
+        except AlgoFixture.DoesNotExist:
+            return {
+                "fixture_id": fixture_id,
+                "status": "skipped",
+                "error": "fixture_not_found",
+            }
         algo_run = fixture.run
         if algo_run.status not in {AlgoRun.Status.RUNNING, AlgoRun.Status.PENDING}:
             return {"fixture_id": fixture.id, "status": "skipped", "run_status": algo_run.status}
