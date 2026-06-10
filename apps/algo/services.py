@@ -17,6 +17,7 @@ from .recommendation_policy import (
     assess_league_market_trust,
     assess_recommendation,
 )
+from .council import CAUTION, REJECT, council_review
 
 
 @contextmanager
@@ -312,6 +313,10 @@ class AlgoRunnerService:
 
     def _selected_pick_payload_from_prediction(self, prediction, tier, bankroll):
         risk_flags = list(prediction.risk_flags or [])
+        insights = dict(prediction.insights or {})
+        council = insights.get("council_review") or {}
+        final_confidence = council.get("final_confidence") or prediction.confidence
+        insights["published_tier"] = tier
         profile = {
             Pick.Tier.BANKER: "reliability",
             Pick.Tier.VALUE_GEM: "mispriced_value",
@@ -335,8 +340,9 @@ class AlgoRunnerService:
             "home_recent_form": prediction.home_recent_form or {},
             "away_recent_form": prediction.away_recent_form or {},
             "risk_flags": risk_flags,
-            "insights": prediction.insights or {},
+            "insights": insights,
             "confidence": prediction.confidence,
+            "final_confidence": final_confidence,
             "odds": prediction.odds,
             "ev": prediction.ev,
             "stake": round(max(100, float(bankroll or 10000) * 0.10), 2),
@@ -354,7 +360,9 @@ class AlgoRunnerService:
             "tier": payload.get("tier", ""),
             "market": payload.get("market", ""),
             "meaning": payload.get("meaning", ""),
-            "conf": payload.get("confidence") or 0,
+            "conf": payload.get("final_confidence") or payload.get("confidence") or 0,
+            "raw_confidence": payload.get("confidence") or 0,
+            "final_confidence": payload.get("final_confidence") or payload.get("confidence") or 0,
             "odds": float(payload.get("odds") or 0),
             "ev": float(payload.get("ev") or 0),
             "home_recent_form": payload.get("home_recent_form") or {},
@@ -378,6 +386,37 @@ class AlgoRunnerService:
         if prediction.confidence >= 60:
             return Pick.Tier.WILD_CARD
         return None
+
+    def _runner_env_bool(self, name, default=False):
+        value = self._runner_env().get(name)
+        if value is None:
+            return default
+        return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+    def _tier_after_council(self, prediction, candidate):
+        base_tier = self._prediction_tier(prediction)
+        if not base_tier:
+            return None
+        review = (candidate.get("insights") or {}).get("council_review") or {}
+        decision = review.get("decision")
+        council_tier = review.get("tier") or ""
+        if decision == REJECT or not council_tier:
+            return None
+        if council_tier == Pick.Tier.WILD_CARD and not self._runner_env_bool("ALGO_PUBLISH_WILD_CARDS", False):
+            return None
+        if council_tier in {Pick.Tier.BANKER, Pick.Tier.VALUE_GEM, Pick.Tier.WILD_CARD}:
+            return council_tier
+        return None
+
+    def _council_rejection_reason(self, candidate):
+        review = (candidate.get("insights") or {}).get("council_review") or {}
+        decision = review.get("decision") or "unknown"
+        reasons = review.get("reasons") or []
+        if decision == CAUTION:
+            return "council_caution_downgraded_below_publish_tier"
+        if reasons:
+            return ", ".join([f"council_{decision}", *reasons][:4])
+        return f"council_{decision}"
 
     def _market_daily_limit(self, market, max_daily):
         if market == "DC: 12":
@@ -424,9 +463,10 @@ class AlgoRunnerService:
         insights = dict(prediction.insights or {})
         insights["league_trust"] = self._league_trust_for_prediction(prediction, performance)
         insights["calibration_trust"] = self._calibration_trust_for_prediction(prediction, performance)
-        return {
+        candidate = {
             "confidence": prediction.confidence,
             "ev": prediction.ev,
+            "odds_meta": prediction.odds_meta or {},
             "odds_source": prediction.odds_source,
             "league": prediction.league,
             "country": (prediction.fixture_context or {}).get("country", ""),
@@ -434,6 +474,8 @@ class AlgoRunnerService:
             "eligible": prediction.eligible,
             "insights": insights,
         }
+        insights["council_review"] = council_review(candidate)
+        return candidate
 
     def _select_prediction_ids(self, algo_run):
         max_daily = max(1, self._runner_env_int("ALGO_MAX_DAILY_PICKS", 15))
@@ -458,9 +500,10 @@ class AlgoRunnerService:
         def add_prediction(prediction):
             if prediction.match_id in used_matches:
                 return False
-            if not assess_recommendation(self._recommendation_candidate(prediction, performance))["recommended"]:
+            candidate = self._recommendation_candidate(prediction, performance)
+            if not assess_recommendation(candidate)["recommended"]:
                 return False
-            tier = self._prediction_tier(prediction)
+            tier = self._tier_after_council(prediction, candidate)
             if not tier:
                 return False
             buckets[tier].append(prediction.id)
@@ -487,11 +530,13 @@ class AlgoRunnerService:
         for prediction in MarketPrediction.objects.filter(run=algo_run, published=False):
             candidate = self._recommendation_candidate(prediction, performance)
             assessment = assess_recommendation(candidate)
-            rejection_reason = (
-                ", ".join(assessment["recommendation_reasons"][:4])
-                if not assessment["recommended"]
-                else "not_top_pick"
-            )
+            council_tier = self._tier_after_council(prediction, candidate)
+            if not assessment["recommended"]:
+                rejection_reason = ", ".join(assessment["recommendation_reasons"][:4])
+            elif not council_tier:
+                rejection_reason = self._council_rejection_reason(candidate)
+            else:
+                rejection_reason = "not_top_pick"
             insights = dict(prediction.insights or {})
             changed = False
             if insights.get("league_trust") != candidate["insights"].get("league_trust"):
@@ -500,6 +545,10 @@ class AlgoRunnerService:
                 changed = True
             if insights.get("calibration_trust") != candidate["insights"].get("calibration_trust"):
                 insights["calibration_trust"] = candidate["insights"].get("calibration_trust")
+                prediction.insights = insights
+                changed = True
+            if insights.get("council_review") != candidate["insights"].get("council_review"):
+                insights["council_review"] = candidate["insights"].get("council_review")
                 prediction.insights = insights
                 changed = True
             if prediction.rejection_reason != rejection_reason:
@@ -575,6 +624,8 @@ class AlgoRunnerService:
 
         candidates = []
         for pick in picks:
+            council = ((pick.insights or {}).get("council_review") or {})
+            final_confidence = council.get("final_confidence") or pick.confidence
             candidates.append({
                 "fixture": pick.fixture,
                 "home_team": pick.home_team,
@@ -585,7 +636,9 @@ class AlgoRunnerService:
                 "tier": pick.tier,
                 "market": pick.market,
                 "meaning": pick.meaning,
-                "conf": pick.confidence,
+                "conf": final_confidence,
+                "raw_confidence": pick.confidence,
+                "final_confidence": final_confidence,
                 "odds": float(pick.odds or 0),
                 "ev": float(pick.ev or 0),
                 "home_recent_form": pick.home_recent_form or {},

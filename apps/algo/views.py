@@ -118,14 +118,14 @@ def _public_cached_response(payload, *, request=None, seconds=None, status_code=
 
 
 def _effective_pick_tier(pick):
-    confidence = pick.confidence or 0
-    if confidence >= 80:
-        return Pick.Tier.BANKER
-    if 70 <= confidence < 80:
-        return Pick.Tier.VALUE_GEM
-    if 60 <= confidence < 70:
-        return Pick.Tier.WILD_CARD
+    council_tier = (((pick.insights or {}).get("council_review") or {}).get("tier") or "")
+    if council_tier in {Pick.Tier.BANKER, Pick.Tier.VALUE_GEM, Pick.Tier.WILD_CARD}:
+        return council_tier
     return pick.tier
+
+
+def _pick_final_confidence(pick):
+    return (((pick.insights or {}).get("council_review") or {}).get("final_confidence") or pick.confidence or 0)
 
 
 def _performance_summary(queryset, window_days):
@@ -226,7 +226,7 @@ def _latest_successful_run(target_date):
 def _top_pick_sort_key(pick):
     return (
         PICK_TIER_RANK.get(_effective_pick_tier(pick), 0),
-        pick.confidence or 0,
+        _pick_final_confidence(pick),
         float(pick.ev or 0),
         float(pick.odds or 0),
     )
@@ -293,7 +293,7 @@ def _market_sort_value(market):
 
 
 def _market_display_score(market):
-    confidence = float(market.get("confidence") or 0)
+    confidence = float(market.get("final_confidence") or market.get("confidence") or 0)
     ev = market.get("ev")
     ev_score = float(ev) * 18.0 if ev is not None else -8.0
     odds = float(market.get("odds") or 0)
@@ -374,6 +374,31 @@ def _tier_for_confidence(confidence):
     return "watchlist"
 
 
+def _normalise_council_review(insights, fallback_confidence=None, fallback_tier=""):
+    review = ((insights or {}).get("council_review") or {}).copy()
+    if not review:
+        return {
+            "decision": "not_reviewed",
+            "tier": fallback_tier,
+            "raw_confidence": fallback_confidence,
+            "final_confidence": fallback_confidence,
+            "consensus_score": None,
+            "disagreement_score": None,
+            "reasons": [],
+            "reviewers": [],
+        }
+    return {
+        "decision": review.get("decision", ""),
+        "tier": review.get("tier", fallback_tier),
+        "raw_confidence": review.get("raw_confidence", fallback_confidence),
+        "final_confidence": review.get("final_confidence", fallback_confidence),
+        "consensus_score": review.get("consensus_score"),
+        "disagreement_score": review.get("disagreement_score"),
+        "reasons": review.get("reasons", []),
+        "reviewers": review.get("reviewers", []),
+    }
+
+
 def _format_game_form_line(label, form):
     form = _recent_form_payload(form)
     games = int(form.get("games") or 0)
@@ -436,8 +461,15 @@ def _market_reasoning_for_game(market, item):
     ev = market.get("ev")
     ev_text = f"{ev:+.3f} expected value" if ev is not None else "no priced EV"
     odds_source = market.get("odds_source") or "unknown"
+    final_confidence = market.get("final_confidence") or market.get("confidence")
+    raw_confidence = market.get("confidence")
+    confidence_text = (
+        f"{final_confidence}% final confidence after council review"
+        if final_confidence != raw_confidence
+        else f"{raw_confidence}% confidence"
+    )
     return (
-        f"{market.get('market')} rates at {market.get('confidence')}% confidence with "
+        f"{market.get('market')} rates at {confidence_text} with "
         f"{market.get('odds')} odds and {ev_text}. "
         f"{_market_evidence_for_game(market, item)} "
         f"Pricing is based on {odds_source} odds."
@@ -447,6 +479,7 @@ def _market_reasoning_for_game(market, item):
 def _market_verdict_for_game(market):
     risk_flags = set(market.get("risk_flags") or [])
     recommendation_status = market.get("recommendation_status")
+    confidence = market.get("final_confidence") or market.get("confidence", 0)
     if recommendation_status == "no_edge":
         return "No bet; this market does not clear the accuracy-first recommendation gate."
     if recommendation_status == "watchlist":
@@ -455,9 +488,9 @@ def _market_verdict_for_game(market):
         return "Playable only when the draw risk stays controlled; avoid overusing this market."
     if "thin_edge" in risk_flags or "goal_line_boundary" in risk_flags:
         return "Playable, but the edge is narrow and should be treated cautiously."
-    if market.get("confidence", 0) >= 80:
+    if confidence >= 80:
         return "Strong model candidate from this fixture."
-    if market.get("confidence", 0) >= 70:
+    if confidence >= 70:
         return "Solid model candidate with enough confidence to monitor closely."
     return "Lower-confidence candidate; useful for analysis but not a headline pick."
 
@@ -470,7 +503,15 @@ def _normalise_fixture_markets(item, picks_by_match):
         if market.get("market") in EXCLUDED_MARKETS:
             continue
         payload = dict(market)
-        payload["suggested_tier"] = _tier_for_confidence(payload.get("confidence"))
+        payload["council_review"] = _normalise_council_review(
+            payload.get("insights"),
+            fallback_confidence=payload.get("confidence"),
+        )
+        payload["final_confidence"] = payload["council_review"].get("final_confidence")
+        payload["suggested_tier"] = (
+            payload["council_review"].get("tier")
+            or _tier_for_confidence(payload.get("confidence"))
+        )
         selected_pick = pick_by_market.get(payload.get("market"))
         if selected_pick:
             payload["selected"] = True
@@ -585,11 +626,18 @@ def _picks_by_match(algo_run):
 
 
 def _market_prediction_payload(prediction):
+    council_review = _normalise_council_review(
+        prediction.insights,
+        fallback_confidence=prediction.confidence,
+        fallback_tier=prediction.selected_pick.tier if prediction.selected_pick_id else "",
+    )
     return {
         "market": prediction.market,
         "meaning": prediction.meaning,
         "raw_confidence": prediction.raw_confidence,
         "confidence": prediction.confidence,
+        "final_confidence": council_review.get("final_confidence"),
+        "council_review": council_review,
         "odds": float(prediction.odds or 0),
         "odds_meta": prediction.odds_meta or {},
         "ev": float(prediction.ev) if prediction.ev is not None else None,
@@ -600,7 +648,7 @@ def _market_prediction_payload(prediction):
         "insights": prediction.insights or {},
         "selected": prediction.published,
         "selected_pick_id": prediction.selected_pick_id,
-        "selected_tier": prediction.selected_pick.tier if prediction.selected_pick_id else "",
+        "selected_tier": _effective_pick_tier(prediction.selected_pick) if prediction.selected_pick_id else "",
     }
 
 
@@ -688,7 +736,7 @@ def _all_games_payload(target_date, request=None):
             (game.get("league") or "").lower(),
             game.get("kickoff") or "",
             0 if game.get("published") else 1,
-            -((game.get("top_market") or {}).get("confidence") or 0),
+            -((game.get("top_market") or {}).get("final_confidence") or (game.get("top_market") or {}).get("confidence") or 0),
             game.get("fixture") or "",
         ),
     )
@@ -806,6 +854,16 @@ def _markets_for_pick_detail(pick, fixture_summary):
             "meaning": pick.meaning,
             "confidence": pick.confidence,
             "raw_confidence": pick.confidence,
+            "final_confidence": _normalise_council_review(
+                pick.insights,
+                fallback_confidence=pick.confidence,
+                fallback_tier=_effective_pick_tier(pick),
+            ).get("final_confidence"),
+            "council_review": _normalise_council_review(
+                pick.insights,
+                fallback_confidence=pick.confidence,
+                fallback_tier=_effective_pick_tier(pick),
+            ),
             "odds": float(pick.odds),
             "ev": float(pick.ev),
             "odds_source": pick.source,
@@ -998,6 +1056,8 @@ def _pick_detail_payload(pick, request=None):
             "confidence_band": confidence_band(pick.confidence),
             "odds_band": odds_band(pick.odds),
             "confidence": pick.confidence,
+            "final_confidence": pick_data.get("final_confidence", pick.confidence),
+            "council_review": pick_data.get("council_review", {}),
             "odds": float(pick.odds),
             "ev": float(pick.ev),
             "stake": float(pick.stake) if pick.stake is not None else None,

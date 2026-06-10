@@ -68,26 +68,9 @@ def _env_int(name, default):
     except (TypeError, ValueError):
         return default
 
-BLOCKED_PICK_COUNTRIES = {
-    "argentina", "bahrain", "bangladesh", "belize", "bhutan", "bolivia", "brazil",
-    "brunei", "cambodia", "canada", "chile", "china", "colombia", "costa rica",
-    "cuba", "dominican republic", "ecuador", "el salvador", "guatemala", "guyana",
-    "haiti", "honduras", "hong kong", "india", "indonesia", "iran", "iraq",
-    "israel", "japan", "jordan", "kazakhstan", "korea republic", "kuwait",
-    "kyrgyzstan", "laos", "lebanon", "malaysia", "maldives", "mexico",
-    "mongolia", "myanmar", "nepal", "nicaragua", "north korea", "oman",
-    "pakistan", "palestine", "panama", "paraguay", "peru", "philippines",
-    "puerto rico", "qatar", "saudi arabia", "singapore", "south korea",
-    "sri lanka", "suriname", "syria", "tajikistan", "thailand",
-    "trinidad and tobago", "turkmenistan", "united arab emirates", "united states",
-    "uruguay", "uzbekistan", "venezuela", "vietnam", "yemen",
-}
+BLOCKED_PICK_COUNTRIES = set()
 
-BLOCKED_PICK_LEAGUES = {
-    "allsvenskan", "j1 league", "j2 league", "j3 league", "j-league",
-    "chinese super league", "china league", "mls", "major league soccer",
-    "usl", "liga mx",
-}
+BLOCKED_PICK_LEAGUES = set()
 
 def blocked_pick_context(country=None, league=None):
     country_norm = normalize(country or "")

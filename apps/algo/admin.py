@@ -3,10 +3,11 @@ from django.contrib import messages
 from django.db.models import Avg, Count, Q
 from django.template.response import TemplateResponse
 from django.urls import path, reverse
-from django.utils.html import format_html
+from django.utils.html import format_html, format_html_join
 from django.utils import timezone
 
 from .models import AlgoFixture, AlgoRun, GameBack, MarketPrediction, Pick, PickBack, StrategyReview
+from .council import council_review
 from .performance import performance_dashboard
 from .recommendation_policy import assess_recommendation
 from .tasks import generate_daily_picks, recover_daily_run, run_monthly_auditor, settle_daily_results
@@ -296,11 +297,64 @@ class AlgoRunAdmin(admin.ModelAdmin):
         return assess_recommendation({
             "confidence": prediction.confidence,
             "ev": prediction.ev,
+            "odds_meta": prediction.odds_meta or {},
             "odds_source": prediction.odds_source,
+            "league": prediction.league,
+            "country": (prediction.fixture_context or {}).get("country", ""),
             "risk_flags": prediction.risk_flags or [],
             "eligible": prediction.eligible,
             "insights": prediction.insights or {},
         })
+
+    def _council_review(self, prediction):
+        existing = ((prediction.insights or {}).get("council_review") or {})
+        if existing:
+            return existing
+        return council_review({
+            "confidence": prediction.confidence,
+            "ev": prediction.ev,
+            "odds_meta": prediction.odds_meta or {},
+            "odds_source": prediction.odds_source,
+            "league": prediction.league,
+            "country": (prediction.fixture_context or {}).get("country", ""),
+            "risk_flags": prediction.risk_flags or [],
+            "eligible": prediction.eligible,
+            "insights": prediction.insights or {},
+        })
+
+    def _council_status_rows(self, predictions):
+        grouped = {}
+        for prediction in predictions:
+            review = self._council_review(prediction)
+            decision = review.get("decision") or "unknown"
+            row = grouped.setdefault(decision, {
+                "decision": decision,
+                "total": 0,
+                "published": 0,
+                "wins": 0,
+                "losses": 0,
+                "avg_final_confidence": 0,
+                "avg_consensus": 0,
+                "avg_disagreement": 0,
+            })
+            row["total"] += 1
+            row["published"] += 1 if prediction.published else 0
+            row["wins"] += 1 if prediction.status == MarketPrediction.Status.WIN else 0
+            row["losses"] += 1 if prediction.status == MarketPrediction.Status.LOSS else 0
+            row["avg_final_confidence"] += float(review.get("final_confidence") or 0)
+            row["avg_consensus"] += float(review.get("consensus_score") or 0)
+            row["avg_disagreement"] += float(review.get("disagreement_score") or 0)
+        rows = []
+        order = {"approve": 0, "caution": 1, "reject": 2, "unknown": 3}
+        for row in grouped.values():
+            total = row["total"] or 1
+            row["settled"] = row["wins"] + row["losses"]
+            row["accuracy"] = self._rate(row["wins"], row["losses"])
+            row["avg_final_confidence"] = round(row["avg_final_confidence"] / total, 1)
+            row["avg_consensus"] = round(row["avg_consensus"] / total, 1)
+            row["avg_disagreement"] = round(row["avg_disagreement"] / total, 1)
+            rows.append(row)
+        return sorted(rows, key=lambda row: (order.get(row["decision"], 99), -row["total"]))
 
     def _trust_rows(self, predictions, key):
         grouped = {}
@@ -445,6 +499,7 @@ class AlgoRunAdmin(admin.ModelAdmin):
                 "league_trust": self._trust_status(prediction, "league_trust"),
                 "calibration_trust": self._trust_status(prediction, "calibration_trust"),
                 "recommendation": self._recommendation_assessment(prediction),
+                "council": self._council_review(prediction),
             })
         return sorted(rows, key=lambda row: (row["country"], row["league"], row["kickoff"], row["fixture"]))
 
@@ -502,6 +557,7 @@ class AlgoRunAdmin(admin.ModelAdmin):
         picks = Pick.objects.filter(run=algo_run)
         market_rows = self._market_rows(top_predictions)
         fixture_rows = self._fixture_rows(algo_run, top_prediction_list)
+        council_rows = self._council_status_rows(top_prediction_list)
         league_trust_rows = self._trust_rows(top_prediction_list, "league_trust")
         calibration_trust_rows = self._trust_rows(top_prediction_list, "calibration_trust")
         rejection_rows = self._rejection_rows(top_prediction_list)
@@ -544,6 +600,7 @@ class AlgoRunAdmin(admin.ModelAdmin):
             "all_prediction_count": all_prediction_count,
             "market_rows": market_rows,
             "fixture_rows": fixture_rows,
+            "council_rows": council_rows,
             "league_trust_rows": league_trust_rows,
             "calibration_trust_rows": calibration_trust_rows,
             "rejection_rows": rejection_rows,
@@ -665,6 +722,9 @@ class MarketPredictionAdmin(admin.ModelAdmin):
         "ev",
         "eligible",
         "published",
+        "council_decision",
+        "council_final_confidence",
+        "council_disagreement",
         "market_state",
         "league_trust_state",
         "calibration_state",
@@ -695,6 +755,7 @@ class MarketPredictionAdmin(admin.ModelAdmin):
     readonly_fields = (
         "run",
         "selected_pick",
+        "council_summary",
         "created_at",
         "settled_at",
     )
@@ -729,6 +790,7 @@ class MarketPredictionAdmin(admin.ModelAdmin):
                     "odds_meta",
                     "eligible",
                     "published",
+                    "council_summary",
                     "rejection_reason",
                     "risk_flags",
                     "insights",
@@ -780,6 +842,54 @@ class MarketPredictionAdmin(admin.ModelAdmin):
     @admin.display(description="Calibration")
     def calibration_state(self, obj):
         return ((obj.insights or {}).get("calibration_trust") or {}).get("status", "unknown")
+
+    def _council_review(self, obj):
+        existing = ((obj.insights or {}).get("council_review") or {})
+        if existing:
+            return existing
+        return council_review({
+            "confidence": obj.confidence,
+            "ev": obj.ev,
+            "odds_meta": obj.odds_meta or {},
+            "odds_source": obj.odds_source,
+            "league": obj.league,
+            "country": (obj.fixture_context or {}).get("country", ""),
+            "risk_flags": obj.risk_flags or [],
+            "eligible": obj.eligible,
+            "insights": obj.insights or {},
+        })
+
+    @admin.display(description="Council")
+    def council_decision(self, obj):
+        return self._council_review(obj).get("decision", "unknown")
+
+    @admin.display(description="Council Conf")
+    def council_final_confidence(self, obj):
+        value = self._council_review(obj).get("final_confidence")
+        return f"{value}%" if value is not None else "-"
+
+    @admin.display(description="Disagree")
+    def council_disagreement(self, obj):
+        value = self._council_review(obj).get("disagreement_score")
+        return f"{value}" if value is not None else "-"
+
+    @admin.display(description="Council Summary")
+    def council_summary(self, obj):
+        review = self._council_review(obj)
+        reviewers = review.get("reviewers") or []
+        reviewer_lines = [
+            (f"{item.get('reviewer')}: {item.get('score')} ({item.get('verdict')})",)
+            for item in reviewers
+        ]
+        return format_html(
+            "<strong>{}</strong> · final {}% · consensus {} · disagreement {}<br>{}<br><span style='color:#666'>{}</span>",
+            review.get("decision", "unknown"),
+            review.get("final_confidence", "-"),
+            review.get("consensus_score", "-"),
+            review.get("disagreement_score", "-"),
+            format_html_join("", "{}<br>", reviewer_lines),
+            ", ".join(review.get("reasons") or []),
+        )
 
     @admin.display(description="Blocked By")
     def rejection_short(self, obj):

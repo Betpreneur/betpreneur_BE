@@ -6,6 +6,8 @@ from .models import AlgoRun, GameBack, Pick
 class PickSerializer(serializers.ModelSerializer):
     tier = serializers.SerializerMethodField()
     model_verdict = serializers.SerializerMethodField()
+    council_review = serializers.SerializerMethodField()
+    final_confidence = serializers.SerializerMethodField()
     home_recent_form = serializers.SerializerMethodField()
     away_recent_form = serializers.SerializerMethodField()
     backed_count = serializers.SerializerMethodField()
@@ -36,6 +38,8 @@ class PickSerializer(serializers.ModelSerializer):
             "selection_profile",
             "risk_level",
             "confidence",
+            "final_confidence",
+            "council_review",
             "odds",
             "ev",
             "stake",
@@ -82,14 +86,37 @@ class PickSerializer(serializers.ModelSerializer):
         return GameBack.objects.filter(user=request.user, match_id=match_id).exists()
 
     def get_tier(self, obj) -> str:
-        confidence = obj.confidence or 0
-        if confidence >= 80:
-            return Pick.Tier.BANKER
-        if 70 <= confidence < 80:
-            return Pick.Tier.VALUE_GEM
-        if 60 <= confidence < 70:
-            return Pick.Tier.WILD_CARD
+        council_tier = self.get_council_review(obj).get("tier")
+        if council_tier in {Pick.Tier.BANKER, Pick.Tier.VALUE_GEM, Pick.Tier.WILD_CARD}:
+            return council_tier
         return obj.tier
+
+    def get_council_review(self, obj) -> dict:
+        review = ((obj.insights or {}).get("council_review") or {}).copy()
+        if review:
+            return {
+                "decision": review.get("decision", ""),
+                "tier": review.get("tier", ""),
+                "raw_confidence": review.get("raw_confidence", obj.confidence),
+                "final_confidence": review.get("final_confidence", obj.confidence),
+                "consensus_score": review.get("consensus_score"),
+                "disagreement_score": review.get("disagreement_score"),
+                "reasons": review.get("reasons", []),
+                "reviewers": review.get("reviewers", []),
+            }
+        return {
+            "decision": "legacy",
+            "tier": obj.tier,
+            "raw_confidence": obj.confidence,
+            "final_confidence": obj.confidence,
+            "consensus_score": None,
+            "disagreement_score": None,
+            "reasons": [],
+            "reviewers": [],
+        }
+
+    def get_final_confidence(self, obj):
+        return self.get_council_review(obj).get("final_confidence")
 
     def get_selection_profile(self, obj) -> str:
         tier = self.get_tier(obj)
@@ -247,6 +274,8 @@ class FixtureMarketSerializer(serializers.Serializer):
     meaning = serializers.CharField(allow_blank=True)
     raw_confidence = serializers.IntegerField(required=False)
     confidence = serializers.IntegerField()
+    final_confidence = serializers.FloatField(required=False, allow_null=True)
+    council_review = serializers.JSONField(required=False)
     odds = serializers.FloatField()
     odds_meta = serializers.JSONField(required=False)
     ev = serializers.FloatField()

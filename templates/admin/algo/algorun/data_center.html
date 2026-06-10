@@ -32,6 +32,9 @@
   .dc-watchlist { background: #fff5d9; color: #6f5200; }
   .dc-no_edge { background: #fdeceb; color: #9b1c1c; }
   .dc-playable, .dc-strong { background: #e7f6ed; color: #17633a; }
+  .dc-approve { background: #e7f6ed; color: #17633a; }
+  .dc-caution { background: #fff5d9; color: #6f5200; }
+  .dc-reject { background: #fdeceb; color: #9b1c1c; }
   .dc-muted { color: var(--body-quiet-color); }
   .dc-two { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
   details summary { cursor: pointer; color: var(--link-fg); font-weight: 600; }
@@ -113,6 +116,37 @@
 
   <div class="dc-section">
     <h2>Trust And Calibration</h2>
+    <div class="dc-card" style="margin-bottom: 16px;">
+      <div class="label">Council Review</div>
+      <table class="dc-table">
+        <thead>
+          <tr>
+            <th>Decision</th>
+            <th class="dc-num">Top Markets</th>
+            <th class="dc-num">Published</th>
+            <th class="dc-num">Avg Final Conf</th>
+            <th class="dc-num">Avg Consensus</th>
+            <th class="dc-num">Avg Disagreement</th>
+            <th class="dc-num">Accuracy</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for row in council_rows %}
+            <tr>
+              <td><span class="dc-badge dc-{{ row.decision }}">{{ row.decision }}</span></td>
+              <td class="dc-num">{{ row.total }}</td>
+              <td class="dc-num">{{ row.published }}</td>
+              <td class="dc-num">{{ row.avg_final_confidence }}%</td>
+              <td class="dc-num">{{ row.avg_consensus }}</td>
+              <td class="dc-num">{{ row.avg_disagreement }}</td>
+              <td class="dc-num">{{ row.accuracy }}%</td>
+            </tr>
+          {% empty %}
+            <tr><td colspan="7">No council review data yet.</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
     <div class="dc-two">
       <div class="dc-card">
         <div class="label">League-Market Trust</div>
@@ -256,6 +290,7 @@
           <th class="dc-num">Confidence</th>
           <th class="dc-num">Odds / EV</th>
           <th>Trust</th>
+          <th>Council</th>
           <th>Recommendation</th>
           <th>Status</th>
           <th>Published</th>
@@ -282,6 +317,13 @@
               <span class="dc-badge dc-{{ row.calibration_trust }}">{{ row.calibration_trust }}</span>
             </td>
             <td>
+              <span class="dc-badge dc-{{ row.council.decision }}">{{ row.council.decision }}</span><br>
+              <span class="dc-muted">Final {{ row.council.final_confidence }}% · consensus {{ row.council.consensus_score }} · disagree {{ row.council.disagreement_score }}</span>
+              {% if row.council.reasons %}
+                <br><span class="dc-muted">{{ row.council.reasons|slice:":3"|join:", " }}</span>
+              {% endif %}
+            </td>
+            <td>
               <span class="dc-badge dc-{{ row.recommendation.recommendation_status }}">{{ row.recommendation.recommendation_status }}</span>
               {% if row.recommendation.recommendation_reasons %}
                 <br><span class="dc-muted">{{ row.recommendation.recommendation_reasons|join:", " }}</span>
@@ -297,7 +339,7 @@
             </td>
           </tr>
         {% empty %}
-          <tr><td colspan="11">No games with top-market predictions for this run.</td></tr>
+          <tr><td colspan="12">No games with top-market predictions for this run.</td></tr>
         {% endfor %}
       </tbody>
     </table>

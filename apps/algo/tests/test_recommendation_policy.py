@@ -4,7 +4,9 @@ from decimal import Decimal
 from django.test import TestCase, override_settings
 
 from apps.algo.models import AlgoRun, MarketPrediction, Pick
+from apps.algo.council import council_review
 from apps.algo.recommendation_policy import assess_recommendation
+from apps.algo.serializers import PickSerializer
 from apps.algo.services import AlgoRunnerService
 from apps.algo.views import _game_summary_from_fixture
 
@@ -81,8 +83,8 @@ class RecommendationPolicyTests(TestCase):
         self.assertEqual(selected[Pick.Tier.VALUE_GEM], [])
         self.assertEqual(selected[Pick.Tier.WILD_CARD], [])
 
-    def test_blocked_country_or_league_cannot_be_recommended(self):
-        blocked_country = {
+    def test_previously_blocked_country_or_league_can_be_recommended(self):
+        japan_candidate = {
             "confidence": 85,
             "ev": 0.09,
             "odds_source": "api_football",
@@ -95,19 +97,185 @@ class RecommendationPolicyTests(TestCase):
                 "calibration_trust": {"status": "trusted"},
             },
         }
-        blocked_league = {
-            **blocked_country,
+        sweden_candidate = {
+            **japan_candidate,
             "country": "Sweden",
             "league": "Allsvenskan",
         }
 
-        country_assessment = assess_recommendation(blocked_country)
-        league_assessment = assess_recommendation(blocked_league)
+        country_assessment = assess_recommendation(japan_candidate)
+        league_assessment = assess_recommendation(sweden_candidate)
 
-        self.assertFalse(country_assessment["recommended"])
-        self.assertIn("blocked_country", country_assessment["recommendation_reasons"])
-        self.assertFalse(league_assessment["recommended"])
-        self.assertIn("blocked_league", league_assessment["recommendation_reasons"])
+        self.assertTrue(country_assessment["recommended"])
+        self.assertNotIn("blocked_country", country_assessment["recommendation_reasons"])
+        self.assertTrue(league_assessment["recommended"])
+        self.assertNotIn("blocked_league", league_assessment["recommendation_reasons"])
+
+    def test_council_review_approves_strong_aligned_candidate(self):
+        review = council_review({
+            "confidence": 84,
+            "ev": 0.09,
+            "odds_source": "api_football",
+            "odds_meta": {"bookmaker_count": 4, "spread_pct": 6},
+            "risk_flags": [],
+            "insights": {
+                "league_trust": {
+                    "status": "trusted",
+                    "league_hit_rate": 63,
+                    "league_roi": 6,
+                    "market_hit_rate": 64,
+                    "market_roi": 5,
+                    "market_sample": 30,
+                },
+                "calibration_trust": {
+                    "status": "trusted",
+                    "hit_rate": 80,
+                    "avg_confidence": 81,
+                },
+            },
+        })
+
+        self.assertEqual(review["decision"], "approve")
+        self.assertGreaterEqual(review["consensus_score"], 75)
+        self.assertIn(review["tier"], ["banker", "value_gem"])
+
+    def test_recommendation_candidate_includes_council_review(self):
+        prediction = self.prediction(match_id="5", confidence=82, ev="0.090")
+
+        candidate = self.service._recommendation_candidate(prediction, {
+            "markets": {
+                "Under 3.5": {
+                    "count": 25,
+                    "hit_rate": 65,
+                    "roi_flat": 6,
+                }
+            },
+            "league_markets": {
+                "": {}
+            },
+            "confidence_bands": {
+                "80+": {
+                    "count": 30,
+                    "hit_rate": 78,
+                    "roi_flat": 5,
+                    "avg_confidence": 81,
+                }
+            },
+        })
+
+        self.assertIn("council_review", candidate["insights"])
+        self.assertIn("reviewers", candidate["insights"]["council_review"])
+
+    def test_council_final_confidence_sets_tier(self):
+        cautious = self.prediction(match_id="6", confidence=82, ev="0.100")
+        selected = self.service._select_prediction_ids(self.run_with_performance({
+            "markets": {
+                "Under 3.5": {
+                    "count": 5,
+                    "hit_rate": 58,
+                    "roi_flat": 2,
+                }
+            },
+            "league_markets": {
+                "::Under 3.5": {
+                    "count": 5,
+                    "hit_rate": 58,
+                    "roi_flat": 2,
+                }
+            },
+            "confidence_bands": {
+                "80+": {
+                    "count": 30,
+                    "hit_rate": 80,
+                    "roi_flat": 5,
+                    "avg_confidence": 81,
+                }
+            },
+        }))
+
+        self.assertEqual(selected[Pick.Tier.BANKER], [])
+        self.assertEqual(selected[Pick.Tier.VALUE_GEM], [cautious.id])
+
+        candidate = self.service._recommendation_candidate(cautious, self.run.result["performance_profile"])
+        review = candidate["insights"]["council_review"]
+        self.assertEqual(review["decision"], "caution")
+        self.assertEqual(review["tier"], "value_gem")
+        self.assertLess(review["final_confidence"], 80)
+
+    def test_pick_serializer_uses_council_tier_not_raw_confidence(self):
+        pick = Pick.objects.create(
+            run=self.run,
+            match_date=self.run.target_date,
+            fixture="Home 8 vs Away 8",
+            home_team="Home 8",
+            away_team="Away 8",
+            league="Test League",
+            kickoff="12:00 WAT",
+            match_id="8",
+            tier=Pick.Tier.VALUE_GEM,
+            market="Under 3.5",
+            meaning="3 or fewer total goals",
+            confidence=82,
+            odds=Decimal("1.50"),
+            ev=Decimal("0.100"),
+            stake=Decimal("1000.00"),
+            source="APS",
+            insights={
+                "council_review": {
+                    "decision": "caution",
+                    "tier": Pick.Tier.VALUE_GEM,
+                    "raw_confidence": 82,
+                    "final_confidence": 78,
+                    "consensus_score": 75,
+                    "disagreement_score": 26,
+                    "reasons": ["league_market_probation"],
+                    "reviewers": [],
+                }
+            },
+        )
+
+        data = PickSerializer(pick).data
+
+        self.assertEqual(data["tier"], Pick.Tier.VALUE_GEM)
+        self.assertEqual(data["confidence"], 82)
+        self.assertEqual(data["final_confidence"], 78)
+        self.assertEqual(data["council_review"]["decision"], "caution")
+
+    def test_council_reject_blocks_otherwise_recommended_pick(self):
+        self.prediction(match_id="7", confidence=90, ev="0.200")
+        selected = self.service._select_prediction_ids(self.run_with_performance({
+            "markets": {
+                "Under 3.5": {
+                    "count": 5,
+                    "hit_rate": 58,
+                    "roi_flat": -20,
+                }
+            },
+            "league_markets": {
+                "::Under 3.5": {
+                    "count": 5,
+                    "hit_rate": 58,
+                    "roi_flat": -20,
+                }
+            },
+            "confidence_bands": {
+                "80+": {
+                    "count": 30,
+                    "hit_rate": 80,
+                    "roi_flat": 5,
+                    "avg_confidence": 81,
+                }
+            },
+        }))
+
+        self.assertEqual(selected[Pick.Tier.BANKER], [])
+        self.assertEqual(selected[Pick.Tier.VALUE_GEM], [])
+        self.assertEqual(selected[Pick.Tier.WILD_CARD], [])
+
+    def run_with_performance(self, performance):
+        self.run.result = {"performance_profile": performance}
+        self.run.save(update_fields=["result"])
+        return self.run
 
     def test_games_keep_best_market_but_show_no_recommendation(self):
         fixture = {
