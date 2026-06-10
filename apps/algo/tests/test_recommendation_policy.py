@@ -352,6 +352,83 @@ class RecommendationPolicyTests(TestCase):
         self.assertEqual(game["recommended_market"]["market"], "Under 3.5")
         self.assertEqual(game["recommended_market"]["recommendation_status"], "strong")
 
+    def test_all_games_recommendation_is_blocked_by_council_reject(self):
+        fixture = {
+            "fixture": "Home vs Away",
+            "match_id": "12",
+            "markets": [
+                {
+                    "market": "Under 3.5",
+                    "meaning": "3 or fewer total goals",
+                    "confidence": 84,
+                    "raw_confidence": 84,
+                    "odds": 1.55,
+                    "ev": 0.08,
+                    "odds_source": "api_football",
+                    "eligible": True,
+                    "risk_flags": [],
+                    "insights": {
+                        "league_trust": {"status": "trusted"},
+                        "calibration_trust": {"status": "trusted"},
+                        "council_review": {
+                            "decision": "reject",
+                            "tier": "",
+                            "raw_confidence": 84,
+                            "final_confidence": 58,
+                            "consensus_score": 48,
+                            "disagreement_score": 42,
+                            "reasons": ["market_history_veto"],
+                        },
+                    },
+                }
+            ],
+        }
+
+        game = _game_summary_from_fixture(fixture, {}, request=None)
+
+        self.assertEqual(game["best_market"]["market"], "Under 3.5")
+        self.assertIsNone(game["recommended_market"])
+        self.assertFalse(game["best_market"]["recommended"])
+        self.assertIn("council_reject", game["best_market"]["recommendation_reasons"])
+
+    def test_all_games_recommendation_can_pass_with_council_approval(self):
+        fixture = {
+            "fixture": "Home vs Away",
+            "match_id": "13",
+            "markets": [
+                {
+                    "market": "Under 3.5",
+                    "meaning": "3 or fewer total goals",
+                    "confidence": 84,
+                    "raw_confidence": 84,
+                    "odds": 1.55,
+                    "ev": 0.08,
+                    "odds_source": "api_football",
+                    "eligible": True,
+                    "risk_flags": [],
+                    "insights": {
+                        "league_trust": {"status": "trusted"},
+                        "calibration_trust": {"status": "trusted"},
+                        "council_review": {
+                            "decision": "approve",
+                            "tier": "banker",
+                            "raw_confidence": 84,
+                            "final_confidence": 82,
+                            "consensus_score": 80,
+                            "disagreement_score": 12,
+                            "reasons": [],
+                        },
+                    },
+                }
+            ],
+        }
+
+        game = _game_summary_from_fixture(fixture, {}, request=None)
+
+        self.assertEqual(game["recommended_market"]["market"], "Under 3.5")
+        self.assertEqual(game["recommended_market"]["final_confidence"], 82)
+        self.assertEqual(game["recommended_market"]["council_review"]["decision"], "approve")
+
     def test_weak_confidence_band_blocks_publication(self):
         candidate = {
             "confidence": 72,

@@ -399,6 +399,61 @@ def _normalise_council_review(insights, fallback_confidence=None, fallback_tier=
     }
 
 
+def _setting_bool(name, default=False):
+    value = (getattr(settings, "GRIND_ALGO", {}) or {}).get(name)
+    if value is None:
+        return default
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _apply_council_recommendation_gate(payload):
+    assessment = assess_recommendation(payload)
+    review = payload.get("council_review") or {}
+    decision = review.get("decision")
+    council_tier = review.get("tier") or ""
+    council_reasons = [f"council:{reason}" for reason in review.get("reasons") or []]
+
+    if decision == "not_reviewed":
+        return assessment
+
+    reasons = list(assessment.get("recommendation_reasons") or [])
+    if decision == "reject" or not council_tier:
+        reasons.append(f"council_{decision or 'no_tier'}")
+        reasons.extend(council_reasons)
+        return {
+            **assessment,
+            "recommended": False,
+            "recommendation_status": "watchlist" if assessment.get("recommended") else assessment.get("recommendation_status", "no_edge"),
+            "recommendation_reasons": list(dict.fromkeys(reasons)),
+        }
+
+    if council_tier == Pick.Tier.WILD_CARD and not _setting_bool("ALGO_PUBLISH_WILD_CARDS", False):
+        reasons.append("council_wild_card_disabled")
+        reasons.extend(council_reasons)
+        return {
+            **assessment,
+            "recommended": False,
+            "recommendation_status": "watchlist",
+            "recommendation_reasons": list(dict.fromkeys(reasons)),
+        }
+
+    if not assessment.get("recommended"):
+        return {
+            **assessment,
+            "recommendation_reasons": list(dict.fromkeys([*reasons, *council_reasons])),
+        }
+
+    status = "strong" if council_tier == Pick.Tier.BANKER else "recommended"
+    if decision == "caution":
+        status = "watchlist" if council_tier == Pick.Tier.WILD_CARD else "recommended"
+    return {
+        **assessment,
+        "recommended": True,
+        "recommendation_status": status,
+        "recommendation_reasons": list(dict.fromkeys([*reasons, *council_reasons])),
+    }
+
+
 def _format_game_form_line(label, form):
     form = _recent_form_payload(form)
     games = int(form.get("games") or 0)
@@ -521,7 +576,7 @@ def _normalise_fixture_markets(item, picks_by_match):
             payload.setdefault("selected", False)
             payload.setdefault("selected_pick_id", None)
             payload.setdefault("selected_tier", "")
-        payload.update(assess_recommendation(payload))
+        payload.update(_apply_council_recommendation_gate(payload))
         payload["reasoning"] = _market_reasoning_for_game(payload, item)
         payload["model_verdict"] = _market_verdict_for_game(payload)
         payload["display_score"] = round(_market_display_score(payload)[0], 3)
