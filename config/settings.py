@@ -159,6 +159,7 @@ GRIND_ALGO = {
     "ALGO_MIN_EV": config("ALGO_MIN_EV", default="0.02"),
     "ALGO_MIN_MARKET_SAMPLE": config("ALGO_MIN_MARKET_SAMPLE", default="15"),
     "ALGO_MAX_DAILY_PICKS": config("ALGO_MAX_DAILY_PICKS", default="15"),
+    "ALGO_TOP_PICK_MIN_KICKOFF": config("ALGO_TOP_PICK_MIN_KICKOFF", default="09:00"),
     "ALGO_PUBLISH_MIN_CONFIDENCE": config("ALGO_PUBLISH_MIN_CONFIDENCE", default="70"),
     "ALGO_PUBLISH_MIN_EV": config("ALGO_PUBLISH_MIN_EV", default="0.03"),
     "ALGO_PUBLISH_WILD_CARDS": config("ALGO_PUBLISH_WILD_CARDS", default="False"),

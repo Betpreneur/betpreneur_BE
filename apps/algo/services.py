@@ -1,6 +1,7 @@
 import os
 import json
 import gc
+import re
 from collections import defaultdict
 from contextlib import contextmanager
 from datetime import timedelta
@@ -71,6 +72,31 @@ class AlgoRunnerService:
             return int(value)
         except (TypeError, ValueError):
             return default
+
+    def _top_pick_min_kickoff_minutes(self):
+        raw = str(self._runner_env().get("ALGO_TOP_PICK_MIN_KICKOFF", "09:00") or "09:00").strip()
+        match = re.search(r"(\d{1,2})(?::(\d{2}))?", raw)
+        if not match:
+            return 9 * 60
+        hour = max(0, min(23, int(match.group(1))))
+        minute = max(0, min(59, int(match.group(2) or 0)))
+        return hour * 60 + minute
+
+    def _prediction_kickoff_minutes(self, prediction):
+        match = re.search(r"(\d{1,2}):(\d{2})", str(prediction.kickoff or ""))
+        if not match:
+            return None
+        hour = int(match.group(1))
+        minute = int(match.group(2))
+        if not (0 <= hour <= 23 and 0 <= minute <= 59):
+            return None
+        return hour * 60 + minute
+
+    def _is_top_pick_time_allowed(self, prediction):
+        kickoff_minutes = self._prediction_kickoff_minutes(prediction)
+        if kickoff_minutes is None:
+            return True
+        return kickoff_minutes >= self._top_pick_min_kickoff_minutes()
 
     def _limit_fixtures(self, fixtures):
         try:
@@ -504,6 +530,8 @@ class AlgoRunnerService:
 
         def add_prediction(prediction):
             if prediction.match_id in used_matches:
+                return False
+            if not self._is_top_pick_time_allowed(prediction):
                 return False
             candidate = self._recommendation_candidate(prediction, performance)
             if not assess_recommendation(candidate)["recommended"]:

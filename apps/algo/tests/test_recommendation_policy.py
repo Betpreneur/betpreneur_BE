@@ -13,6 +13,7 @@ from apps.algo.views import _game_summary_from_fixture
 
 STRICT_SETTINGS = {
     "ALGO_MAX_DAILY_PICKS": "15",
+    "ALGO_TOP_PICK_MIN_KICKOFF": "09:00",
     "ALGO_PUBLISH_MIN_CONFIDENCE": "70",
     "ALGO_PUBLISH_MIN_EV": "0.03",
     "ALGO_PUBLISH_WILD_CARDS": "False",
@@ -33,12 +34,13 @@ class RecommendationPolicyTests(TestCase):
         self.run = AlgoRun.objects.create(target_date=date(2026, 6, 4))
         self.service = AlgoRunnerService()
 
-    def prediction(self, *, match_id, confidence, ev, eligible=True, risk_flags=None, insights=None):
+    def prediction(self, *, match_id, confidence, ev, eligible=True, risk_flags=None, insights=None, kickoff="12:00 WAT"):
         return MarketPrediction.objects.create(
             run=self.run,
             match_date=self.run.target_date,
             fixture=f"Home {match_id} vs Away {match_id}",
             match_id=match_id,
+            kickoff=kickoff,
             market="Under 3.5",
             confidence=confidence,
             raw_confidence=confidence,
@@ -47,6 +49,28 @@ class RecommendationPolicyTests(TestCase):
             odds_source="api_football",
             eligible=eligible,
             risk_flags=risk_flags or [],
+            home_recent_form={
+                "games": 8,
+                "draws": 2,
+                "avg_scored": 1.1,
+                "avg_conceded": 1.0,
+                "over25_rate": 37.5,
+            },
+            away_recent_form={
+                "games": 8,
+                "draws": 2,
+                "avg_scored": 0.9,
+                "avg_conceded": 1.1,
+                "over25_rate": 37.5,
+            },
+            fixture_context={
+                "country": "England",
+                "league": "Test League",
+                "goal_model": {
+                    "expected_total": 2.4,
+                    "draw_confidence": 24,
+                },
+            },
             insights=insights or {
                 "league_trust": {
                     "status": "trusted",
@@ -82,6 +106,14 @@ class RecommendationPolicyTests(TestCase):
         self.assertEqual(selected[Pick.Tier.BANKER], [qualified.id])
         self.assertEqual(selected[Pick.Tier.VALUE_GEM], [])
         self.assertEqual(selected[Pick.Tier.WILD_CARD], [])
+
+    def test_top_picks_skip_games_before_morning_window(self):
+        self.prediction(match_id="early", confidence=90, ev="0.150", kickoff="01:00 WAT")
+        morning = self.prediction(match_id="morning", confidence=82, ev="0.090", kickoff="09:00 WAT")
+
+        selected = self.service._select_prediction_ids(self.run)
+
+        self.assertEqual(selected[Pick.Tier.BANKER], [morning.id])
 
     def test_previously_blocked_country_or_league_can_be_recommended(self):
         japan_candidate = {
