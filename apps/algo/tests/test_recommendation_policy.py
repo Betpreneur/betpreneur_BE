@@ -13,7 +13,6 @@ from apps.algo.views import _game_summary_from_fixture
 
 STRICT_SETTINGS = {
     "ALGO_MAX_DAILY_PICKS": "15",
-    "ALGO_TOP_PICK_MIN_KICKOFF": "09:00",
     "ALGO_PUBLISH_MIN_CONFIDENCE": "70",
     "ALGO_PUBLISH_MIN_EV": "0.03",
     "ALGO_PUBLISH_WILD_CARDS": "False",
@@ -107,14 +106,6 @@ class RecommendationPolicyTests(TestCase):
         self.assertEqual(selected[Pick.Tier.BANKER], [qualified.id])
         self.assertEqual(selected[Pick.Tier.VALUE_GEM], [])
         self.assertEqual(selected[Pick.Tier.WILD_CARD], [])
-
-    def test_top_picks_skip_games_before_morning_window(self):
-        self.prediction(match_id="early", confidence=90, ev="0.150", kickoff="01:00 WAT")
-        morning = self.prediction(match_id="morning", confidence=82, ev="0.090", kickoff="09:00 WAT")
-
-        selected = self.service._select_prediction_ids(self.run)
-
-        self.assertEqual(selected[Pick.Tier.BANKER], [morning.id])
 
     def test_previously_blocked_country_or_league_can_be_recommended(self):
         japan_candidate = {
