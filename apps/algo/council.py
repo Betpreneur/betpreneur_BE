@@ -24,6 +24,8 @@ MEDIUM_RISK_FLAGS = {
     "best_price_far_above_consensus",
     "draw_boundary_risk",
     "goal_line_boundary",
+    "h2h_draw_pressure",
+    "h2h_tight_draw_warning",
     "market_recent_low_hit_rate",
     "strategy_cooling",
     "team_news_unavailable",
@@ -146,8 +148,12 @@ def market_fit_reviewer(candidate):
     context = candidate.get("fixture_context") or {}
     corner_profile = candidate.get("corner_profile") or {}
     goal_model = context.get("goal_model") or {}
+    h2h = context.get("h2h") or {}
     expected_total = _float(goal_model.get("expected_total"))
     draw_confidence = _float(goal_model.get("draw_confidence"))
+    h2h_games = int(h2h.get("games") or 0)
+    h2h_draw_rate = _float(h2h.get("draws")) / h2h_games if h2h_games else 0.0
+    h2h_avg_goals = _float(h2h.get("avg_goals"))
     home_games = int(home.get("games") or 0)
     away_games = int(away.get("games") or 0)
     home_draw_rate = _form_rate(home, "draws")
@@ -157,6 +163,7 @@ def market_fit_reviewer(candidate):
     avg_goal_load = mean([_team_goal_average(home), _team_goal_average(away)])
     score = 58
     reasons = []
+    fixture_veto = False
 
     if min(home_games, away_games) < 5:
         score -= 8
@@ -182,6 +189,24 @@ def market_fit_reviewer(candidate):
         if expected_total and expected_total < 2.0:
             score -= 12
             reasons.append("tight_goal_profile_against_dc12")
+        if h2h_games >= 6:
+            if h2h_draw_rate >= 0.35:
+                score -= 24
+                reasons.append("h2h_draw_pressure_against_dc12")
+                if h2h_avg_goals and h2h_avg_goals <= 1.7:
+                    fixture_veto = True
+            elif h2h_draw_rate >= 0.22:
+                score -= 10
+                reasons.append("h2h_draw_warning_against_dc12")
+            elif h2h_draw_rate <= 0.12:
+                score += 6
+                reasons.append("low_h2h_draw_tendency")
+            if h2h_avg_goals and h2h_avg_goals <= 1.7:
+                score -= 12
+                reasons.append("low_h2h_goal_profile_against_dc12")
+            elif h2h_avg_goals and h2h_avg_goals <= 2.15 and h2h_draw_rate >= 0.2:
+                score -= 6
+                reasons.append("tight_h2h_profile_against_dc12")
 
     elif market.startswith("Under"):
         line = _corner_line(market)
@@ -276,7 +301,7 @@ def market_fit_reviewer(candidate):
     elif score < 55:
         reasons.append("weak_fixture_market_fit")
 
-    return _review("market_fit", score, reasons, veto=score < 45)
+    return _review("market_fit", score, reasons, veto=fixture_veto or score < 45)
 
 
 def league_market_reviewer(candidate):

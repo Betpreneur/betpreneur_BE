@@ -152,6 +152,7 @@ def assess_calibration_trust(band_stats=None):
 
 
 def assess_recommendation(candidate):
+    market = str(_value(candidate, "market", "") or "")
     confidence = float(_value(candidate, "confidence", 0) or 0)
     ev = _value(candidate, "ev")
     ev = float(ev) if ev is not None else None
@@ -174,8 +175,11 @@ def assess_recommendation(candidate):
     calibration_confidence_extra = _float_setting("ALGO_CALIBRATION_CONFIDENCE_EXTRA", 3)
     calibration_ev_extra = _float_setting("ALGO_CALIBRATION_EV_EXTRA", 0.02)
     allow_wild_cards = _bool_setting("ALGO_PUBLISH_WILD_CARDS", False)
+    publish_dc12 = _bool_setting("ALGO_PUBLISH_DC12", False)
 
     reasons = []
+    if market == "DC: 12" and not publish_dc12:
+        reasons.append("dc12_publication_paused")
     if country and country in BLOCKED_PICK_COUNTRIES:
         reasons.append("blocked_country")
     if league and any(item in league for item in BLOCKED_PICK_LEAGUES):

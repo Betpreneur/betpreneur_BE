@@ -916,6 +916,7 @@ def score_fixture(hf, af, h2h, real_odds, api_preds=None, corner_profile=None, f
     h2w  = h2h.get("t1w",0)/h2h_games
     h2aw = h2h.get("t2w",0)/h2h_games
     h2d  = h2h.get("draws",0)/h2h_games
+    h2h_avg_goals = float(h2h.get("avg_goals") or 0)
     o25r = h2h.get("o25",0)/h2h_games
     h2h_available = g >= 2
     knockout_mode = bool(context_flags & {"continental_knockout", "cup_or_knockout"})
@@ -1040,8 +1041,15 @@ def score_fixture(hf, af, h2h, real_odds, api_preds=None, corner_profile=None, f
     recent_draw_conf = round(((h_draw_rate + a_draw_rate) / 2) * 100)
     if knockout_mode and h2h_available:
         recent_draw_conf = round(recent_draw_conf * 0.45 + (h2d * 100) * 0.55)
+    elif g >= 6:
+        h2h_draw_weight = 0.35 if h2d >= 0.22 else 0.20
+        recent_draw_conf = round(recent_draw_conf * (1 - h2h_draw_weight) + (h2d * 100) * h2h_draw_weight)
     residual_draw_conf = max(5, 100 - hc - ac)
     draw_conf = max(5, min(45, round(residual_draw_conf * 0.65 + recent_draw_conf * 0.35)))
+    if g >= 6 and h2d >= 0.35:
+        draw_conf = max(draw_conf, min(45, round(h2d * 100)))
+    elif g >= 6 and h2d >= 0.22 and h2h_avg_goals and h2h_avg_goals <= 2.15:
+        draw_conf = max(draw_conf, min(45, round((h2d * 100) + 5)))
     dc12 = min(82, max(5, 100 - draw_conf))
 
     def blend_conf(m,o):
@@ -1088,6 +1096,11 @@ def score_fixture(hf, af, h2h, real_odds, api_preds=None, corner_profile=None, f
         scores["Under 3.5"] = min(scores["Under 3.5"], 59)
     if draw_conf >= algo_high_draw_risk_confidence():
         scores["DC: 12"] = min(scores["DC: 12"], 59)
+    if g >= 6:
+        if h2d >= 0.35:
+            scores["DC: 12"] = min(scores["DC: 12"], 58)
+        elif h2d >= 0.22 and h2h_avg_goals and h2h_avg_goals <= 2.15:
+            scores["DC: 12"] = min(scores["DC: 12"], 62)
     if knockout_mode:
         h2_u25 = h2h.get("u25", 0) / h2h_games * 100
         h2_u35 = h2h.get("u35", 0) / h2h_games * 100
@@ -1588,6 +1601,15 @@ def candidate_risk_flags(raw_conf, conf, market, odds, odds_is_real, ev, profile
         flags.append("below_dc12_value_threshold")
     if market == "DC: 12" and float(goal_model.get("draw_confidence") or 0) >= algo_high_draw_risk_confidence():
         flags.append("draw_boundary_risk")
+    if market == "DC: 12":
+        h2h = fixture_context.get("h2h") or {}
+        h2h_games = int(h2h.get("games") or 0)
+        h2h_draw_rate = (int(h2h.get("draws") or 0) / h2h_games) if h2h_games else 0
+        h2h_avg_goals = float(h2h.get("avg_goals") or 0)
+        if h2h_games >= 6 and h2h_draw_rate >= 0.35:
+            flags.append("h2h_draw_pressure")
+        elif h2h_games >= 6 and h2h_draw_rate >= 0.22 and h2h_avg_goals and h2h_avg_goals <= 2.15:
+            flags.append("h2h_tight_draw_warning")
     if (odds_meta.get("bookmaker_count") or 0) >= 3:
         if float(odds_meta.get("spread_pct") or 0) >= 18:
             flags.append("wide_odds_market")

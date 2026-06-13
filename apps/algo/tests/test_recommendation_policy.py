@@ -17,6 +17,7 @@ STRICT_SETTINGS = {
     "ALGO_PUBLISH_MIN_CONFIDENCE": "70",
     "ALGO_PUBLISH_MIN_EV": "0.03",
     "ALGO_PUBLISH_WILD_CARDS": "False",
+    "ALGO_PUBLISH_DC12": "False",
     "ALGO_LEAGUE_MARKET_MIN_SAMPLE": "8",
     "ALGO_PROBATION_CONFIDENCE_EXTRA": "5",
     "ALGO_PROBATION_EV_EXTRA": "0.03",
@@ -143,6 +144,25 @@ class RecommendationPolicyTests(TestCase):
         self.assertTrue(league_assessment["recommended"])
         self.assertNotIn("blocked_league", league_assessment["recommendation_reasons"])
 
+    def test_dc12_publication_is_paused_by_default(self):
+        candidate = {
+            "market": "DC: 12",
+            "confidence": 86,
+            "ev": 0.10,
+            "odds_source": "api_football",
+            "eligible": True,
+            "risk_flags": [],
+            "insights": {
+                "league_trust": {"status": "trusted"},
+                "calibration_trust": {"status": "trusted"},
+            },
+        }
+
+        assessment = assess_recommendation(candidate)
+
+        self.assertFalse(assessment["recommended"])
+        self.assertIn("dc12_publication_paused", assessment["recommendation_reasons"])
+
     def test_council_review_approves_strong_aligned_candidate(self):
         review = council_review({
             "market": "Under 3.5",
@@ -237,6 +257,59 @@ class RecommendationPolicyTests(TestCase):
 
         self.assertEqual(review["decision"], "reject")
         self.assertIn("weak_fixture_market_fit", review["reasons"])
+
+    def test_h2h_draw_pressure_rejects_dc12(self):
+        review = council_review({
+            "market": "DC: 12",
+            "confidence": 85,
+            "ev": 0.09,
+            "odds_source": "api_football",
+            "odds_meta": {"bookmaker_count": 4},
+            "risk_flags": [],
+            "home_recent_form": {
+                "games": 8,
+                "draws": 1,
+                "avg_scored": 1.4,
+                "avg_conceded": 1.0,
+            },
+            "away_recent_form": {
+                "games": 8,
+                "draws": 1,
+                "avg_scored": 1.3,
+                "avg_conceded": 1.1,
+            },
+            "fixture_context": {
+                "goal_model": {
+                    "expected_total": 2.4,
+                    "draw_confidence": 24,
+                },
+                "h2h": {
+                    "games": 10,
+                    "t1w": 1,
+                    "draws": 4,
+                    "t2w": 5,
+                    "avg_goals": 1.4,
+                },
+            },
+            "insights": {
+                "league_trust": {
+                    "status": "trusted",
+                    "league_hit_rate": 66,
+                    "league_roi": 5,
+                    "market_hit_rate": 80,
+                    "market_roi": 8,
+                    "market_sample": 40,
+                },
+                "calibration_trust": {
+                    "status": "trusted",
+                    "hit_rate": 80,
+                    "avg_confidence": 82,
+                },
+            },
+        })
+
+        self.assertEqual(review["decision"], "reject")
+        self.assertIn("h2h_draw_pressure_against_dc12", review["reasons"])
 
     def test_exceptional_fixture_fit_can_lift_restricted_market(self):
         candidate = {
