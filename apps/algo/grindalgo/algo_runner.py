@@ -190,7 +190,6 @@ APS_TRACKED_LEAGUES = {
     307: "Pro League",
     311: "1st Division",
     328: "Esiliiga A",
-    330: "Premier League",
     342: "Premier League",
     345: "Czech Liga",
     346: "FNL",
