@@ -433,6 +433,12 @@ class AlgoRunnerService:
                     return 0.0
         return 0.0
 
+    def _bounded_ev_score(self, ev):
+        try:
+            return max(-12.0, min(14.0, float(ev) * 35.0))
+        except (TypeError, ValueError):
+            return -12.0
+
     def _prediction_rank(self, prediction):
         ev = float(prediction.ev or 0)
         odds = float(prediction.odds or 0)
@@ -445,14 +451,25 @@ class AlgoRunnerService:
         value_score = self._prediction_reviewer_score(prediction, "value") or consensus
         decision = str(review.get("decision") or "")
         decision_score = {"approve": 2, "caution": 1, "reject": -2}.get(decision, 0)
+        risk_flags = set(prediction.risk_flags or [])
         council_score = (
             consensus * 0.34
             + market_fit * 0.26
             + final_confidence * 0.22
             + value_score * 0.10
-            + ev * 100.0
+            + self._bounded_ev_score(ev)
             - disagreement * 0.45
         )
+        if decision == "reject":
+            council_score -= 70.0
+        if "market_suppressed" in risk_flags or "strategy_suppressed" in risk_flags:
+            council_score -= 35.0
+        if "market_loss_streak" in risk_flags or "market_recent_losses" in risk_flags:
+            council_score -= 22.0
+        if "best_price_far_above_consensus" in risk_flags:
+            council_score -= 18.0
+        if "wide_odds_market" in risk_flags:
+            council_score -= 12.0
         return (
             decision_score,
             council_score,

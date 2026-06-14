@@ -303,6 +303,27 @@ def _market_reviewer_score(market, reviewer_name):
     return 0.0
 
 
+def _bounded_ev_score(ev):
+    if ev is None:
+        return -12.0
+    try:
+        return max(-12.0, min(14.0, float(ev) * 35.0))
+    except (TypeError, ValueError):
+        return -12.0
+
+
+def _market_decision_rank(market):
+    decision = str((market.get("council_review") or {}).get("decision") or "")
+    if market.get("recommended"):
+        return 4
+    return {
+        "approve": 3,
+        "caution": 2,
+        "not_reviewed": 1,
+        "reject": 0,
+    }.get(decision, 1)
+
+
 def _market_display_score(market):
     review = market.get("council_review") or {}
     decision = str(review.get("decision") or "")
@@ -313,7 +334,7 @@ def _market_display_score(market):
     market_fit = _market_reviewer_score(market, "market_fit") or consensus
     value_score = _market_reviewer_score(market, "value") or consensus
     ev = market.get("ev")
-    ev_score = float(ev) * 100.0 if ev is not None else -12.0
+    ev_score = _bounded_ev_score(ev)
     odds = float(market.get("odds") or 0)
     score = (
         consensus * 0.34
@@ -332,7 +353,7 @@ def _market_display_score(market):
     elif decision == "caution":
         score += 3.0
     elif decision == "reject":
-        score -= 30.0
+        score -= 70.0
 
     if market.get("market") == "DC: 12":
         if _market_publicly_paused("DC: 12"):
@@ -344,6 +365,14 @@ def _market_display_score(market):
         score -= 3.0
     if "goal_line_boundary" in risk_flags:
         score -= 4.0
+    if "market_suppressed" in risk_flags or "strategy_suppressed" in risk_flags:
+        score -= 35.0
+    if "market_loss_streak" in risk_flags or "market_recent_losses" in risk_flags:
+        score -= 22.0
+    if "best_price_far_above_consensus" in risk_flags:
+        score -= 18.0
+    if "wide_odds_market" in risk_flags:
+        score -= 12.0
     if "market_cooling" in risk_flags or "strategy_cooling" in risk_flags:
         score -= 3.0
     if "market_recovered" in risk_flags or "strategy_promoted" in risk_flags:
@@ -358,6 +387,7 @@ def _game_market_rank(market):
         1 if market.get("selected") else 0,
         1 if market.get("recommended") else 0,
         0 if market.get("publicly_paused") else 1,
+        _market_decision_rank(market),
         *_market_display_score(market),
     )
 

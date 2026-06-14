@@ -624,6 +624,81 @@ class RecommendationPolicyTests(TestCase):
         self.assertEqual(game["best_market"]["market"], "Under 3.5")
         self.assertGreater(game["best_market"]["display_score"], over_market["display_score"])
 
+    def test_best_market_does_not_chase_rejected_longshot_ev(self):
+        fixture = {
+            "fixture": "Germany vs Curacao",
+            "match_id": "10d",
+            "markets": [
+                {
+                    "market": "Away Win",
+                    "meaning": "Away team to win",
+                    "confidence": 19,
+                    "raw_confidence": 19,
+                    "final_confidence": 18,
+                    "odds": 56.0,
+                    "ev": 9.64,
+                    "odds_source": "api_football",
+                    "eligible": False,
+                    "risk_flags": [
+                        "market_suppressed",
+                        "strategy_suppressed",
+                        "market_loss_streak",
+                        "market_recent_losses",
+                        "wide_odds_market",
+                        "best_price_far_above_consensus",
+                    ],
+                    "insights": {
+                        "council_review": {
+                            "decision": "reject",
+                            "tier": "",
+                            "raw_confidence": 19,
+                            "final_confidence": 18,
+                            "consensus_score": 41,
+                            "disagreement_score": 72,
+                            "reasons": ["weak_fixture_market_fit"],
+                            "reviewers": [
+                                {"reviewer": "market_fit", "score": 44},
+                                {"reviewer": "value", "score": 72},
+                            ],
+                        },
+                    },
+                },
+                {
+                    "market": "Under 3.5",
+                    "meaning": "3 or fewer total goals",
+                    "confidence": 59,
+                    "raw_confidence": 59,
+                    "final_confidence": 58,
+                    "odds": 2.10,
+                    "ev": 0.06,
+                    "odds_source": "api_football",
+                    "eligible": False,
+                    "risk_flags": ["below_market_threshold"],
+                    "insights": {
+                        "council_review": {
+                            "decision": "caution",
+                            "tier": "wild_card",
+                            "raw_confidence": 59,
+                            "final_confidence": 58,
+                            "consensus_score": 63,
+                            "disagreement_score": 20,
+                            "reasons": ["controlled_goal_projection"],
+                            "reviewers": [
+                                {"reviewer": "market_fit", "score": 72},
+                                {"reviewer": "value", "score": 66},
+                            ],
+                        },
+                    },
+                },
+            ],
+        }
+
+        game = _game_summary_from_fixture(fixture, {}, request=None, include_markets=True)
+        longshot = next(market for market in game["markets"] if market["market"] == "Away Win")
+
+        self.assertEqual(game["best_market"]["market"], "Under 3.5")
+        self.assertLess(longshot["display_score"], game["best_market"]["display_score"])
+
     def test_probation_league_market_needs_extra_edge(self):
         fixture = {
             "fixture": "Home vs Away",
