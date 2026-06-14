@@ -1991,6 +1991,45 @@ def _official_pick_from_back(back, fixture=None):
     }
 
 
+def _backed_market_payload(back, fixture=None):
+    backed_pick = _official_pick_from_back(back, fixture) or {}
+    snapshot = dict(back.market_snapshot or {})
+    return {
+        **backed_pick,
+        "back_id": back.id,
+        "match_id": back.match_id,
+        "match_date": back.match_date or (fixture.match_date if fixture else None),
+        "fixture": fixture.fixture if fixture else backed_pick.get("fixture", ""),
+        "home_team": fixture.home_team if fixture else backed_pick.get("home_team", ""),
+        "away_team": fixture.away_team if fixture else backed_pick.get("away_team", ""),
+        "home_logo": fixture.home_logo if fixture else "",
+        "away_logo": fixture.away_logo if fixture else "",
+        "league": fixture.league if fixture else backed_pick.get("league", ""),
+        "league_logo": fixture.league_logo if fixture else "",
+        "country": fixture.country if fixture else "",
+        "country_flag": fixture.country_flag if fixture else "",
+        "kickoff": fixture.kickoff if fixture else backed_pick.get("kickoff", ""),
+        "market": back.market or backed_pick.get("market", ""),
+        "meaning": back.meaning or backed_pick.get("meaning", ""),
+        "odds": str(back.odds) if back.odds is not None else backed_pick.get("odds"),
+        "ev": str(back.ev) if back.ev is not None else backed_pick.get("ev"),
+        "confidence": back.confidence if back.confidence is not None else backed_pick.get("confidence"),
+        "final_confidence": back.final_confidence if back.final_confidence is not None else backed_pick.get("final_confidence"),
+        "risk_flags": snapshot.get("risk_flags") or backed_pick.get("risk_flags") or [],
+        "reasoning": snapshot.get("reasoning") or backed_pick.get("reasoning", ""),
+        "model_verdict": snapshot.get("model_verdict") or backed_pick.get("model_verdict", ""),
+        "council_review": snapshot.get("council_review") or backed_pick.get("council_review") or {},
+        "recommendation_status": snapshot.get("recommendation_status", ""),
+        "backed": True,
+        "backed_by_me": True,
+        "backed_market": back.market,
+        "backed_selection": snapshot,
+        "backed_count": _back_count(back.match_id, back.market),
+        "market_backed_count": _back_count(back.match_id, back.market),
+        "created_at": back.created_at,
+    }
+
+
 def _backed_games_payload(request, target_date=None):
     backs = GameBack.objects.select_related("fixture", "fixture__run").filter(user=request.user)
     if target_date:
@@ -2001,39 +2040,9 @@ def _backed_games_payload(request, target_date=None):
     for back in backs:
         fixture = back.fixture or _latest_fixture_for_match(back.match_id, back.match_date)
         if not fixture:
-            backed_pick = _official_pick_from_back(back)
-            games.append({
-                "match_id": back.match_id,
-                "match_date": back.match_date,
-                "backed_market": back.market,
-                "backed_selection": back.market_snapshot or {},
-                "official_pick": backed_pick,
-                "official_picks": [backed_pick] if backed_pick else [],
-                "official_pick_count": 1 if backed_pick else 0,
-                "backed_official_pick": backed_pick,
-                "backed": True,
-                "backed_by_me": True,
-                "backed_count": _back_count(back.match_id),
-                "market_backed_count": _back_count(back.match_id, back.market),
-            })
+            games.append(_backed_market_payload(back))
             continue
-        summaries = _fixture_summaries_for_run(fixture.run)
-        item = next(
-            (summary for summary in summaries if str(summary.get("match_id") or "") == str(back.match_id)),
-            None,
-        )
-        if item:
-            summary = _game_summary_from_fixture(item, _picks_by_match(fixture.run), request=request, include_markets=True)
-            backed_pick = _official_pick_from_back(back, fixture)
-            summary["backed_market"] = back.market
-            summary["backed_selection"] = back.market_snapshot or {}
-            summary["market_backed_count"] = _back_count(back.match_id, back.market)
-            if backed_pick:
-                summary["official_pick"] = backed_pick
-                summary["official_picks"] = [backed_pick]
-                summary["official_pick_count"] = 1
-                summary["backed_official_pick"] = backed_pick
-            games.append(summary)
+        games.append(_backed_market_payload(back, fixture))
     return games
 
 
@@ -2273,9 +2282,9 @@ class BackedGamesView(APIView):
         operation_id="algo_games_backed_list",
         summary="List user backed games",
         description=(
-            "Authenticated user endpoint. Returns games/markets backed by the current user, with optional match date filtering. "
-            "For this endpoint, official_pick is intentionally set to the user's backed market selection so existing frontend pick cards can render it directly. "
-            "The same object is also available as backed_official_pick and the raw market snapshot is available as backed_selection."
+            "Authenticated user endpoint. Returns compact backed-market items for the current user, with optional match date filtering. "
+            "Each item is the exact market the user backed, including fixture metadata and the saved market snapshot. "
+            "This endpoint does not return the full game analysis or all markets."
         ),
         tags=["Games"],
         parameters=[BackedPicksQuerySerializer],
