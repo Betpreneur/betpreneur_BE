@@ -384,7 +384,8 @@ def _default_form():
     return {"wins":3,"draws":2,"losses":3,"form":"",
             "avg_scored":1.4,"avg_conceded":1.2,
             "btts_count":4,"over25_count":3,"clean_sheets":2,
-            "games":8,"scope":"overall","last_played":"","streak":0,"attack_str":0.5,"defence_str":0.5}
+            "games":10,"scope":"overall","last_played":"","streak":0,"attack_str":0.5,"defence_str":0.5,
+            "scoreline_profile":_scoreline_profile([])}
 
 def _percent_to_ratio(value, default=0.5):
     try:
@@ -412,6 +413,45 @@ def _result_code_for_team(match, team_id):
     if scored < conceded:
         return "L"
     return "D"
+
+def _scoreline_profile(samples):
+    samples = samples or []
+    games = len(samples)
+    if not games:
+        return {
+            "games": 0,
+            "scores": [],
+            "low_total_rate": 0.0,
+            "high_total_rate": 0.0,
+            "btts_rate": 0.0,
+            "draw_rate": 0.0,
+            "one_goal_margin_rate": 0.0,
+            "nil_nil_count": 0,
+            "one_one_count": 0,
+            "common_scores": [],
+        }
+    score_counts = {}
+    for item in samples:
+        score = f"{int(item.get('scored') or 0)}-{int(item.get('conceded') or 0)}"
+        score_counts[score] = score_counts.get(score, 0) + 1
+    return {
+        "games": games,
+        "scores": [
+            f"{int(item.get('scored') or 0)}-{int(item.get('conceded') or 0)}"
+            for item in samples[:8]
+        ],
+        "low_total_rate": round(sum(1 for item in samples if (item.get("scored", 0) + item.get("conceded", 0)) <= 2) / games * 100, 1),
+        "high_total_rate": round(sum(1 for item in samples if (item.get("scored", 0) + item.get("conceded", 0)) >= 3) / games * 100, 1),
+        "btts_rate": round(sum(1 for item in samples if item.get("scored", 0) > 0 and item.get("conceded", 0) > 0) / games * 100, 1),
+        "draw_rate": round(sum(1 for item in samples if item.get("scored") == item.get("conceded")) / games * 100, 1),
+        "one_goal_margin_rate": round(sum(1 for item in samples if abs((item.get("scored", 0) or 0) - (item.get("conceded", 0) or 0)) == 1) / games * 100, 1),
+        "nil_nil_count": score_counts.get("0-0", 0),
+        "one_one_count": score_counts.get("1-1", 0),
+        "common_scores": [
+            {"score": score, "count": count}
+            for score, count in sorted(score_counts.items(), key=lambda item: (-item[1], item[0]))[:3]
+        ],
+    }
 
 def fetch_team_recent_form(team_id, lookback=8, venue=None):
     if not team_id:
@@ -494,6 +534,7 @@ def fetch_team_recent_form(team_id, lookback=8, venue=None):
         "streak": streak,
         "attack_str": 0.5,
         "defence_str": 0.5,
+        "scoreline_profile": _scoreline_profile(samples),
     }
     _form_cache[cache_key] = form
     return form
@@ -539,12 +580,14 @@ def map_aps_to_form(team_pred, comp_side):
             "avg_scored":avg_scored,"avg_conceded":avg_conceded,
             "btts_count":btts_count,"over25_count":over25_count,
             "clean_sheets":clean_sheets,"games":games,"scope":"overall","last_played":"","streak":streak,
-            "attack_str":attack_str,"defence_str":defence_str}
+            "attack_str":attack_str,"defence_str":defence_str,
+            "scoreline_profile":_scoreline_profile([])}
 
 def parse_aps_h2h(h2h_list, hname):
     if not h2h_list:
-        return {"games":0,"t1w":0,"t2w":0,"draws":0,"o25":0,"u25":0,"u35":0,"btts":0,"avg_goals":0.0}
+        return {"games":0,"t1w":0,"t2w":0,"draws":0,"o25":0,"u25":0,"u35":0,"btts":0,"avg_goals":0.0,"scoreline_profile":_scoreline_profile([])}
     games=t1w=t2w=draws=o25=u25=u35=btts=goals_total=0
+    score_samples = []
     for m in h2h_list:
         try:
             hg = m.get("goals",{}).get("home")
@@ -554,6 +597,9 @@ def parse_aps_h2h(h2h_list, hname):
             games+=1
             total = hg + ag
             goals_total += total
+            t1_scored = hg if fuzzy(hname, mh) else ag
+            t1_conceded = ag if fuzzy(hname, mh) else hg
+            score_samples.append({"scored": t1_scored, "conceded": t1_conceded})
             if total>2: o25+=1
             if total<3: u25+=1
             if total<4: u35+=1
@@ -571,7 +617,7 @@ def parse_aps_h2h(h2h_list, hname):
                 t2w += 1
         except Exception: continue
     if not games:
-        return {"games":0,"t1w":0,"t2w":0,"draws":0,"o25":0,"u25":0,"u35":0,"btts":0,"avg_goals":0.0}
+        return {"games":0,"t1w":0,"t2w":0,"draws":0,"o25":0,"u25":0,"u35":0,"btts":0,"avg_goals":0.0,"scoreline_profile":_scoreline_profile([])}
     return {
         "games":games,
         "t1w":t1w,
@@ -582,6 +628,7 @@ def parse_aps_h2h(h2h_list, hname):
         "u35":u35,
         "btts":btts,
         "avg_goals":round(goals_total/games, 2),
+        "scoreline_profile":_scoreline_profile(score_samples),
     }
 
 # ── FIXTURE CONTEXT / TEAM NEWS / LEAGUE STRENGTH ────────────────
@@ -639,6 +686,65 @@ def apply_league_strength(form, strength):
     form["avg_conceded"] = round(float(form.get("avg_conceded") or 0) / max(strength, 0.75), 2)
     form["league_strength"] = round(strength, 2)
     return form
+
+def build_matchup_scoreline_profile(home_form=None, away_form=None, h2h=None):
+    home_profile = (home_form or {}).get("scoreline_profile") or {}
+    away_profile = (away_form or {}).get("scoreline_profile") or {}
+    h2h_profile = (h2h or {}).get("scoreline_profile") or {}
+    home_games = int(home_profile.get("games") or 0)
+    away_games = int(away_profile.get("games") or 0)
+    h2h_games = int(h2h_profile.get("games") or 0)
+    combined_games = home_games + away_games
+
+    def weighted_average(items):
+        total_weight = sum(weight for _, weight in items)
+        if not total_weight:
+            return 0.0
+        return round(sum(float(value or 0) * weight for value, weight in items) / total_weight, 1)
+
+    profile = {
+        "home": home_profile,
+        "away": away_profile,
+        "h2h": h2h_profile,
+        "games": combined_games,
+        "low_total_rate": weighted_average([
+            (home_profile.get("low_total_rate"), home_games),
+            (away_profile.get("low_total_rate"), away_games),
+        ]),
+        "high_total_rate": weighted_average([
+            (home_profile.get("high_total_rate"), home_games),
+            (away_profile.get("high_total_rate"), away_games),
+        ]),
+        "btts_rate": weighted_average([
+            (home_profile.get("btts_rate"), home_games),
+            (away_profile.get("btts_rate"), away_games),
+        ]),
+        "draw_rate": weighted_average([
+            (home_profile.get("draw_rate"), home_games),
+            (away_profile.get("draw_rate"), away_games),
+        ]),
+        "one_goal_margin_rate": weighted_average([
+            (home_profile.get("one_goal_margin_rate"), home_games),
+            (away_profile.get("one_goal_margin_rate"), away_games),
+        ]),
+        "h2h_games": h2h_games,
+        "h2h_low_total_rate": h2h_profile.get("low_total_rate", 0.0),
+        "h2h_btts_rate": h2h_profile.get("btts_rate", 0.0),
+        "h2h_draw_rate": h2h_profile.get("draw_rate", 0.0),
+        "h2h_common_scores": h2h_profile.get("common_scores", []),
+    }
+    profile["low_score_cluster"] = profile["low_total_rate"] >= 62 or (
+        h2h_games >= 4 and float(profile["h2h_low_total_rate"] or 0) >= 62
+    )
+    profile["high_score_cluster"] = profile["high_total_rate"] >= 58 and not profile["low_score_cluster"]
+    profile["draw_cluster"] = profile["draw_rate"] >= 30 or (
+        h2h_games >= 4 and float(profile["h2h_draw_rate"] or 0) >= 30
+    )
+    profile["btts_cluster"] = profile["btts_rate"] >= 58 or (
+        h2h_games >= 4 and float(profile["h2h_btts_rate"] or 0) >= 58
+    )
+    profile["tight_margin_cluster"] = profile["one_goal_margin_rate"] >= 48
+    return profile
 
 def _parse_dt(value):
     if not value:
@@ -1923,6 +2029,7 @@ def recent_form_summary(form):
         "btts_rate": round(form.get("btts_count", 0) / games * 100, 1),
         "over25_rate": round(form.get("over25_count", 0) / games * 100, 1),
         "streak": form.get("streak", 0),
+        "scoreline_profile": form.get("scoreline_profile") or _scoreline_profile([]),
     }
 
 def _percent(value):
@@ -1958,6 +2065,7 @@ def build_fixture_insights(fx):
     flags = set(context.get("flags") or []) | set(team_news.get("flags") or [])
     goal_model = context.get("goal_model") or {}
     h2h = context.get("h2h") or {}
+    scorelines = context.get("scoreline_profile") or {}
 
     key_signals = []
     risk_warnings = []
@@ -1971,6 +2079,17 @@ def build_fixture_insights(fx):
         _append_unique(key_signals, f"Goal model projects {goal_model.get('expected_total')} total goals with draw confidence at {goal_model.get('draw_confidence', 'unknown')}%.")
     if int(h2h.get("games") or 0) >= 2:
         _append_unique(key_signals, f"H2H sample: {h2h.get('games')} games, {h2h.get('draws', 0)} draws, average {h2h.get('avg_goals', 0)} goals.")
+    if int(scorelines.get("games") or 0) >= 6:
+        _append_unique(
+            key_signals,
+            f"Scoreline pattern: low totals {scorelines.get('low_total_rate', 0)}%, high totals {scorelines.get('high_total_rate', 0)}%, BTTS {scorelines.get('btts_rate', 0)}%, draws {scorelines.get('draw_rate', 0)}%.",
+        )
+        if scorelines.get("low_score_cluster"):
+            _append_unique(confidence_drivers, "Recent/H2H scorelines lean controlled.")
+        if scorelines.get("high_score_cluster"):
+            _append_unique(confidence_drivers, "Recent scorelines lean open/high-event.")
+        if scorelines.get("draw_cluster"):
+            _append_unique(risk_warnings, "scoreline_draw_cluster")
     if context.get("league_strength"):
         _append_unique(confidence_drivers, f"League strength factor {context.get('league_strength')}.")
 
@@ -2748,6 +2867,7 @@ def score_aps_fixture_for_pipeline(fx):
     fx["away_recent_form"] = recent_form_summary(af)
     fixture_context = build_fixture_context(fx, hf, af)
     fixture_context["h2h"] = h2h
+    fixture_context["scoreline_profile"] = build_matchup_scoreline_profile(hf, af, h2h)
     context_flags = set(fixture_context.get("flags") or [])
     context_flags.add("h2h_available" if int(h2h.get("games") or 0) >= 2 else "h2h_unavailable")
     fixture_context["flags"] = sorted(context_flags)

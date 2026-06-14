@@ -448,14 +448,16 @@ class AlgoRunnerService:
         consensus = float(review.get("consensus_score") or final_confidence)
         disagreement = float(review.get("disagreement_score") or 0)
         market_fit = self._prediction_reviewer_score(prediction, "market_fit") or consensus
+        scoreline_fit = self._prediction_reviewer_score(prediction, "scoreline_pattern") or consensus
         value_score = self._prediction_reviewer_score(prediction, "value") or consensus
         decision = str(review.get("decision") or "")
         decision_score = {"approve": 2, "caution": 1, "reject": -2}.get(decision, 0)
         risk_flags = set(prediction.risk_flags or [])
         council_score = (
             consensus * 0.34
-            + market_fit * 0.26
-            + final_confidence * 0.22
+            + market_fit * 0.22
+            + scoreline_fit * 0.14
+            + final_confidence * 0.18
             + value_score * 0.10
             + self._bounded_ev_score(ev)
             - disagreement * 0.45
@@ -476,6 +478,7 @@ class AlgoRunnerService:
             final_confidence,
             consensus,
             market_fit,
+            scoreline_fit,
             ev,
             raw_confidence,
             -odds,

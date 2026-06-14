@@ -302,6 +302,114 @@ class RecommendationPolicyTests(TestCase):
         self.assertEqual(review["decision"], "reject")
         self.assertIn("h2h_draw_pressure_against_dc12", review["reasons"])
 
+    def test_scoreline_pattern_reviewer_rejects_draw_cluster_dc12(self):
+        review = council_review({
+            "market": "DC: 12",
+            "confidence": 84,
+            "ev": 0.08,
+            "odds_source": "api_football",
+            "odds_meta": {"bookmaker_count": 4},
+            "risk_flags": [],
+            "home_recent_form": {
+                "games": 8,
+                "draws": 1,
+                "avg_scored": 1.2,
+                "avg_conceded": 0.9,
+            },
+            "away_recent_form": {
+                "games": 8,
+                "draws": 1,
+                "avg_scored": 1.1,
+                "avg_conceded": 1.0,
+            },
+            "fixture_context": {
+                "goal_model": {"expected_total": 2.2, "draw_confidence": 23},
+                "h2h": {"games": 6, "draws": 3, "avg_goals": 1.5},
+                "scoreline_profile": {
+                    "games": 16,
+                    "low_total_rate": 68,
+                    "high_total_rate": 25,
+                    "btts_rate": 44,
+                    "draw_rate": 34,
+                    "one_goal_margin_rate": 52,
+                    "h2h_games": 6,
+                    "h2h_low_total_rate": 83,
+                    "h2h_draw_rate": 50,
+                    "h2h_btts_rate": 50,
+                    "low_score_cluster": True,
+                    "draw_cluster": True,
+                    "tight_margin_cluster": True,
+                },
+            },
+            "insights": {
+                "league_trust": {
+                    "status": "trusted",
+                    "league_hit_rate": 66,
+                    "league_roi": 5,
+                    "market_hit_rate": 80,
+                    "market_roi": 8,
+                    "market_sample": 40,
+                },
+                "calibration_trust": {
+                    "status": "trusted",
+                    "hit_rate": 80,
+                    "avg_confidence": 82,
+                },
+            },
+        })
+
+        self.assertEqual(review["decision"], "reject")
+        self.assertIn("scoreline_draw_cluster_against_dc12", review["reasons"])
+        self.assertIn("scoreline_pattern_veto", review["reasons"])
+
+    def test_scoreline_pattern_supports_under35(self):
+        review = council_review({
+            "market": "Under 3.5",
+            "confidence": 76,
+            "ev": 0.06,
+            "odds_source": "api_football",
+            "odds_meta": {"bookmaker_count": 4},
+            "risk_flags": [],
+            "home_recent_form": {
+                "games": 8,
+                "draws": 2,
+                "avg_scored": 1.1,
+                "avg_conceded": 0.9,
+                "over25_rate": 25,
+            },
+            "away_recent_form": {
+                "games": 8,
+                "draws": 2,
+                "avg_scored": 1.0,
+                "avg_conceded": 1.0,
+                "over25_rate": 25,
+            },
+            "fixture_context": {
+                "goal_model": {"expected_total": 2.1, "draw_confidence": 25},
+                "scoreline_profile": {
+                    "games": 16,
+                    "low_total_rate": 75,
+                    "high_total_rate": 18,
+                    "btts_rate": 38,
+                    "draw_rate": 26,
+                    "one_goal_margin_rate": 50,
+                    "h2h_games": 4,
+                    "h2h_low_total_rate": 75,
+                    "h2h_draw_rate": 25,
+                    "low_score_cluster": True,
+                },
+            },
+            "insights": {
+                "league_trust": {"status": "trusted", "market_sample": 30, "market_hit_rate": 62, "market_roi": 5},
+                "calibration_trust": {"status": "trusted", "hit_rate": 76, "avg_confidence": 75},
+            },
+        })
+
+        scoreline_review = next(item for item in review["reviewers"] if item["reviewer"] == "scoreline_pattern")
+
+        self.assertGreaterEqual(scoreline_review["score"], 70)
+        self.assertIn("scoreline_pattern_supports_market", review["reasons"])
+
     def test_exceptional_fixture_fit_can_lift_restricted_market(self):
         candidate = {
             "market": "Over 2.5",

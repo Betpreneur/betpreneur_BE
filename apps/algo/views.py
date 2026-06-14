@@ -332,14 +332,16 @@ def _market_display_score(market):
     consensus = float(review.get("consensus_score") or final_confidence)
     disagreement = float(review.get("disagreement_score") or 0)
     market_fit = _market_reviewer_score(market, "market_fit") or consensus
+    scoreline_fit = _market_reviewer_score(market, "scoreline_pattern") or consensus
     value_score = _market_reviewer_score(market, "value") or consensus
     ev = market.get("ev")
     ev_score = _bounded_ev_score(ev)
     odds = float(market.get("odds") or 0)
     score = (
         consensus * 0.34
-        + market_fit * 0.26
-        + final_confidence * 0.22
+        + market_fit * 0.22
+        + scoreline_fit * 0.14
+        + final_confidence * 0.18
         + value_score * 0.10
         + ev_score
         - disagreement * 0.45
@@ -379,7 +381,7 @@ def _market_display_score(market):
         score += 3.0
     if not market.get("eligible"):
         score -= 12.0
-    return score, final_confidence, consensus, market_fit, ev_score, raw_confidence, -odds
+    return score, final_confidence, consensus, market_fit, scoreline_fit, ev_score, raw_confidence, -odds
 
 
 def _game_market_rank(market):

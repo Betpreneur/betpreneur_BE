@@ -63,6 +63,11 @@ def _corner_line(market):
     return _float(match.group(1)) if match else 0.0
 
 
+def _scoreline_profile(candidate):
+    context = candidate.get("fixture_context") or {}
+    return context.get("scoreline_profile") or {}
+
+
 def _verdict(score, reject=False):
     if reject or score < 50:
         return REJECT
@@ -304,6 +309,110 @@ def market_fit_reviewer(candidate):
     return _review("market_fit", score, reasons, veto=fixture_veto or score < 45)
 
 
+def scoreline_pattern_reviewer(candidate):
+    market = str(candidate.get("market") or "")
+    profile = _scoreline_profile(candidate)
+    h2h_games = int(profile.get("h2h_games") or 0)
+    games = int(profile.get("games") or 0)
+    low_total_rate = _float(profile.get("low_total_rate"))
+    high_total_rate = _float(profile.get("high_total_rate"))
+    btts_rate = _float(profile.get("btts_rate"))
+    draw_rate = _float(profile.get("draw_rate"))
+    h2h_low_total_rate = _float(profile.get("h2h_low_total_rate"))
+    h2h_draw_rate = _float(profile.get("h2h_draw_rate"))
+    h2h_btts_rate = _float(profile.get("h2h_btts_rate"))
+    low_cluster = bool(profile.get("low_score_cluster"))
+    high_cluster = bool(profile.get("high_score_cluster"))
+    draw_cluster = bool(profile.get("draw_cluster"))
+    btts_cluster = bool(profile.get("btts_cluster"))
+    tight_margin_cluster = bool(profile.get("tight_margin_cluster"))
+    score = 60
+    reasons = []
+    veto = False
+
+    if games < 8 and h2h_games < 3:
+        score -= 8
+        reasons.append("limited_scoreline_pattern_sample")
+
+    if market == "DC: 12":
+        if draw_cluster:
+            score -= 24
+            reasons.append("scoreline_draw_cluster_against_dc12")
+            if h2h_games >= 6 and h2h_draw_rate >= 35:
+                veto = True
+        elif draw_rate <= 18 and (h2h_games < 4 or h2h_draw_rate <= 18):
+            score += 10
+            reasons.append("scorelines_show_low_draw_pattern")
+        if low_cluster:
+            score -= 10
+            reasons.append("low_scoreline_cluster_increases_draw_risk")
+        if tight_margin_cluster:
+            score -= 6
+            reasons.append("tight_scoreline_margins")
+
+    elif market.startswith("Under"):
+        line = _corner_line(market)
+        if line >= 3.5:
+            if low_cluster or low_total_rate >= 58:
+                score += 18
+                reasons.append("scorelines_support_controlled_total")
+            if high_cluster or high_total_rate >= 62:
+                score -= 18
+                reasons.append("scorelines_conflict_with_under")
+            if h2h_games >= 4 and h2h_low_total_rate >= 65:
+                score += 8
+                reasons.append("h2h_scorelines_support_under")
+        elif line <= 2.5:
+            if low_cluster and low_total_rate >= 65:
+                score += 16
+                reasons.append("scorelines_support_low_total")
+            if high_total_rate >= 45:
+                score -= 14
+                reasons.append("scorelines_too_open_for_low_under")
+
+    elif market.startswith("Over") or "BTTS" in market or market.startswith("GG"):
+        line = _corner_line(market)
+        if "BTTS" in market or market.startswith("GG"):
+            if btts_cluster or btts_rate >= 58:
+                score += 16
+                reasons.append("scorelines_support_btts")
+            if btts_rate <= 35 and (h2h_games < 4 or h2h_btts_rate <= 35):
+                score -= 16
+                reasons.append("scorelines_conflict_with_btts")
+        elif line <= 1.5:
+            if low_total_rate <= 35 or high_total_rate >= 45:
+                score += 14
+                reasons.append("scorelines_support_over15")
+            if low_cluster and low_total_rate >= 75:
+                score -= 12
+                reasons.append("scorelines_tight_for_over15")
+        elif line >= 2.5:
+            if high_cluster or high_total_rate >= 58:
+                score += 18
+                reasons.append("scorelines_support_over25")
+            if low_cluster or low_total_rate >= 62:
+                score -= 18
+                reasons.append("scorelines_conflict_with_over25")
+
+    elif market.endswith("Win") or market.startswith("DNB") or market.startswith("AH "):
+        if draw_cluster:
+            score -= 10
+            reasons.append("scoreline_draw_pattern_against_result_market")
+        if tight_margin_cluster:
+            score -= 6
+            reasons.append("scoreline_margin_risk")
+        if high_cluster and not draw_cluster:
+            score += 6
+            reasons.append("scorelines_show_decisive_profile")
+
+    if score >= 76:
+        reasons.append("scoreline_pattern_supports_market")
+    elif score < 50:
+        reasons.append("scoreline_pattern_conflict")
+
+    return _review("scoreline_pattern", score, reasons, veto=veto or score < 40)
+
+
 def league_market_reviewer(candidate):
     trust = ((candidate.get("insights") or {}).get("league_trust") or {})
     status = trust.get("status") or ""
@@ -408,6 +517,7 @@ def council_review(candidate):
     reviewers = [
         value_reviewer(candidate),
         market_fit_reviewer(candidate),
+        scoreline_pattern_reviewer(candidate),
         risk_reviewer(candidate),
         league_market_reviewer(candidate),
         market_history_reviewer(candidate),
