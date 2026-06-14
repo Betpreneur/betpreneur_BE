@@ -292,15 +292,47 @@ def _market_sort_value(market):
     )
 
 
+def _market_reviewer_score(market, reviewer_name):
+    review = market.get("council_review") or {}
+    for item in review.get("reviewers") or []:
+        if item.get("reviewer") == reviewer_name:
+            try:
+                return float(item.get("score") or 0)
+            except (TypeError, ValueError):
+                return 0.0
+    return 0.0
+
+
 def _market_display_score(market):
-    confidence = float(market.get("final_confidence") or market.get("confidence") or 0)
+    review = market.get("council_review") or {}
+    decision = str(review.get("decision") or "")
+    final_confidence = float(review.get("final_confidence") or market.get("final_confidence") or market.get("confidence") or 0)
+    raw_confidence = float(market.get("confidence") or 0)
+    consensus = float(review.get("consensus_score") or final_confidence)
+    disagreement = float(review.get("disagreement_score") or 0)
+    market_fit = _market_reviewer_score(market, "market_fit") or consensus
+    value_score = _market_reviewer_score(market, "value") or consensus
     ev = market.get("ev")
-    ev_score = float(ev) * 18.0 if ev is not None else -8.0
+    ev_score = float(ev) * 100.0 if ev is not None else -12.0
     odds = float(market.get("odds") or 0)
-    score = confidence + ev_score
+    score = (
+        consensus * 0.34
+        + market_fit * 0.26
+        + final_confidence * 0.22
+        + value_score * 0.10
+        + ev_score
+        - disagreement * 0.45
+    )
     risk_flags = set(market.get("risk_flags") or [])
     insights = market.get("insights") or {}
     avoid_reason = str(insights.get("avoid_reason") or "")
+
+    if decision == "approve":
+        score += 10.0
+    elif decision == "caution":
+        score += 3.0
+    elif decision == "reject":
+        score -= 30.0
 
     if market.get("market") == "DC: 12":
         if _market_publicly_paused("DC: 12"):
@@ -318,13 +350,14 @@ def _market_display_score(market):
         score += 3.0
     if not market.get("eligible"):
         score -= 12.0
-    return score, confidence, ev_score, -odds
+    return score, final_confidence, consensus, market_fit, ev_score, raw_confidence, -odds
 
 
 def _game_market_rank(market):
     return (
         1 if market.get("selected") else 0,
-        1 if market.get("eligible") else 0,
+        1 if market.get("recommended") else 0,
+        0 if market.get("publicly_paused") else 1,
         *_market_display_score(market),
     )
 

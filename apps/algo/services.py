@@ -423,14 +423,44 @@ class AlgoRunnerService:
             return max(0, self._runner_env_int("ALGO_MAX_DAILY_DC12_PICKS", 0))
         return max(0, self._runner_env_int("ALGO_MAX_DAILY_SAME_MARKET_PICKS", 0))
 
+    def _prediction_reviewer_score(self, prediction, reviewer_name):
+        review = ((prediction.insights or {}).get("council_review") or {})
+        for item in review.get("reviewers") or []:
+            if item.get("reviewer") == reviewer_name:
+                try:
+                    return float(item.get("score") or 0)
+                except (TypeError, ValueError):
+                    return 0.0
+        return 0.0
+
     def _prediction_rank(self, prediction):
         ev = float(prediction.ev or 0)
         odds = float(prediction.odds or 0)
-        confidence = float(prediction.confidence or 0)
+        raw_confidence = float(prediction.confidence or 0)
+        review = ((prediction.insights or {}).get("council_review") or {})
+        final_confidence = float(review.get("final_confidence") or raw_confidence)
+        consensus = float(review.get("consensus_score") or final_confidence)
+        disagreement = float(review.get("disagreement_score") or 0)
+        market_fit = self._prediction_reviewer_score(prediction, "market_fit") or consensus
+        value_score = self._prediction_reviewer_score(prediction, "value") or consensus
+        decision = str(review.get("decision") or "")
+        decision_score = {"approve": 2, "caution": 1, "reject": -2}.get(decision, 0)
+        council_score = (
+            consensus * 0.34
+            + market_fit * 0.26
+            + final_confidence * 0.22
+            + value_score * 0.10
+            + ev * 100.0
+            - disagreement * 0.45
+        )
         return (
-            confidence + (ev * 18.0),
-            confidence,
+            decision_score,
+            council_score,
+            final_confidence,
+            consensus,
+            market_fit,
             ev,
+            raw_confidence,
             -odds,
         )
 

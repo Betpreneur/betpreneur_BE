@@ -554,6 +554,76 @@ class RecommendationPolicyTests(TestCase):
         self.assertEqual(game["best_market"]["market"], "Under 3.5")
         self.assertTrue(next(market for market in game["markets"] if market["market"] == "DC: 12")["publicly_paused"])
 
+    def test_best_market_uses_council_fit_over_raw_confidence(self):
+        fixture = {
+            "fixture": "Home vs Away",
+            "match_id": "10c",
+            "markets": [
+                {
+                    "market": "Over 2.5",
+                    "meaning": "3 or more total goals",
+                    "confidence": 91,
+                    "raw_confidence": 91,
+                    "odds": 1.60,
+                    "ev": 0.06,
+                    "odds_source": "api_football",
+                    "eligible": True,
+                    "risk_flags": [],
+                    "insights": {
+                        "league_trust": {"status": "trusted"},
+                        "calibration_trust": {"status": "trusted"},
+                        "council_review": {
+                            "decision": "reject",
+                            "tier": "",
+                            "raw_confidence": 91,
+                            "final_confidence": 58,
+                            "consensus_score": 50,
+                            "disagreement_score": 45,
+                            "reasons": ["goal_projection_too_low_for_over25"],
+                            "reviewers": [
+                                {"reviewer": "market_fit", "score": 42},
+                                {"reviewer": "value", "score": 70},
+                            ],
+                        },
+                    },
+                },
+                {
+                    "market": "Under 3.5",
+                    "meaning": "3 or fewer total goals",
+                    "confidence": 78,
+                    "raw_confidence": 78,
+                    "odds": 1.50,
+                    "ev": 0.05,
+                    "odds_source": "api_football",
+                    "eligible": True,
+                    "risk_flags": [],
+                    "insights": {
+                        "league_trust": {"status": "trusted"},
+                        "calibration_trust": {"status": "trusted"},
+                        "council_review": {
+                            "decision": "approve",
+                            "tier": "value_gem",
+                            "raw_confidence": 78,
+                            "final_confidence": 76,
+                            "consensus_score": 78,
+                            "disagreement_score": 12,
+                            "reasons": ["controlled_goal_projection"],
+                            "reviewers": [
+                                {"reviewer": "market_fit", "score": 82},
+                                {"reviewer": "value", "score": 76},
+                            ],
+                        },
+                    },
+                },
+            ],
+        }
+
+        game = _game_summary_from_fixture(fixture, {}, request=None, include_markets=True)
+        over_market = next(market for market in game["markets"] if market["market"] == "Over 2.5")
+
+        self.assertEqual(game["best_market"]["market"], "Under 3.5")
+        self.assertGreater(game["best_market"]["display_score"], over_market["display_score"])
+
     def test_probation_league_market_needs_extra_edge(self):
         fixture = {
             "fixture": "Home vs Away",
