@@ -27,9 +27,11 @@ MEDIUM_RISK_FLAGS = {
     "h2h_draw_pressure",
     "h2h_tight_draw_warning",
     "market_recent_low_hit_rate",
+    "nordic_under_volatility",
     "strategy_cooling",
     "team_news_unavailable",
     "thin_edge",
+    "under35_blowout_risk",
     "wide_odds_market",
 }
 
@@ -66,6 +68,48 @@ def _corner_line(market):
 def _scoreline_profile(candidate):
     context = candidate.get("fixture_context") or {}
     return context.get("scoreline_profile") or {}
+
+
+def _normalise(value):
+    return str(value or "").lower()
+
+
+def _is_nordic_under_context(candidate):
+    context = candidate.get("fixture_context") or {}
+    country = _normalise(candidate.get("country") or context.get("country"))
+    league = _normalise(candidate.get("league") or context.get("league"))
+    return (
+        country in {"sweden", "finland", "norway"}
+        or any(term in league for term in ["sweden", "swedish", "finland", "finnish", "norway", "norwegian"])
+    )
+
+
+def _under35_blowout_risk(home, away):
+    home = home or {}
+    away = away or {}
+    home_wins = _float(home.get("wins"))
+    away_wins = _float(away.get("wins"))
+    home_scored = _float(home.get("avg_scored"))
+    away_scored = _float(away.get("avg_scored"))
+    home_conceded = _float(home.get("avg_conceded"))
+    away_conceded = _float(away.get("avg_conceded"))
+    home_losses = max(0.0, _float(home.get("games")) - home_wins - _float(home.get("draws")))
+    away_losses = max(0.0, _float(away.get("games")) - away_wins - _float(away.get("draws")))
+
+    away_can_run_it_up = (
+        away_wins - home_wins >= 3
+        and home_losses >= 5
+        and home_conceded >= 2.0
+        and away_scored >= 1.45
+    )
+    home_can_run_it_up = (
+        home_wins - away_wins >= 3
+        and away_losses >= 5
+        and away_conceded >= 2.0
+        and home_scored >= 1.45
+    )
+    leaky_total = (home_conceded >= 2.3 and away_scored >= 1.6) or (away_conceded >= 2.3 and home_scored >= 1.6)
+    return away_can_run_it_up or home_can_run_it_up or leaky_total
 
 
 def _verdict(score, reject=False):
@@ -223,6 +267,12 @@ def market_fit_reviewer(candidate):
             elif expected_total >= 3.15:
                 score -= 18
                 reasons.append("goal_projection_too_high_for_under")
+            if _under35_blowout_risk(home, away):
+                score -= 18
+                reasons.append("under35_blowout_risk")
+            if _is_nordic_under_context(candidate):
+                score -= 10
+                reasons.append("nordic_under_volatility")
             if avg_goal_load <= 3.0:
                 score += 10
             if mean([home_over25, away_over25]) <= 45:

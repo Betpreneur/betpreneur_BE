@@ -410,6 +410,49 @@ class RecommendationPolicyTests(TestCase):
         self.assertGreaterEqual(scoreline_review["score"], 70)
         self.assertIn("scoreline_pattern_supports_market", review["reasons"])
 
+    def test_under35_blowout_risk_downgrades_market_fit(self):
+        review = council_review({
+            "market": "Under 3.5",
+            "confidence": 76,
+            "ev": 0.08,
+            "odds_source": "api_football",
+            "odds_meta": {"bookmaker_count": 4},
+            "risk_flags": ["under35_blowout_risk", "nordic_under_volatility"],
+            "country": "Finland",
+            "league": "Ykkonen",
+            "home_recent_form": {
+                "games": 8,
+                "wins": 0,
+                "draws": 0,
+                "avg_scored": 0.5,
+                "avg_conceded": 2.5,
+                "over25_rate": 50,
+            },
+            "away_recent_form": {
+                "games": 8,
+                "wins": 5,
+                "draws": 0,
+                "avg_scored": 1.75,
+                "avg_conceded": 1.38,
+                "over25_rate": 50,
+            },
+            "fixture_context": {
+                "country": "Finland",
+                "league": "Ykkonen",
+                "goal_model": {"expected_total": 2.25, "draw_confidence": 20},
+            },
+            "insights": {
+                "league_trust": {"status": "trusted", "market_sample": 30, "market_hit_rate": 62, "market_roi": 5},
+                "calibration_trust": {"status": "trusted", "hit_rate": 76, "avg_confidence": 75},
+            },
+        })
+
+        market_fit = next(item for item in review["reviewers"] if item["reviewer"] == "market_fit")
+
+        self.assertLess(market_fit["score"], 55)
+        self.assertIn("under35_blowout_risk", review["reasons"])
+        self.assertIn("nordic_under_volatility", review["reasons"])
+
     def test_exceptional_fixture_fit_can_lift_restricted_market(self):
         candidate = {
             "market": "Over 2.5",
@@ -874,6 +917,79 @@ class RecommendationPolicyTests(TestCase):
                                 {"reviewer": "market_fit", "score": 80},
                                 {"reviewer": "scoreline_pattern", "score": 74},
                                 {"reviewer": "value", "score": 20},
+                            ],
+                        },
+                    },
+                },
+            ],
+        }
+
+        game = _game_summary_from_fixture(fixture, {}, request=None, include_markets=True)
+        under_market = next(market for market in game["markets"] if market["market"] == "Under 3.5")
+
+        self.assertEqual(game["best_market"]["market"], "Over 1.5")
+        self.assertLess(under_market["display_score"], game["best_market"]["display_score"])
+
+    def test_best_market_penalises_nordic_under35_blowout_risk(self):
+        fixture = {
+            "fixture": "Weak Home vs Strong Away",
+            "match_id": "10f",
+            "fixture_context": {
+                "country": "Sweden",
+                "league": "Superettan",
+                "goal_model": {"expected_total": 2.25},
+            },
+            "markets": [
+                {
+                    "market": "Under 3.5",
+                    "meaning": "3 or fewer total goals",
+                    "confidence": 76,
+                    "raw_confidence": 76,
+                    "final_confidence": 64,
+                    "odds": 1.53,
+                    "ev": 0.117,
+                    "odds_source": "api_football",
+                    "eligible": False,
+                    "risk_flags": ["under35_blowout_risk", "nordic_under_volatility"],
+                    "insights": {
+                        "council_review": {
+                            "decision": "reject",
+                            "tier": "",
+                            "raw_confidence": 76,
+                            "final_confidence": 64,
+                            "consensus_score": 58,
+                            "disagreement_score": 42,
+                            "reviewers": [
+                                {"reviewer": "market_fit", "score": 44},
+                                {"reviewer": "scoreline_pattern", "score": 58},
+                                {"reviewer": "value", "score": 80},
+                            ],
+                        },
+                    },
+                },
+                {
+                    "market": "Over 1.5",
+                    "meaning": "2 or more total goals",
+                    "confidence": 78,
+                    "raw_confidence": 78,
+                    "final_confidence": 68,
+                    "odds": 1.25,
+                    "ev": -0.02,
+                    "odds_source": "api_football",
+                    "eligible": False,
+                    "risk_flags": ["thin_edge"],
+                    "insights": {
+                        "council_review": {
+                            "decision": "reject",
+                            "tier": "",
+                            "raw_confidence": 78,
+                            "final_confidence": 68,
+                            "consensus_score": 66,
+                            "disagreement_score": 30,
+                            "reviewers": [
+                                {"reviewer": "market_fit", "score": 78},
+                                {"reviewer": "scoreline_pattern", "score": 70},
+                                {"reviewer": "value", "score": 35},
                             ],
                         },
                     },

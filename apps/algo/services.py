@@ -474,6 +474,10 @@ class AlgoRunnerService:
             council_score -= 12.0
         if "goal_line_boundary" in risk_flags:
             council_score -= 24.0
+        if "under35_blowout_risk" in risk_flags:
+            council_score -= 28.0
+        if "nordic_under_volatility" in risk_flags:
+            council_score -= 16.0
         return (
             decision_score,
             council_score,

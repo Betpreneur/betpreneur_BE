@@ -369,6 +369,10 @@ def _market_display_score(market):
         score -= 3.0
     if "goal_line_boundary" in risk_flags:
         score -= 24.0
+    if "under35_blowout_risk" in risk_flags:
+        score -= 28.0
+    if "nordic_under_volatility" in risk_flags:
+        score -= 16.0
     if "market_suppressed" in risk_flags or "strategy_suppressed" in risk_flags:
         score -= 35.0
     if "market_loss_streak" in risk_flags or "market_recent_losses" in risk_flags:
