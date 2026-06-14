@@ -366,7 +366,7 @@ def _market_display_score(market):
     if "thin_edge" in risk_flags:
         score -= 3.0
     if "goal_line_boundary" in risk_flags:
-        score -= 4.0
+        score -= 24.0
     if "market_suppressed" in risk_flags or "strategy_suppressed" in risk_flags:
         score -= 35.0
     if "market_loss_streak" in risk_flags or "market_recent_losses" in risk_flags:

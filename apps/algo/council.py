@@ -312,6 +312,9 @@ def market_fit_reviewer(candidate):
 def scoreline_pattern_reviewer(candidate):
     market = str(candidate.get("market") or "")
     profile = _scoreline_profile(candidate)
+    context = candidate.get("fixture_context") or {}
+    goal_model = context.get("goal_model") or {}
+    expected_total = _float(goal_model.get("expected_total"))
     h2h_games = int(profile.get("h2h_games") or 0)
     games = int(profile.get("games") or 0)
     low_total_rate = _float(profile.get("low_total_rate"))
@@ -359,6 +362,12 @@ def scoreline_pattern_reviewer(candidate):
             if high_cluster or high_total_rate >= 62:
                 score -= 18
                 reasons.append("scorelines_conflict_with_under")
+            if expected_total >= 3.9:
+                score -= 20
+                reasons.append("goal_projection_strongly_conflicts_with_under")
+            elif expected_total >= 3.4:
+                score -= 10
+                reasons.append("goal_projection_conflicts_with_under")
             if h2h_games >= 4 and h2h_low_total_rate >= 65:
                 score += 8
                 reasons.append("h2h_scorelines_support_under")

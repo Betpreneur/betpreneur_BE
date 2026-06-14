@@ -807,6 +807,86 @@ class RecommendationPolicyTests(TestCase):
         self.assertEqual(game["best_market"]["market"], "Under 3.5")
         self.assertLess(longshot["display_score"], game["best_market"]["display_score"])
 
+    def test_best_market_penalises_under_when_goal_model_is_high(self):
+        fixture = {
+            "fixture": "Germany vs Curacao",
+            "match_id": "10e",
+            "fixture_context": {
+                "goal_model": {
+                    "expected_total": 4.76,
+                    "under35_margin": -1.26,
+                },
+                "scoreline_profile": {
+                    "games": 16,
+                    "high_total_rate": 75,
+                    "high_score_cluster": True,
+                    "low_total_rate": 25,
+                },
+            },
+            "markets": [
+                {
+                    "market": "Under 3.5",
+                    "meaning": "3 or fewer total goals",
+                    "confidence": 59,
+                    "raw_confidence": 59,
+                    "final_confidence": 53,
+                    "odds": 2.75,
+                    "ev": 0.677,
+                    "odds_source": "api_football",
+                    "eligible": False,
+                    "risk_flags": ["goal_line_boundary"],
+                    "insights": {
+                        "council_review": {
+                            "decision": "reject",
+                            "tier": "",
+                            "raw_confidence": 59,
+                            "final_confidence": 53,
+                            "consensus_score": 60,
+                            "disagreement_score": 54,
+                            "reviewers": [
+                                {"reviewer": "market_fit", "score": 36},
+                                {"reviewer": "scoreline_pattern", "score": 42},
+                                {"reviewer": "value", "score": 90},
+                            ],
+                        },
+                    },
+                },
+                {
+                    "market": "Over 1.5",
+                    "meaning": "2 or more total goals",
+                    "confidence": 83,
+                    "raw_confidence": 83,
+                    "final_confidence": 66,
+                    "odds": 1.06,
+                    "ev": -0.099,
+                    "odds_source": "api_football",
+                    "eligible": False,
+                    "risk_flags": ["thin_edge"],
+                    "insights": {
+                        "council_review": {
+                            "decision": "reject",
+                            "tier": "",
+                            "raw_confidence": 83,
+                            "final_confidence": 66,
+                            "consensus_score": 68,
+                            "disagreement_score": 68,
+                            "reviewers": [
+                                {"reviewer": "market_fit", "score": 80},
+                                {"reviewer": "scoreline_pattern", "score": 74},
+                                {"reviewer": "value", "score": 20},
+                            ],
+                        },
+                    },
+                },
+            ],
+        }
+
+        game = _game_summary_from_fixture(fixture, {}, request=None, include_markets=True)
+        under_market = next(market for market in game["markets"] if market["market"] == "Under 3.5")
+
+        self.assertEqual(game["best_market"]["market"], "Over 1.5")
+        self.assertLess(under_market["display_score"], game["best_market"]["display_score"])
+
     def test_probation_league_market_needs_extra_edge(self):
         fixture = {
             "fixture": "Home vs Away",

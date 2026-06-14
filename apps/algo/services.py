@@ -472,6 +472,8 @@ class AlgoRunnerService:
             council_score -= 18.0
         if "wide_odds_market" in risk_flags:
             council_score -= 12.0
+        if "goal_line_boundary" in risk_flags:
+            council_score -= 24.0
         return (
             decision_score,
             council_score,
