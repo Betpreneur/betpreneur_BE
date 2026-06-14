@@ -2000,6 +2000,7 @@ class BackGameView(APIView):
     serializer_class = GameBackResponseSerializer
 
     @extend_schema(
+        operation_id="algo_games_backed_single_create",
         summary="Back a game",
         description=(
             "Authenticated user endpoint. Marks that the user backed/saved a game by match_id. "
@@ -2010,6 +2011,33 @@ class BackGameView(APIView):
         parameters=[GameAnalysisQuerySerializer],
         request=SingleGameBackRequestSerializer,
         responses={200: GameBackResponseSerializer, 201: GameBackResponseSerializer},
+        examples=[
+            OpenApiExample(
+                "Back recommended/best market",
+                summary="Back default market",
+                description="No body is required. The backend resolves the current recommended market first, then best market.",
+                request_only=True,
+                value={},
+            ),
+            OpenApiExample(
+                "Back a specific market",
+                summary="Back market from all-markets list",
+                request_only=True,
+                value={"market": "Over 1.5"},
+            ),
+            OpenApiExample(
+                "Back response",
+                response_only=True,
+                value={
+                    "match_id": "1489374",
+                    "market": "Over 1.5",
+                    "meaning": "2 or more total goals",
+                    "backed": True,
+                    "created": True,
+                    "backed_count": 3,
+                },
+            ),
+        ],
     )
     def post(self, request, match_id):
         query = GameAnalysisQuerySerializer(data=request.query_params)
@@ -2036,12 +2064,31 @@ class BackGameView(APIView):
         )
 
     @extend_schema(
+        operation_id="algo_games_backed_single_destroy",
         summary="Remove backed game",
         description="Authenticated user endpoint. Removes the current user's backed marker from one game by match_id. Pass market to remove only one backed market.",
         tags=["Games"],
         parameters=[GameAnalysisQuerySerializer],
         request=SingleGameBackRequestSerializer,
         responses={200: GameBackResponseSerializer},
+        examples=[
+            OpenApiExample(
+                "Delete a specific backed market",
+                request_only=True,
+                value={"market": "Over 1.5"},
+            ),
+            OpenApiExample(
+                "Delete response",
+                response_only=True,
+                value={
+                    "match_id": "1489374",
+                    "market": "Over 1.5",
+                    "backed": False,
+                    "deleted": True,
+                    "backed_count": 2,
+                },
+            ),
+        ],
     )
     def delete(self, request, match_id):
         query = GameAnalysisQuerySerializer(data=request.query_params)
@@ -2070,6 +2117,7 @@ class BackedGamesView(APIView):
     serializer_class = BackedGamesResponseSerializer
 
     @extend_schema(
+        operation_id="algo_games_backed_bulk_create",
         summary="Back multiple games",
         description=(
             "Authenticated user endpoint. Marks multiple games/markets as backed. "
@@ -2078,6 +2126,47 @@ class BackedGamesView(APIView):
         tags=["Games"],
         request=BulkGameBackRequestSerializer,
         responses={200: BulkGameBackResponseSerializer, 201: BulkGameBackResponseSerializer},
+        examples=[
+            OpenApiExample(
+                "Back default markets in bulk",
+                summary="Legacy/default mode",
+                request_only=True,
+                value={"match_ids": ["1489374", "1489375"], "date": "2026-06-14"},
+            ),
+            OpenApiExample(
+                "Back specific markets in bulk",
+                summary="Market-specific mode",
+                request_only=True,
+                value={
+                    "games": [
+                        {"match_id": "1489374", "market": "Over 1.5"},
+                        {"match_id": "1489375", "market": "Under 3.5"},
+                    ],
+                    "date": "2026-06-14",
+                },
+            ),
+            OpenApiExample(
+                "Bulk response",
+                response_only=True,
+                value={
+                    "requested_count": 2,
+                    "game_count": 2,
+                    "created_count": 2,
+                    "already_backed_count": 0,
+                    "results": [
+                        {
+                            "match_id": "1489374",
+                            "market": "Over 1.5",
+                            "meaning": "2 or more total goals",
+                            "backed": True,
+                            "created": True,
+                            "backed_count": 3,
+                        }
+                    ],
+                    "games": [],
+                },
+            ),
+        ],
     )
     def post(self, request):
         serializer = BulkGameBackRequestSerializer(data=request.data)
@@ -2139,6 +2228,7 @@ class BackedGamesView(APIView):
         )
 
     @extend_schema(
+        operation_id="algo_games_backed_list",
         summary="List user backed games",
         description="Authenticated user endpoint. Returns games backed/saved by the current user, with optional match date filtering.",
         tags=["Games"],
@@ -2154,6 +2244,7 @@ class BackedGamesView(APIView):
         return Response({"date": target_date, "count": len(games), "games": games})
 
     @extend_schema(
+        operation_id="algo_games_backed_bulk_destroy",
         summary="Clear user backed games",
         description="Authenticated user endpoint. Deletes all backed-game markers for the current user. Pass date to clear only one matchday.",
         tags=["Games"],

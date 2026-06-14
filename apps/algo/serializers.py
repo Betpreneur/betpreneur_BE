@@ -401,14 +401,31 @@ class RecordResponseSerializer(serializers.Serializer):
 
 
 class GameBackSelectionSerializer(serializers.Serializer):
-    match_id = serializers.CharField(allow_blank=False)
-    market = serializers.CharField(required=False, allow_blank=True)
-    date = serializers.DateField(required=False)
+    match_id = serializers.CharField(
+        allow_blank=False,
+        help_text="API-Football match_id for the game.",
+    )
+    market = serializers.CharField(
+        required=False,
+        allow_blank=True,
+        help_text="Optional exact market name from the game markets list, for example 'Over 1.5'. If omitted, the recommended/best market is backed.",
+    )
+    date = serializers.DateField(
+        required=False,
+        help_text="Optional match date used to resolve the fixture when the same match_id could appear in multiple runs.",
+    )
 
 
 class SingleGameBackRequestSerializer(serializers.Serializer):
-    market = serializers.CharField(required=False, allow_blank=True)
-    date = serializers.DateField(required=False)
+    market = serializers.CharField(
+        required=False,
+        allow_blank=True,
+        help_text="Optional exact market name from the game markets list. If omitted, backs the recommended/best market.",
+    )
+    date = serializers.DateField(
+        required=False,
+        help_text="Optional match date used to resolve a specific matchday.",
+    )
 
 
 class BulkGameBackRequestSerializer(serializers.Serializer):
@@ -417,9 +434,17 @@ class BulkGameBackRequestSerializer(serializers.Serializer):
         min_length=1,
         max_length=50,
         required=False,
+        help_text="Legacy/default backing mode. Each match_id backs the recommended/best market for that game.",
     )
-    games = GameBackSelectionSerializer(many=True, required=False)
-    date = serializers.DateField(required=False)
+    games = GameBackSelectionSerializer(
+        many=True,
+        required=False,
+        help_text="Market-specific backing mode. Each item can include match_id and an optional market.",
+    )
+    date = serializers.DateField(
+        required=False,
+        help_text="Optional default date applied to all selections that do not include their own date.",
+    )
 
     def validate(self, attrs):
         if not attrs.get("match_ids") and not attrs.get("games"):
@@ -444,12 +469,16 @@ class BulkGameBackResponseSerializer(serializers.Serializer):
 
 class GameBackResponseSerializer(serializers.Serializer):
     match_id = serializers.CharField()
-    market = serializers.CharField(allow_blank=True, required=False)
+    market = serializers.CharField(
+        allow_blank=True,
+        required=False,
+        help_text="The backed market. Blank only for old backed-game rows created before market-specific backing existed.",
+    )
     meaning = serializers.CharField(allow_blank=True, required=False)
     backed = serializers.BooleanField()
     created = serializers.BooleanField(required=False)
     deleted = serializers.BooleanField(required=False)
-    backed_count = serializers.IntegerField()
+    backed_count = serializers.IntegerField(help_text="Number of users that backed this specific match/market when market is present.")
 
 
 class BackedGamesResponseSerializer(serializers.Serializer):
