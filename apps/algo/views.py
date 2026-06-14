@@ -303,6 +303,8 @@ def _market_display_score(market):
     avoid_reason = str(insights.get("avoid_reason") or "")
 
     if market.get("market") == "DC: 12":
+        if _market_publicly_paused("DC: 12"):
+            score -= 80.0
         score -= 8.0
         if "draw_boundary_risk" in risk_flags or "Draw pressure" in avoid_reason:
             score -= 8.0
@@ -404,6 +406,12 @@ def _setting_bool(name, default=False):
     if value is None:
         return default
     return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _market_publicly_paused(market_name):
+    if market_name == "DC: 12":
+        return not _setting_bool("ALGO_PUBLISH_DC12", False)
+    return False
 
 
 def _apply_council_recommendation_gate(payload):
@@ -568,6 +576,7 @@ def _normalise_fixture_markets(item, picks_by_match):
             or _tier_for_confidence(payload.get("confidence"))
         )
         selected_pick = pick_by_market.get(payload.get("market"))
+        payload["publicly_paused"] = _market_publicly_paused(payload.get("market"))
         if selected_pick:
             payload["selected"] = True
             payload["selected_pick_id"] = selected_pick.id
@@ -589,7 +598,9 @@ def _game_summary_from_fixture(item, picks_by_match, request=None, include_marke
     markets = _normalise_fixture_markets(item, picks_by_match)
     match_picks = sorted(picks_by_match.get(match_id, []), key=_top_pick_sort_key, reverse=True)
     pick_data = PickSerializer(match_picks, many=True, context={"request": request}).data
-    top_market = markets[0] if markets else None
+    top_market = next((market for market in markets if not market.get("publicly_paused")), None)
+    if top_market is None:
+        top_market = markets[0] if markets else None
     recommended_market = next((market for market in markets if market.get("recommended")), None)
     official_pick = pick_data[0] if pick_data else None
     backed_count = GameBack.objects.filter(match_id=match_id).count() if match_id else 0

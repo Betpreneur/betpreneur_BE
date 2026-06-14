@@ -513,11 +513,46 @@ class RecommendationPolicyTests(TestCase):
             ],
         }
 
-        game = _game_summary_from_fixture(fixture, {}, request=None)
+        game = _game_summary_from_fixture(fixture, {}, request=None, include_markets=True)
 
         self.assertEqual(game["best_market"]["market"], "Under 3.5")
         self.assertIsNone(game["recommended_market"])
         self.assertEqual(game["recommendation_status"], "watchlist")
+
+    def test_public_best_market_skips_paused_dc12(self):
+        fixture = {
+            "fixture": "Home vs Away",
+            "match_id": "10b",
+            "markets": [
+                {
+                    "market": "DC: 12",
+                    "meaning": "Home or Away win",
+                    "confidence": 86,
+                    "raw_confidence": 86,
+                    "odds": 1.40,
+                    "ev": 0.08,
+                    "odds_source": "api_football",
+                    "eligible": True,
+                    "risk_flags": [],
+                },
+                {
+                    "market": "Under 3.5",
+                    "meaning": "3 or fewer total goals",
+                    "confidence": 78,
+                    "raw_confidence": 78,
+                    "odds": 1.55,
+                    "ev": 0.04,
+                    "odds_source": "api_football",
+                    "eligible": True,
+                    "risk_flags": [],
+                },
+            ],
+        }
+
+        game = _game_summary_from_fixture(fixture, {}, request=None, include_markets=True)
+
+        self.assertEqual(game["best_market"]["market"], "Under 3.5")
+        self.assertTrue(next(market for market in game["markets"] if market["market"] == "DC: 12")["publicly_paused"])
 
     def test_probation_league_market_needs_extra_edge(self):
         fixture = {
