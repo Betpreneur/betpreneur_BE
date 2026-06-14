@@ -400,13 +400,31 @@ class RecordResponseSerializer(serializers.Serializer):
     records = PublicRecordPickSerializer(many=True)
 
 
+class GameBackSelectionSerializer(serializers.Serializer):
+    match_id = serializers.CharField(allow_blank=False)
+    market = serializers.CharField(required=False, allow_blank=True)
+    date = serializers.DateField(required=False)
+
+
+class SingleGameBackRequestSerializer(serializers.Serializer):
+    market = serializers.CharField(required=False, allow_blank=True)
+    date = serializers.DateField(required=False)
+
+
 class BulkGameBackRequestSerializer(serializers.Serializer):
     match_ids = serializers.ListField(
         child=serializers.CharField(allow_blank=False),
         min_length=1,
         max_length=50,
+        required=False,
     )
+    games = GameBackSelectionSerializer(many=True, required=False)
     date = serializers.DateField(required=False)
+
+    def validate(self, attrs):
+        if not attrs.get("match_ids") and not attrs.get("games"):
+            raise serializers.ValidationError("Provide match_ids or games.")
+        return attrs
 
     def validate_match_ids(self, value):
         cleaned = list(dict.fromkeys(str(item).strip() for item in value if str(item).strip()))
@@ -426,6 +444,8 @@ class BulkGameBackResponseSerializer(serializers.Serializer):
 
 class GameBackResponseSerializer(serializers.Serializer):
     match_id = serializers.CharField()
+    market = serializers.CharField(allow_blank=True, required=False)
+    meaning = serializers.CharField(allow_blank=True, required=False)
     backed = serializers.BooleanField()
     created = serializers.BooleanField(required=False)
     deleted = serializers.BooleanField(required=False)

@@ -3,6 +3,7 @@ import csv
 import hashlib
 import json
 import logging
+from decimal import Decimal, InvalidOperation
 
 from celery.result import AsyncResult
 from django.conf import settings
@@ -50,6 +51,7 @@ from .serializers import (
     RecordResponseSerializer,
     RecordQuerySerializer,
     ResultsUpdateSerializer,
+    SingleGameBackRequestSerializer,
     TaskQueuedSerializer,
     TaskStatusSerializer,
     TopPickResponseSerializer,
@@ -623,10 +625,18 @@ def _market_verdict_for_game(market):
     return "Lower-confidence candidate; useful for analysis but not a headline pick."
 
 
-def _normalise_fixture_markets(item, picks_by_match):
+def _normalise_fixture_markets(item, picks_by_match, request=None):
     markets = []
+    match_id = str(item.get("match_id") or "")
     match_picks = picks_by_match.get(str(item.get("match_id") or ""), [])
     pick_by_market = {pick.market: pick for pick in match_picks}
+    user_backed_markets = set()
+    if request and request.user.is_authenticated and match_id:
+        user_backed_markets = set(
+            GameBack.objects.filter(user=request.user, match_id=match_id)
+            .exclude(market="")
+            .values_list("market", flat=True)
+        )
     for market in item.get("markets") or []:
         if market.get("market") in EXCLUDED_MARKETS:
             continue
@@ -650,6 +660,8 @@ def _normalise_fixture_markets(item, picks_by_match):
             payload.setdefault("selected", False)
             payload.setdefault("selected_pick_id", None)
             payload.setdefault("selected_tier", "")
+        payload["market_backed_count"] = _back_count(match_id, payload.get("market")) if match_id else 0
+        payload["backed_by_me"] = payload.get("market") in user_backed_markets
         payload.update(_apply_council_recommendation_gate(payload))
         payload["reasoning"] = _market_reasoning_for_game(payload, item)
         payload["model_verdict"] = _market_verdict_for_game(payload)
@@ -660,7 +672,7 @@ def _normalise_fixture_markets(item, picks_by_match):
 
 def _game_summary_from_fixture(item, picks_by_match, request=None, include_markets=False):
     match_id = str(item.get("match_id") or "")
-    markets = _normalise_fixture_markets(item, picks_by_match)
+    markets = _normalise_fixture_markets(item, picks_by_match, request=request)
     match_picks = sorted(picks_by_match.get(match_id, []), key=_top_pick_sort_key, reverse=True)
     pick_data = PickSerializer(match_picks, many=True, context={"request": request}).data
     top_market = next((market for market in markets if not market.get("publicly_paused")), None)
@@ -1861,21 +1873,90 @@ def _latest_fixture_for_match(match_id, target_date=None):
     return fixtures.order_by("-match_date", "-created_at").first()
 
 
-def _back_game_for_user(user, match_id, target_date=None):
+def _decimal_or_none(value):
+    if value in (None, ""):
+        return None
+    try:
+        return Decimal(str(value))
+    except (InvalidOperation, TypeError, ValueError):
+        return None
+
+
+def _int_or_none(value):
+    if value in (None, ""):
+        return None
+    try:
+        return int(round(float(value)))
+    except (TypeError, ValueError):
+        return None
+
+
+def _market_snapshot_for_back(fixture, market_name=""):
+    if not fixture:
+        return None
+    summaries = _fixture_summaries_for_run(fixture.run)
+    item = next(
+        (summary for summary in summaries if str(summary.get("match_id") or "") == str(fixture.match_id)),
+        None,
+    )
+    if not item:
+        return None
+    game = _game_summary_from_fixture(item, _picks_by_match(fixture.run), request=None, include_markets=True)
+    markets = game.get("markets") or []
+    requested = str(market_name or "").strip()
+    if requested:
+        return next(
+            (market for market in markets if str(market.get("market") or "").strip().lower() == requested.lower()),
+            None,
+        )
+    return game.get("recommended_market") or game.get("best_market") or game.get("top_market")
+
+
+def _back_count(match_id, market=""):
+    queryset = GameBack.objects.filter(match_id=str(match_id))
+    market = str(market or "").strip()
+    if market:
+        queryset = queryset.filter(market=market)
+    return queryset.count()
+
+
+def _back_game_for_user(user, match_id, target_date=None, market_name=""):
     match_id = str(match_id).strip()
     fixture = _latest_fixture_for_match(match_id, target_date)
+    market_snapshot = _market_snapshot_for_back(fixture, market_name)
+    if str(market_name or "").strip() and not market_snapshot:
+        raise ValueError(f"Market '{market_name}' was not found for match_id {match_id}.")
+    market = str((market_snapshot or {}).get("market") or market_name or "").strip()
     backed, created = GameBack.objects.get_or_create(
         user=user,
         match_id=match_id,
+        market=market,
         defaults={
             "match_date": fixture.match_date if fixture else target_date,
             "fixture": fixture,
+            "meaning": (market_snapshot or {}).get("meaning", ""),
+            "odds": _decimal_or_none((market_snapshot or {}).get("odds")),
+            "confidence": _int_or_none((market_snapshot or {}).get("confidence")),
+            "final_confidence": _int_or_none((market_snapshot or {}).get("final_confidence")),
+            "ev": _decimal_or_none((market_snapshot or {}).get("ev")),
+            "market_snapshot": market_snapshot or {},
         },
     )
+    update_fields = []
     if fixture and (backed.fixture_id != fixture.id or backed.match_date != fixture.match_date):
         backed.fixture = fixture
         backed.match_date = fixture.match_date
-        backed.save(update_fields=["fixture", "match_date"])
+        update_fields.extend(["fixture", "match_date"])
+    if market_snapshot:
+        backed.meaning = market_snapshot.get("meaning", "")
+        backed.odds = _decimal_or_none(market_snapshot.get("odds"))
+        backed.confidence = _int_or_none(market_snapshot.get("confidence"))
+        backed.final_confidence = _int_or_none(market_snapshot.get("final_confidence"))
+        backed.ev = _decimal_or_none(market_snapshot.get("ev"))
+        backed.market_snapshot = market_snapshot
+        update_fields.extend(["meaning", "odds", "confidence", "final_confidence", "ev", "market_snapshot"])
+    if update_fields:
+        backed.save(update_fields=list(dict.fromkeys(update_fields)))
     return backed, created
 
 
@@ -1892,9 +1973,12 @@ def _backed_games_payload(request, target_date=None):
             games.append({
                 "match_id": back.match_id,
                 "match_date": back.match_date,
+                "backed_market": back.market,
+                "backed_selection": back.market_snapshot or {},
                 "backed": True,
                 "backed_by_me": True,
-                "backed_count": GameBack.objects.filter(match_id=back.match_id).count(),
+                "backed_count": _back_count(back.match_id),
+                "market_backed_count": _back_count(back.match_id, back.market),
             })
             continue
         summaries = _fixture_summaries_for_run(fixture.run)
@@ -1903,7 +1987,11 @@ def _backed_games_payload(request, target_date=None):
             None,
         )
         if item:
-            games.append(_game_summary_from_fixture(item, _picks_by_match(fixture.run), request=request, include_markets=True))
+            summary = _game_summary_from_fixture(item, _picks_by_match(fixture.run), request=request, include_markets=True)
+            summary["backed_market"] = back.market
+            summary["backed_selection"] = back.market_snapshot or {}
+            summary["market_backed_count"] = _back_count(back.match_id, back.market)
+            games.append(summary)
     return games
 
 
@@ -1913,43 +2001,65 @@ class BackGameView(APIView):
 
     @extend_schema(
         summary="Back a game",
-        description="Authenticated user endpoint. Marks that the user backed/saved a game by match_id. Optional date helps resolve a specific matchday.",
+        description=(
+            "Authenticated user endpoint. Marks that the user backed/saved a game by match_id. "
+            "Send an optional market in the body to back a specific market from the game's all-markets list. "
+            "If market is omitted, the current recommended/best market is backed."
+        ),
         tags=["Games"],
         parameters=[GameAnalysisQuerySerializer],
-        request=None,
+        request=SingleGameBackRequestSerializer,
         responses={200: GameBackResponseSerializer, 201: GameBackResponseSerializer},
     )
     def post(self, request, match_id):
         query = GameAnalysisQuerySerializer(data=request.query_params)
         query.is_valid(raise_exception=True)
-        target_date = query.validated_data.get("date")
-        backed, created = _back_game_for_user(request.user, match_id, target_date)
+        serializer = SingleGameBackRequestSerializer(data=request.data or {})
+        serializer.is_valid(raise_exception=True)
+        target_date = serializer.validated_data.get("date") or query.validated_data.get("date")
+        market_name = serializer.validated_data.get("market", "")
+        try:
+            backed, created = _back_game_for_user(request.user, match_id, target_date, market_name)
+        except ValueError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
 
         return Response(
             {
                 "match_id": backed.match_id,
+                "market": backed.market,
+                "meaning": backed.meaning,
                 "backed": True,
                 "created": created,
-                "backed_count": GameBack.objects.filter(match_id=backed.match_id).count(),
+                "backed_count": _back_count(backed.match_id, backed.market),
             },
             status=status.HTTP_201_CREATED if created else status.HTTP_200_OK,
         )
 
     @extend_schema(
         summary="Remove backed game",
-        description="Authenticated user endpoint. Removes the current user's backed marker from one game by match_id.",
+        description="Authenticated user endpoint. Removes the current user's backed marker from one game by match_id. Pass market to remove only one backed market.",
         tags=["Games"],
-        request=None,
+        parameters=[GameAnalysisQuerySerializer],
+        request=SingleGameBackRequestSerializer,
         responses={200: GameBackResponseSerializer},
     )
     def delete(self, request, match_id):
-        deleted_count, _ = GameBack.objects.filter(user=request.user, match_id=str(match_id)).delete()
+        query = GameAnalysisQuerySerializer(data=request.query_params)
+        query.is_valid(raise_exception=True)
+        serializer = SingleGameBackRequestSerializer(data=request.data or {})
+        serializer.is_valid(raise_exception=True)
+        market_name = str(serializer.validated_data.get("market") or request.query_params.get("market") or "").strip()
+        backs = GameBack.objects.filter(user=request.user, match_id=str(match_id))
+        if market_name:
+            backs = backs.filter(market=market_name)
+        deleted_count, _ = backs.delete()
         return Response(
             {
                 "match_id": str(match_id),
+                "market": market_name,
                 "backed": False,
                 "deleted": bool(deleted_count),
-                "backed_count": GameBack.objects.filter(match_id=str(match_id)).count(),
+                "backed_count": _back_count(str(match_id), market_name),
             },
             status=status.HTTP_200_OK,
         )
@@ -1961,7 +2071,10 @@ class BackedGamesView(APIView):
 
     @extend_schema(
         summary="Back multiple games",
-        description="Authenticated user endpoint. Marks multiple games as backed/saved by match_id.",
+        description=(
+            "Authenticated user endpoint. Marks multiple games/markets as backed. "
+            "Use match_ids for default recommended/best markets, or games=[{match_id, market}] for specific markets."
+        ),
         tags=["Games"],
         request=BulkGameBackRequestSerializer,
         responses={200: BulkGameBackResponseSerializer, 201: BulkGameBackResponseSerializer},
@@ -1969,28 +2082,56 @@ class BackedGamesView(APIView):
     def post(self, request):
         serializer = BulkGameBackRequestSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
-        match_ids = serializer.validated_data["match_ids"]
+        match_ids = serializer.validated_data.get("match_ids") or []
+        game_selections = serializer.validated_data.get("games") or []
         target_date = serializer.validated_data.get("date")
+        selections = [
+            {"match_id": match_id, "market": "", "date": target_date}
+            for match_id in match_ids
+        ]
+        selections.extend(
+            {
+                "match_id": item["match_id"],
+                "market": item.get("market", ""),
+                "date": item.get("date") or target_date,
+            }
+            for item in game_selections
+        )
 
         created_count = 0
         results = []
-        for match_id in match_ids:
-            backed, created = _back_game_for_user(request.user, match_id, target_date)
+        for selection in selections:
+            match_id = selection["match_id"]
+            market_name = selection.get("market", "")
+            try:
+                backed, created = _back_game_for_user(request.user, match_id, selection.get("date"), market_name)
+            except ValueError as exc:
+                results.append({
+                    "match_id": match_id,
+                    "market": market_name,
+                    "backed": False,
+                    "created": False,
+                    "error": str(exc),
+                    "backed_count": 0,
+                })
+                continue
             created_count += 1 if created else 0
             results.append({
                 "match_id": backed.match_id,
+                "market": backed.market,
+                "meaning": backed.meaning,
                 "backed": True,
                 "created": created,
-                "backed_count": GameBack.objects.filter(match_id=backed.match_id).count(),
+                "backed_count": _back_count(backed.match_id, backed.market),
             })
 
         games = _backed_games_payload(request, target_date)
         return Response(
             {
-                "requested_count": len(match_ids),
-                "game_count": len(match_ids),
+                "requested_count": len(selections),
+                "game_count": len(selections),
                 "created_count": created_count,
-                "already_backed_count": len(match_ids) - created_count,
+                "already_backed_count": max(0, len([item for item in results if item.get("backed")]) - created_count),
                 "results": results,
                 "games": games,
             },
