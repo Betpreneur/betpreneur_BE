@@ -3542,8 +3542,8 @@ def run_daily_algo():
     log.info(f"Bankroll: N{bankroll:,.0f}")
 
     now_wat     = datetime.now(WAT)
-    tomorrow    = (now_wat+timedelta(days=1)).strftime("%Y-%m-%d")
-    target_date = os.environ.get("OVERRIDE_DATE", tomorrow)
+    today       = now_wat.strftime("%Y-%m-%d")
+    target_date = os.environ.get("OVERRIDE_DATE", today)
     log.info(f"WAT: {now_wat.strftime('%Y-%m-%d %H:%M')} | Target: {target_date}")
 
     fixtures = fetch_aps_fixtures(target_date)

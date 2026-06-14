@@ -49,7 +49,7 @@ class AlgoRunnerService:
 
     def create_run(self, *, user=None, target_date=None) -> AlgoRun:
         if target_date is None:
-            target_date = timezone.localdate() + timedelta(days=1)
+            target_date = timezone.localdate()
         return AlgoRun.objects.create(target_date=target_date, triggered_by=user)
 
     def _runner_env(self, extra=None):
