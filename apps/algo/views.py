@@ -1960,6 +1960,37 @@ def _back_game_for_user(user, match_id, target_date=None, market_name=""):
     return backed, created
 
 
+def _official_pick_from_back(back, fixture=None):
+    snapshot = dict(back.market_snapshot or {})
+    if not snapshot and not back.market:
+        return None
+    return {
+        "id": None,
+        "match_date": back.match_date or (fixture.match_date if fixture else None),
+        "fixture": fixture.fixture if fixture else "",
+        "home_team": fixture.home_team if fixture else "",
+        "away_team": fixture.away_team if fixture else "",
+        "league": fixture.league if fixture else "",
+        "kickoff": fixture.kickoff if fixture else "",
+        "match_id": back.match_id,
+        "tier": snapshot.get("selected_tier") or snapshot.get("suggested_tier") or "",
+        "market": back.market or snapshot.get("market", ""),
+        "meaning": back.meaning or snapshot.get("meaning", ""),
+        "reasoning": snapshot.get("reasoning", ""),
+        "model_verdict": snapshot.get("model_verdict", ""),
+        "risk_flags": snapshot.get("risk_flags") or [],
+        "confidence": back.confidence if back.confidence is not None else snapshot.get("confidence"),
+        "final_confidence": back.final_confidence if back.final_confidence is not None else snapshot.get("final_confidence"),
+        "council_review": snapshot.get("council_review") or {},
+        "odds": str(back.odds) if back.odds is not None else snapshot.get("odds"),
+        "ev": str(back.ev) if back.ev is not None else snapshot.get("ev"),
+        "status": snapshot.get("status", ""),
+        "backed_by_me": True,
+        "backed_count": _back_count(back.match_id, back.market),
+        "source": "backed_market",
+    }
+
+
 def _backed_games_payload(request, target_date=None):
     backs = GameBack.objects.select_related("fixture", "fixture__run").filter(user=request.user)
     if target_date:
@@ -1970,11 +2001,16 @@ def _backed_games_payload(request, target_date=None):
     for back in backs:
         fixture = back.fixture or _latest_fixture_for_match(back.match_id, back.match_date)
         if not fixture:
+            backed_pick = _official_pick_from_back(back)
             games.append({
                 "match_id": back.match_id,
                 "match_date": back.match_date,
                 "backed_market": back.market,
                 "backed_selection": back.market_snapshot or {},
+                "official_pick": backed_pick,
+                "official_picks": [backed_pick] if backed_pick else [],
+                "official_pick_count": 1 if backed_pick else 0,
+                "backed_official_pick": backed_pick,
                 "backed": True,
                 "backed_by_me": True,
                 "backed_count": _back_count(back.match_id),
@@ -1988,9 +2024,15 @@ def _backed_games_payload(request, target_date=None):
         )
         if item:
             summary = _game_summary_from_fixture(item, _picks_by_match(fixture.run), request=request, include_markets=True)
+            backed_pick = _official_pick_from_back(back, fixture)
             summary["backed_market"] = back.market
             summary["backed_selection"] = back.market_snapshot or {}
             summary["market_backed_count"] = _back_count(back.match_id, back.market)
+            if backed_pick:
+                summary["official_pick"] = backed_pick
+                summary["official_picks"] = [backed_pick]
+                summary["official_pick_count"] = 1
+                summary["backed_official_pick"] = backed_pick
             games.append(summary)
     return games
 
@@ -2230,7 +2272,11 @@ class BackedGamesView(APIView):
     @extend_schema(
         operation_id="algo_games_backed_list",
         summary="List user backed games",
-        description="Authenticated user endpoint. Returns games backed/saved by the current user, with optional match date filtering.",
+        description=(
+            "Authenticated user endpoint. Returns games/markets backed by the current user, with optional match date filtering. "
+            "For this endpoint, official_pick is intentionally set to the user's backed market selection so existing frontend pick cards can render it directly. "
+            "The same object is also available as backed_official_pick and the raw market snapshot is available as backed_selection."
+        ),
         tags=["Games"],
         parameters=[BackedPicksQuerySerializer],
         responses={200: BackedGamesResponseSerializer},
