@@ -1877,6 +1877,47 @@ def _latest_fixture_for_match(match_id, target_date=None):
     return fixtures.order_by("-match_date", "-created_at").first()
 
 
+def _latest_prediction_for_back(back):
+    predictions = MarketPrediction.objects.select_related("run", "selected_pick").filter(match_id=str(back.match_id))
+    if back.match_date:
+        predictions = predictions.filter(match_date=back.match_date)
+    if back.market:
+        market_prediction = predictions.filter(market__iexact=back.market).order_by("-created_at").first()
+        if market_prediction:
+            return market_prediction
+    return predictions.order_by("-published", "-eligible", "-confidence", "-ev", "-created_at").first()
+
+
+def _market_snapshot_from_prediction(prediction):
+    if not prediction:
+        return {}
+    payload = {
+        "market": prediction.market,
+        "meaning": prediction.meaning,
+        "raw_confidence": prediction.raw_confidence,
+        "confidence": prediction.confidence,
+        "odds": float(prediction.odds or 0),
+        "ev": float(prediction.ev) if prediction.ev is not None else None,
+        "odds_source": prediction.odds_source,
+        "odds_meta": prediction.odds_meta or {},
+        "eligible": prediction.eligible,
+        "risk_flags": prediction.risk_flags or [],
+        "insights": prediction.insights or {},
+        "selected": bool(prediction.selected_pick_id),
+        "selected_pick_id": prediction.selected_pick_id,
+        "selected_tier": prediction.selected_pick.tier if prediction.selected_pick else "",
+    }
+    payload["council_review"] = _normalise_council_review(
+        payload.get("insights"),
+        fallback_confidence=payload.get("confidence"),
+    )
+    payload["final_confidence"] = payload["council_review"].get("final_confidence")
+    payload["suggested_tier"] = payload["council_review"].get("tier") or _tier_for_confidence(payload.get("confidence"))
+    payload.update(_apply_council_recommendation_gate(payload))
+    payload["model_verdict"] = _market_verdict_for_game(payload)
+    return payload
+
+
 def _decimal_or_none(value):
     if value in (None, ""):
         return None
@@ -1964,21 +2005,22 @@ def _back_game_for_user(user, match_id, target_date=None, market_name=""):
     return backed, created
 
 
-def _official_pick_from_back(back, fixture=None):
-    snapshot = dict(back.market_snapshot or {})
-    if not snapshot and not back.market:
+def _official_pick_from_back(back, fixture=None, prediction=None):
+    snapshot = dict(back.market_snapshot or {}) or _market_snapshot_from_prediction(prediction)
+    market = back.market or snapshot.get("market", "")
+    if not snapshot and not market:
         return None
     return {
         "id": None,
-        "match_date": back.match_date or (fixture.match_date if fixture else None),
-        "fixture": fixture.fixture if fixture else "",
-        "home_team": fixture.home_team if fixture else "",
-        "away_team": fixture.away_team if fixture else "",
-        "league": fixture.league if fixture else "",
-        "kickoff": fixture.kickoff if fixture else "",
+        "match_date": back.match_date or (fixture.match_date if fixture else prediction.match_date if prediction else None),
+        "fixture": fixture.fixture if fixture else prediction.fixture if prediction else "",
+        "home_team": fixture.home_team if fixture else prediction.home_team if prediction else "",
+        "away_team": fixture.away_team if fixture else prediction.away_team if prediction else "",
+        "league": fixture.league if fixture else prediction.league if prediction else "",
+        "kickoff": fixture.kickoff if fixture else prediction.kickoff if prediction else "",
         "match_id": back.match_id,
         "tier": snapshot.get("selected_tier") or snapshot.get("suggested_tier") or "",
-        "market": back.market or snapshot.get("market", ""),
+        "market": market,
         "meaning": back.meaning or snapshot.get("meaning", ""),
         "reasoning": snapshot.get("reasoning", ""),
         "model_verdict": snapshot.get("model_verdict", ""),
@@ -1990,30 +2032,31 @@ def _official_pick_from_back(back, fixture=None):
         "ev": str(back.ev) if back.ev is not None else snapshot.get("ev"),
         "status": snapshot.get("status", ""),
         "backed_by_me": True,
-        "backed_count": _back_count(back.match_id, back.market),
+        "backed_count": _back_count(back.match_id, market),
         "source": "backed_market",
     }
 
 
-def _backed_market_payload(back, fixture=None):
-    backed_pick = _official_pick_from_back(back, fixture) or {}
-    snapshot = dict(back.market_snapshot or {})
+def _backed_market_payload(back, fixture=None, prediction=None):
+    backed_pick = _official_pick_from_back(back, fixture, prediction) or {}
+    snapshot = dict(back.market_snapshot or {}) or _market_snapshot_from_prediction(prediction)
+    market = back.market or snapshot.get("market", "")
     return {
         **backed_pick,
         "back_id": back.id,
         "match_id": back.match_id,
-        "match_date": back.match_date or (fixture.match_date if fixture else None),
-        "fixture": fixture.fixture if fixture else backed_pick.get("fixture", ""),
-        "home_team": fixture.home_team if fixture else backed_pick.get("home_team", ""),
-        "away_team": fixture.away_team if fixture else backed_pick.get("away_team", ""),
+        "match_date": back.match_date or (fixture.match_date if fixture else prediction.match_date if prediction else None),
+        "fixture": fixture.fixture if fixture else prediction.fixture if prediction else backed_pick.get("fixture", ""),
+        "home_team": fixture.home_team if fixture else prediction.home_team if prediction else backed_pick.get("home_team", ""),
+        "away_team": fixture.away_team if fixture else prediction.away_team if prediction else backed_pick.get("away_team", ""),
         "home_logo": fixture.home_logo if fixture else "",
         "away_logo": fixture.away_logo if fixture else "",
-        "league": fixture.league if fixture else backed_pick.get("league", ""),
+        "league": fixture.league if fixture else prediction.league if prediction else backed_pick.get("league", ""),
         "league_logo": fixture.league_logo if fixture else "",
         "country": fixture.country if fixture else "",
         "country_flag": fixture.country_flag if fixture else "",
-        "kickoff": fixture.kickoff if fixture else backed_pick.get("kickoff", ""),
-        "market": back.market or backed_pick.get("market", ""),
+        "kickoff": fixture.kickoff if fixture else prediction.kickoff if prediction else backed_pick.get("kickoff", ""),
+        "market": market,
         "meaning": back.meaning or backed_pick.get("meaning", ""),
         "odds": str(back.odds) if back.odds is not None else backed_pick.get("odds"),
         "ev": str(back.ev) if back.ev is not None else backed_pick.get("ev"),
@@ -2026,10 +2069,10 @@ def _backed_market_payload(back, fixture=None):
         "recommendation_status": snapshot.get("recommendation_status", ""),
         "backed": True,
         "backed_by_me": True,
-        "backed_market": back.market,
+        "backed_market": market,
         "backed_selection": snapshot,
-        "backed_count": _back_count(back.match_id, back.market),
-        "market_backed_count": _back_count(back.match_id, back.market),
+        "backed_count": _back_count(back.match_id, market),
+        "market_backed_count": _back_count(back.match_id, market),
         "created_at": back.created_at,
     }
 
@@ -2043,10 +2086,11 @@ def _backed_games_payload(request, target_date=None):
     games = []
     for back in backs:
         fixture = back.fixture or _latest_fixture_for_match(back.match_id, back.match_date)
+        prediction = _latest_prediction_for_back(back)
         if not fixture:
-            games.append(_backed_market_payload(back))
+            games.append(_backed_market_payload(back, prediction=prediction))
             continue
-        games.append(_backed_market_payload(back, fixture))
+        games.append(_backed_market_payload(back, fixture, prediction))
     return games
 
 
