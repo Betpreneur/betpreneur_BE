@@ -169,6 +169,13 @@ class GameBack(models.Model):
     )
     match_id = models.CharField(max_length=100)
     match_date = models.DateField(null=True, blank=True)
+    market = models.CharField(max_length=120, blank=True)
+    meaning = models.CharField(max_length=255, blank=True)
+    odds = models.DecimalField(max_digits=8, decimal_places=2, null=True, blank=True)
+    confidence = models.PositiveSmallIntegerField(null=True, blank=True)
+    final_confidence = models.PositiveSmallIntegerField(null=True, blank=True)
+    ev = models.DecimalField(max_digits=8, decimal_places=3, null=True, blank=True)
+    market_snapshot = models.JSONField(default=dict, blank=True)
     fixture = models.ForeignKey(
         AlgoFixture,
         null=True,
@@ -179,15 +186,22 @@ class GameBack(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
-        unique_together = ("user", "match_id")
         ordering = ["-created_at"]
         indexes = [
             models.Index(fields=["user", "match_date"]),
             models.Index(fields=["match_id"]),
+            models.Index(fields=["match_id", "market"]),
+        ]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["user", "match_id", "market"],
+                name="unique_game_back_user_match_market",
+            )
         ]
 
     def __str__(self):
-        return f"{self.user} backed game {self.match_id}"
+        market = f" ({self.market})" if self.market else ""
+        return f"{self.user} backed game {self.match_id}{market}"
 
 
 class MarketPrediction(models.Model):

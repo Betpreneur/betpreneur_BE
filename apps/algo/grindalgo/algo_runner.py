@@ -1707,6 +1707,50 @@ def calibrate_confidence(raw_conf, profile_data):
 
     return max(1, min(95, round(raw_conf + adjustment)))
 
+
+def is_nordic_under_context(country, league):
+    country = normalize(country or "")
+    league = normalize(league or "")
+    return (
+        country in {"sweden", "finland", "norway"}
+        or any(term in league for term in ["sweden", "swedish", "finland", "finnish", "norway", "norwegian"])
+    )
+
+
+def under35_blowout_risk(home_form, away_form):
+    home_form = home_form or {}
+    away_form = away_form or {}
+    home_games = float(home_form.get("games") or 0)
+    away_games = float(away_form.get("games") or 0)
+    home_wins = float(home_form.get("wins") or 0)
+    away_wins = float(away_form.get("wins") or 0)
+    home_draws = float(home_form.get("draws") or 0)
+    away_draws = float(away_form.get("draws") or 0)
+    home_losses = max(0.0, home_games - home_wins - home_draws)
+    away_losses = max(0.0, away_games - away_wins - away_draws)
+    home_scored = float(home_form.get("avg_scored") or 0)
+    away_scored = float(away_form.get("avg_scored") or 0)
+    home_conceded = float(home_form.get("avg_conceded") or 0)
+    away_conceded = float(away_form.get("avg_conceded") or 0)
+
+    away_can_run_it_up = (
+        away_wins - home_wins >= 3
+        and home_losses >= 5
+        and home_conceded >= 2.0
+        and away_scored >= 1.45
+    )
+    home_can_run_it_up = (
+        home_wins - away_wins >= 3
+        and away_losses >= 5
+        and away_conceded >= 2.0
+        and home_scored >= 1.45
+    )
+    leaky_total = (
+        (home_conceded >= 2.3 and away_scored >= 1.6)
+        or (away_conceded >= 2.3 and home_scored >= 1.6)
+    )
+    return away_can_run_it_up or home_can_run_it_up or leaky_total
+
 def candidate_risk_flags(raw_conf, conf, market, odds, odds_is_real, ev, profile_data, odds_meta=None, fixture_context=None, team_news=None, strategy_data=None):
     flags = []
     count = int(profile_data.get("count") or 0)
@@ -1765,6 +1809,15 @@ def candidate_risk_flags(raw_conf, conf, market, odds, odds_is_real, ev, profile
         flags.append("goal_line_boundary")
     if market == "Under 3.5" and expected_total and expected_total > algo_under35_max_expected_goals():
         flags.append("goal_line_boundary")
+    if market == "Under 3.5":
+        home_form = fixture_context.get("home_recent_form") or {}
+        away_form = fixture_context.get("away_recent_form") or {}
+        country = normalize(fixture_context.get("country", ""))
+        league = normalize(fixture_context.get("league", ""))
+        if under35_blowout_risk(home_form, away_form):
+            flags.append("under35_blowout_risk")
+        if is_nordic_under_context(country, league):
+            flags.append("nordic_under_volatility")
     if market == "DC: 12" and conf < VALUE_MIN:
         flags.append("below_dc12_value_threshold")
     if market == "DC: 12" and float(goal_model.get("draw_confidence") or 0) >= algo_high_draw_risk_confidence():
@@ -1884,6 +1937,11 @@ def passes_publish_gate(candidate):
     if candidate["market"] == "Over 2.5" and expected_total and expected_total < algo_over25_min_expected_goals():
         return False
     if candidate["market"] == "Under 3.5" and expected_total and expected_total > algo_under35_max_expected_goals():
+        return False
+    risk_flags = set(candidate.get("risk_flags") or [])
+    if candidate["market"] == "Under 3.5" and "under35_blowout_risk" in risk_flags:
+        return False
+    if candidate["market"] == "Under 3.5" and "nordic_under_volatility" in risk_flags and candidate["conf"] < 78:
         return False
     if candidate["market"] == "DC: 12" and draw_confidence >= algo_high_draw_risk_confidence():
         return False
@@ -2155,12 +2213,16 @@ def build_market_insights(market, confidence, odds, ev, risk_flags=None, fixture
 
     if "goal_line_boundary" in risk_flags:
         _append_unique(avoid_reasons, "Goal projection is too close to the selected line.")
+    if "under35_blowout_risk" in risk_flags:
+        _append_unique(avoid_reasons, "Under 3.5 is fragile because one side can run up the score against a leaky opponent.")
+    if "nordic_under_volatility" in risk_flags:
+        _append_unique(avoid_reasons, "Nordic goal-unders require extra caution due to league volatility.")
     if "below_dc12_value_threshold" in risk_flags:
         _append_unique(avoid_reasons, "DC:12 is only allowed at Value Gem or Banker confidence.")
     if "draw_boundary_risk" in risk_flags:
         _append_unique(avoid_reasons, "Draw pressure is too high for DC:12.")
     for flag in risk_flags:
-        if flag in {"market_suppressed", "market_loss_streak", "market_recent_losses", "strategy_suppressed", "strategy_cooling", "thin_edge", "negative_market_roi", "low_market_hit_rate", "wide_odds_market", "best_price_far_above_consensus", "below_dc12_value_threshold", "draw_boundary_risk"}:
+        if flag in {"market_suppressed", "market_loss_streak", "market_recent_losses", "strategy_suppressed", "strategy_cooling", "thin_edge", "negative_market_roi", "low_market_hit_rate", "wide_odds_market", "best_price_far_above_consensus", "below_dc12_value_threshold", "draw_boundary_risk", "under35_blowout_risk", "nordic_under_volatility"}:
             _append_unique(avoid_reasons, flag)
         if flag == "strategy_promoted":
             _append_unique(confidence_drivers, "Autonomous strategy memory has promoted this market.")
@@ -2552,6 +2614,8 @@ def select_picks(all_confs, scored_fxs, odds_list):
                     **(fx.get("fixture_context", {}) or {}),
                     "country": fx.get("country", ""),
                     "league": fx.get("league", ""),
+                    "home_recent_form": fx.get("home_recent_form", {}),
+                    "away_recent_form": fx.get("away_recent_form", {}),
                 },
                 fx.get("team_news", {}),
                 strategy_data,
@@ -2735,6 +2799,8 @@ def serialize_fixture_markets(confs, real_odds=None, league=None, corner_profile
                 **(fixture_context or {}),
                 "league": league or (fixture_context or {}).get("league", ""),
                 "country": (fixture_context or {}).get("country", ""),
+                "home_recent_form": home_recent_form or {},
+                "away_recent_form": away_recent_form or {},
             },
             team_news or {},
             strategy_data,
@@ -2757,6 +2823,7 @@ def serialize_fixture_markets(confs, real_odds=None, league=None, corner_profile
             "team_news": team_news or {},
             "league": league or "",
             "country": (fixture_context or {}).get("country", ""),
+            "risk_flags": risk_flags,
         }
         eligible = passes_publish_gate(gate_candidate)
         markets.append({
@@ -3542,8 +3609,8 @@ def run_daily_algo():
     log.info(f"Bankroll: N{bankroll:,.0f}")
 
     now_wat     = datetime.now(WAT)
-    tomorrow    = (now_wat+timedelta(days=1)).strftime("%Y-%m-%d")
-    target_date = os.environ.get("OVERRIDE_DATE", tomorrow)
+    today       = now_wat.strftime("%Y-%m-%d")
+    target_date = os.environ.get("OVERRIDE_DATE", today)
     log.info(f"WAT: {now_wat.strftime('%Y-%m-%d %H:%M')} | Target: {target_date}")
 
     fixtures = fetch_aps_fixtures(target_date)

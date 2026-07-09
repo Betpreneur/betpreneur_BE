@@ -11,7 +11,7 @@ from .services import algo_runner_service
 @shared_task(bind=True, ignore_result=False)
 def generate_daily_picks(self, target_date=None):
     if target_date is None:
-        target_date = timezone.localdate() + timedelta(days=1)
+        target_date = timezone.localdate()
     else:
         target_date = date.fromisoformat(target_date)
 

@@ -999,9 +999,9 @@ class PickBackAdmin(admin.ModelAdmin):
 
 @admin.register(GameBack)
 class GameBackAdmin(admin.ModelAdmin):
-    list_display = ("id", "match_id", "match_date", "fixture", "user", "created_at")
-    list_filter = ("match_date", "created_at")
-    search_fields = ("match_id", "fixture__fixture", "user__username", "user__email")
+    list_display = ("id", "match_id", "market", "match_date", "fixture", "user", "created_at")
+    list_filter = ("match_date", "market", "created_at")
+    search_fields = ("match_id", "market", "meaning", "fixture__fixture", "user__username", "user__email")
     readonly_fields = ("created_at",)
 
 
