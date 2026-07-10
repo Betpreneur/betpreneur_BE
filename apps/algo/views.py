@@ -1932,6 +1932,8 @@ def _selection_original_odds(item):
 
 
 def _selection_suggested_odds(item):
+    if item.get("status") != "analysed":
+        return None
     if item.get("verdict") == "remove":
         return None
     if item.get("verdict") == "replace":
@@ -1951,7 +1953,7 @@ def _combined_odds(values):
 
 def _selection_strength_score(item):
     if item.get("status") != "analysed":
-        return 20
+        return None
     market = item.get("selected_market") or {}
     final_confidence = _float_or_none(market.get("final_confidence") or market.get("confidence")) or 0
     display_score = _float_or_none(market.get("display_score")) or final_confidence
@@ -1978,6 +1980,8 @@ def _selection_card(item):
         "verdict": item.get("verdict"),
         "status": item.get("status"),
         "score": item.get("selection_score"),
+        "submitted_pick_score": item.get("selection_score"),
+        "match_resolution_score": (matched.get("match_score") if matched else None),
         "confidence": selected_market.get("final_confidence") or selected_market.get("confidence"),
         "odds": _selection_original_odds(item),
         "suggested_market": replacement_market.get("market") if item.get("verdict") == "replace" else item.get("submitted_market"),
@@ -2004,7 +2008,8 @@ def _slip_intelligence(results):
     replace_items = [item for item in enriched if item.get("verdict") == "replace"]
     caution_items = [item for item in enriched if item.get("verdict") == "caution"]
     keep_items = [item for item in enriched if item.get("verdict") == "keep"]
-    unverified_items = [item for item in enriched if item.get("status") != "analysed"]
+    expired_items = [item for item in enriched if item.get("status") == "expired"]
+    unverified_items = [item for item in enriched if item.get("status") not in {"analysed", "expired"}]
 
     if remove_items or len(replace_items) >= 3 or overall_score < 45:
         risk_level = "high"
@@ -2013,8 +2018,15 @@ def _slip_intelligence(results):
     else:
         risk_level = "low"
 
-    strongest = sorted(analysed, key=lambda item: item.get("selection_score", 0), reverse=True)[:3]
-    weakest = sorted(enriched, key=lambda item: item.get("selection_score", 0))[:3]
+    strongest = sorted(
+        [item for item in analysed if item.get("verdict") in {"keep", "caution"}],
+        key=lambda item: item.get("selection_score") or 0,
+        reverse=True,
+    )[:3]
+    weakest = sorted(
+        [item for item in analysed if item.get("verdict") in {"remove", "replace"}],
+        key=lambda item: item.get("selection_score") or 0,
+    )[:3]
     original_combined = _combined_odds(_selection_original_odds(item) for item in enriched)
     suggested_combined = _combined_odds(_selection_suggested_odds(item) for item in enriched)
 
@@ -2041,6 +2053,7 @@ def _slip_intelligence(results):
         "legs_to_caution": [_selection_card(item) for item in caution_items],
         "legs_to_replace": [_selection_card(item) for item in replace_items],
         "legs_to_remove": [_selection_card(item) for item in remove_items],
+        "expired_legs": [_selection_card(item) for item in expired_items],
         "unverified_legs": [_selection_card(item) for item in unverified_items],
     }
 
@@ -2054,6 +2067,7 @@ def _manual_review_summary(results):
         "caution_count": sum(1 for item in enriched if item.get("verdict") == "caution"),
         "replace_count": sum(1 for item in enriched if item.get("verdict") == "replace"),
         "remove_count": sum(1 for item in enriched if item.get("verdict") == "remove"),
+        "expired_count": sum(1 for item in enriched if item.get("status") == "expired"),
         "unmatched_count": sum(1 for item in enriched if item.get("status") in {"unmatched", "ambiguous_match", "market_not_found"}),
         "pending_analysis_count": sum(1 for item in enriched if item.get("status") == "matched_unscored"),
         "intelligence": intelligence,
@@ -2061,7 +2075,8 @@ def _manual_review_summary(results):
 
 
 def _review_status_from_summary(summary):
-    if summary.get("count") and summary.get("analysed_count") == summary.get("count"):
+    reviewable_count = max(0, int(summary.get("count") or 0) - int(summary.get("expired_count") or 0))
+    if summary.get("count") and summary.get("analysed_count") == reviewable_count:
         return SlipReview.Status.COMPLETED
     if summary.get("analysed_count") or summary.get("pending_analysis_count"):
         return SlipReview.Status.PARTIAL
@@ -2128,6 +2143,7 @@ def _empty_slip_summary(verdict, *, task_id="", error=""):
         "caution_count": 0,
         "replace_count": 0,
         "remove_count": 0,
+        "expired_count": 0,
         "unmatched_count": 0,
         "pending_analysis_count": 0,
         "intelligence": {
@@ -2142,6 +2158,7 @@ def _empty_slip_summary(verdict, *, task_id="", error=""):
             "legs_to_caution": [],
             "legs_to_replace": [],
             "legs_to_remove": [],
+            "expired_legs": [],
             "unverified_legs": [],
         },
     }
@@ -2221,13 +2238,92 @@ def _provider_match_date(selection):
         return None
 
 
+def _provider_kickoff_datetime(selection):
+    provider_payload = selection.get("provider_payload") or {}
+    kickoff_ms = provider_payload.get("kickoff_ms")
+    if kickoff_ms in (None, ""):
+        nested = provider_payload.get("provider_payload") or {}
+        kickoff_ms = ((nested.get("outcome") or {}).get("estimateStartTime"))
+        if kickoff_ms in (None, ""):
+            kickoff_ms = ((nested.get("leg") or {}).get("eventStartTime"))
+    try:
+        if kickoff_ms in (None, ""):
+            return None
+        return datetime.fromtimestamp(float(kickoff_ms) / 1000, tz=timezone.get_current_timezone())
+    except (TypeError, ValueError, OSError):
+        return None
+
+
+def _provider_event_status(selection):
+    provider_payload = selection.get("provider_payload") or {}
+    nested = provider_payload.get("provider_payload") or {}
+    outcome = nested.get("outcome") or {}
+    status = str(outcome.get("status") if outcome.get("status") is not None else "").strip()
+    match_status = str(outcome.get("matchStatus") or "").strip().lower()
+    return status, match_status
+
+
+def _selection_expiry(selection):
+    status, match_status = _provider_event_status(selection)
+    terminal_statuses = {"ended", "finished", "cancelled", "canceled", "postponed", "abandoned"}
+    if status in {"3", "4", "5"} or match_status in terminal_statuses:
+        return {
+            "expired": True,
+            "reason": "provider_event_not_reviewable",
+            "message": "This event has already ended or is not available for pre-match review.",
+        }
+    kickoff_at = _provider_kickoff_datetime(selection)
+    if kickoff_at and kickoff_at <= timezone.now():
+        return {
+            "expired": True,
+            "reason": "kickoff_already_passed",
+            "message": "This event has already started and cannot be reviewed as a pre-match selection.",
+        }
+    return {"expired": False}
+
+
 def _analyse_manual_selection(selection, *, days, request=None, force_fresh=False):
     match_text = selection.get("match", "")
     requested_market = selection.get("market", "")
     provider_date = _provider_match_date(selection)
+    provider_kickoff = _provider_kickoff_datetime(selection)
+    expiry = _selection_expiry(selection)
+    resolver_trace = [
+        {
+            "strategy": "provider_metadata",
+            "provider_date": provider_date.isoformat() if provider_date else "",
+            "provider_kickoff": provider_kickoff.isoformat() if provider_kickoff else "",
+            "competition": (selection.get("provider_payload") or {}).get("competition") or "",
+            "expired": expiry.get("expired", False),
+            "expiry_reason": expiry.get("reason", ""),
+        }
+    ]
+    if expiry.get("expired"):
+        return {
+            "match": match_text,
+            "submitted_market": requested_market,
+            "status": "expired",
+            "verdict": "expired",
+            "message": expiry.get("message"),
+            "fixture_resolution": {
+                "status": "expired",
+                "attempts": resolver_trace,
+            },
+            "possible_matches": [],
+        }
+
     search_service = FixtureSearchService()
     search = search_service.search(match_text, days=days, limit=5)
     candidates = search.get("results") or []
+    resolver_trace.append(
+        {
+            "strategy": "local_or_default_window",
+            "candidate_count": len(candidates),
+            "refreshed": search.get("refreshed", False),
+            "refresh_errors": search.get("refresh_errors", []),
+            "candidate_match_ids": [candidate.get("match_id") for candidate in candidates],
+        }
+    )
     best_score = float((candidates[0] if candidates else {}).get("match_score") or 0)
     if provider_date and best_score < 70:
         search = search_service.search(
@@ -2239,6 +2335,15 @@ def _analyse_manual_selection(selection, *, days, request=None, force_fresh=Fals
             unrestricted=True,
         )
         candidates = search.get("results") or candidates
+        resolver_trace.append(
+            {
+                "strategy": "provider_date_unrestricted_refresh",
+                "candidate_count": len(search.get("results") or []),
+                "refreshed": search.get("refreshed", False),
+                "refresh_errors": search.get("refresh_errors", []),
+                "candidate_match_ids": [candidate.get("match_id") for candidate in (search.get("results") or [])],
+            }
+        )
         best_score = float((candidates[0] if candidates else {}).get("match_score") or 0)
     if provider_date and best_score < 70:
         provider_search = search_service.search_provider_fixture(
@@ -2248,6 +2353,7 @@ def _analyse_manual_selection(selection, *, days, request=None, force_fresh=Fals
             limit=5,
         )
         candidates = provider_search.get("results") or candidates
+        resolver_trace.extend(provider_search.get("trace") or [])
     if not candidates:
         return {
             "match": match_text,
@@ -2255,6 +2361,10 @@ def _analyse_manual_selection(selection, *, days, request=None, force_fresh=Fals
             "status": "unmatched",
             "verdict": "unmatched",
             "message": "We could not find this fixture in the upcoming fixture cache or API-Football search window.",
+            "fixture_resolution": {
+                "status": "unmatched",
+                "attempts": resolver_trace,
+            },
             "possible_matches": [],
         }
 
@@ -2266,6 +2376,10 @@ def _analyse_manual_selection(selection, *, days, request=None, force_fresh=Fals
             "status": "ambiguous_match",
             "verdict": "unmatched",
             "message": "We found possible fixtures, but none were clear enough to analyse automatically.",
+            "fixture_resolution": {
+                "status": "ambiguous_match",
+                "attempts": resolver_trace,
+            },
             "possible_matches": candidates,
         }
 
@@ -2298,6 +2412,10 @@ def _analyse_manual_selection(selection, *, days, request=None, force_fresh=Fals
             "matched_fixture": candidate,
             "possible_matches": candidates,
             "on_demand_analysis": on_demand,
+            "fixture_resolution": {
+                "status": "matched_unscored",
+                "attempts": resolver_trace,
+            },
         }
 
     markets = game.get("markets") or []
@@ -2317,6 +2435,10 @@ def _analyse_manual_selection(selection, *, days, request=None, force_fresh=Fals
             "available_markets": [market.get("market") for market in markets],
             "best_market": game.get("best_market"),
             "recommended_market": game.get("recommended_market"),
+            "fixture_resolution": {
+                "status": "market_not_found",
+                "attempts": resolver_trace,
+            },
         }
 
     best_market = game.get("best_market") or game.get("top_market")
@@ -2348,6 +2470,10 @@ def _analyse_manual_selection(selection, *, days, request=None, force_fresh=Fals
         "replacement_market": replacement_market,
         "possible_matches": candidates,
         "on_demand_analysis": on_demand,
+        "fixture_resolution": {
+            "status": "matched",
+            "attempts": resolver_trace,
+        },
     }
 
 

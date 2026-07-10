@@ -176,11 +176,12 @@ class FixtureSearchService:
 
     def search_provider_fixture(self, query, *, provider_date, competition="", limit=10):
         if not provider_date:
-            return {"refreshed": False, "refresh_errors": [], "results": []}
+            return {"refreshed": False, "refresh_errors": [], "results": [], "trace": []}
 
         start_date = max(provider_date - timedelta(days=1), timezone.localdate())
         days = 2
         errors = []
+        attempts = []
         total = 0
         from .grindalgo import algo_runner
 
@@ -204,11 +205,48 @@ class FixtureSearchService:
                         fixtures = algo_runner.aps_get("/fixtures", params)
                     except Exception as exc:
                         errors.append({"date": target_date.isoformat(), "params": params, "error": str(exc)})
+                        attempts.append(
+                            {
+                                "strategy": "api_provider_lookup",
+                                "parameters": params,
+                                "error": str(exc),
+                                "api_result_count": 0,
+                                "cached_count": 0,
+                            }
+                        )
                         continue
-                    total += self._upsert_api_fixtures(fixtures, target_date)
+                    cached_count = self._upsert_api_fixtures(fixtures, target_date)
+                    total += cached_count
+                    attempts.append(
+                        {
+                            "strategy": "api_provider_lookup",
+                            "parameters": params,
+                            "api_result_count": len(fixtures or []),
+                            "cached_count": cached_count,
+                            "fixture_ids": [
+                                ((fixture.get("fixture") or {}).get("id"))
+                                for fixture in (fixtures or [])[:25]
+                            ],
+                        }
+                    )
 
         candidates = self._search_cached(query, start_date=start_date, days=days, limit=limit)
-        return {"refreshed": True, "refresh_errors": errors, "synced": total, "results": candidates}
+        attempts.append(
+            {
+                "strategy": "cache_after_provider_lookup",
+                "start_date": start_date.isoformat(),
+                "days": days,
+                "candidate_count": len(candidates),
+                "candidate_match_ids": [candidate.get("match_id") for candidate in candidates],
+            }
+        )
+        return {
+            "refreshed": True,
+            "refresh_errors": errors,
+            "synced": total,
+            "results": candidates,
+            "trace": attempts,
+        }
 
     def _provider_league_id(self, competition):
         normalized = normalize_fixture_text(competition)
