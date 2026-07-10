@@ -1750,8 +1750,58 @@ def _normalise_market_name(value):
     return " ".join(str(value or "").strip().lower().split())
 
 
+def _canonical_market_name(value):
+    normalized = _normalise_market_name(value)
+    aliases = {
+        "1": "Home Win",
+        "home": "Home Win",
+        "home win": "Home Win",
+        "home team": "Home Win",
+        "2": "Away Win",
+        "away": "Away Win",
+        "away win": "Away Win",
+        "away team": "Away Win",
+        "x": "Draw",
+        "draw": "Draw",
+        "home or away": "DC: 12",
+        "home/away": "DC: 12",
+        "home away": "DC: 12",
+        "12": "DC: 12",
+        "dc 12": "DC: 12",
+        "dc: 12": "DC: 12",
+        "double chance 12": "DC: 12",
+        "both teams to score": "GG / BTTS Yes",
+        "btts yes": "GG / BTTS Yes",
+        "gg": "GG / BTTS Yes",
+        "gg / btts yes": "GG / BTTS Yes",
+    }
+    return aliases.get(normalized, value)
+
+
 def _market_matches(requested, actual):
-    return _normalise_market_name(requested) == _normalise_market_name(actual)
+    return _normalise_market_name(_canonical_market_name(requested)) == _normalise_market_name(
+        _canonical_market_name(actual)
+    )
+
+
+def _replacement_market_for_slip(game):
+    market = game.get("recommended_market")
+    if not market:
+        return None
+    status_value = market.get("recommendation_status")
+    if market.get("recommended") or status_value in {"recommended", "playable"}:
+        return market
+    return None
+
+
+def _market_is_better_for_slip(selected_market, replacement_market):
+    if not replacement_market:
+        return False
+    if _market_matches(selected_market.get("market"), replacement_market.get("market")):
+        return False
+    selected_score = float(selected_market.get("display_score") or 0)
+    replacement_score = float(replacement_market.get("display_score") or 0)
+    return replacement_score >= selected_score + 10
 
 
 def _reverse_oriented_market(market):
@@ -1824,12 +1874,9 @@ def _manual_fixture_game(match_id, match_date, request=None):
     )
 
 
-def _manual_verdict(selected_market, best_market):
+def _manual_verdict(selected_market, replacement_market):
     status_value = selected_market.get("recommendation_status") or "no_edge"
-    selected_score = float(selected_market.get("display_score") or 0)
-    best_score = float((best_market or {}).get("display_score") or selected_score)
-    best_market_name = (best_market or {}).get("market")
-    has_better_market = bool(best_market_name and best_market_name != selected_market.get("market") and best_score >= selected_score + 10)
+    has_better_market = _market_is_better_for_slip(selected_market, replacement_market)
 
     if selected_market.get("recommended") or selected_market.get("selected"):
         verdict = "keep"
@@ -1888,7 +1935,7 @@ def _selection_suggested_odds(item):
     if item.get("verdict") == "remove":
         return None
     if item.get("verdict") == "replace":
-        return _float_or_none((item.get("best_market") or {}).get("odds"))
+        return _float_or_none((item.get("replacement_market") or {}).get("odds"))
     return _selection_original_odds(item) or _float_or_none((item.get("selected_market") or {}).get("odds"))
 
 
@@ -1922,7 +1969,7 @@ def _selection_strength_score(item):
 def _selection_card(item):
     matched = item.get("matched_fixture") or {}
     selected_market = item.get("selected_market") or {}
-    best_market = item.get("best_market") or {}
+    replacement_market = item.get("replacement_market") or {}
     return {
         "match": item.get("match"),
         "fixture": matched.get("fixture") or item.get("match"),
@@ -1933,7 +1980,7 @@ def _selection_card(item):
         "score": item.get("selection_score"),
         "confidence": selected_market.get("final_confidence") or selected_market.get("confidence"),
         "odds": _selection_original_odds(item),
-        "suggested_market": best_market.get("market") if item.get("verdict") == "replace" else item.get("submitted_market"),
+        "suggested_market": replacement_market.get("market") if item.get("verdict") == "replace" else item.get("submitted_market"),
         "suggested_odds": _selection_suggested_odds(item),
         "message": item.get("message", ""),
         "warnings": (selected_market.get("risk_flags") or [])[:5],
@@ -2185,8 +2232,8 @@ def _analyse_manual_selection(selection, *, days, request=None, force_fresh=Fals
     if provider_date and best_score < 70:
         search = search_service.search(
             match_text,
-            start_date=max(provider_date - timedelta(days=1), timezone.localdate()),
-            days=2,
+            start_date=max(provider_date - timedelta(days=2), timezone.localdate()),
+            days=4,
             limit=5,
             refresh=True,
             unrestricted=True,
@@ -2245,7 +2292,8 @@ def _analyse_manual_selection(selection, *, days, request=None, force_fresh=Fals
         }
 
     markets = game.get("markets") or []
-    analysis_market = _market_for_fixture_orientation(requested_market, candidate)
+    canonical_requested_market = _canonical_market_name(requested_market)
+    analysis_market = _market_for_fixture_orientation(canonical_requested_market, candidate)
     selected_market = next((market for market in markets if _market_matches(analysis_market, market.get("market"))), None)
     if not selected_market:
         return {
@@ -2262,8 +2310,10 @@ def _analyse_manual_selection(selection, *, days, request=None, force_fresh=Fals
             "recommended_market": game.get("recommended_market"),
         }
 
-    best_market = game.get("recommended_market") or game.get("best_market") or game.get("top_market")
-    verdict = _manual_verdict(selected_market, best_market)
+    best_market = game.get("best_market") or game.get("top_market")
+    recommended_market = game.get("recommended_market")
+    replacement_market = _replacement_market_for_slip(game)
+    verdict = _manual_verdict(selected_market, replacement_market)
     return {
         "match": match_text,
         "submitted_market": requested_market,
@@ -2285,7 +2335,8 @@ def _analyse_manual_selection(selection, *, days, request=None, force_fresh=Fals
         },
         "selected_market": selected_market,
         "best_market": best_market,
-        "recommended_market": game.get("recommended_market"),
+        "recommended_market": recommended_market,
+        "replacement_market": replacement_market,
         "possible_matches": candidates,
         "on_demand_analysis": on_demand,
     }

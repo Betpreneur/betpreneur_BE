@@ -70,6 +70,11 @@ def parse_match_query(value):
     return "", "", normalized
 
 
+def _team_tokens(value):
+    stopwords = {"fc", "cf", "sc", "afc", "bk", "city", "club", "united", "the"}
+    return {token for token in normalize_fixture_text(value).split() if len(token) > 2 and token not in stopwords}
+
+
 class FixtureSearchService:
     DEFAULT_DAYS = 3
     MAX_DAYS = 14
@@ -170,11 +175,24 @@ class FixtureSearchService:
 
         scored = []
         for fixture in queryset[:500]:
+            if home_query and away_query and not self._has_team_token_overlap(fixture, home_query, away_query):
+                continue
             score, orientation = self._match_score_and_orientation(fixture, home_query, away_query, normalized_query)
             if score >= 35:
                 scored.append((score, orientation, fixture))
         scored.sort(key=lambda item: (item[0], item[2].match_date), reverse=True)
         return [self._serialize_fixture(fixture, score, orientation) for score, orientation, fixture in scored[:limit]]
+
+    def _has_team_token_overlap(self, fixture, home_query, away_query):
+        home_tokens = _team_tokens(home_query)
+        away_tokens = _team_tokens(away_query)
+        fixture_home_tokens = _team_tokens(fixture.home_team_normalized or fixture.home_team)
+        fixture_away_tokens = _team_tokens(fixture.away_team_normalized or fixture.away_team)
+        if not home_tokens or not away_tokens:
+            return True
+        direct = bool(home_tokens & fixture_home_tokens) and bool(away_tokens & fixture_away_tokens)
+        reversed_match = bool(home_tokens & fixture_away_tokens) and bool(away_tokens & fixture_home_tokens)
+        return direct or reversed_match
 
     def _match_score(self, fixture, home_query, away_query, normalized_query):
         score, _orientation = self._match_score_and_orientation(fixture, home_query, away_query, normalized_query)
