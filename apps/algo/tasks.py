@@ -102,8 +102,8 @@ def explain_picks_for_run(self, run_id):
     ignore_result=False,
     max_retries=2,
     default_retry_delay=60,
-    soft_time_limit=120,
-    time_limit=180,
+    soft_time_limit=600,
+    time_limit=720,
 )
 def import_slip_review(self, review_id):
     try:

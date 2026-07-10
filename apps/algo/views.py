@@ -21,7 +21,7 @@ from rest_framework.views import APIView
 
 from .models import AlgoFixture, AlgoRun, GameBack, MarketPrediction, Pick, SlipReview, SlipSelection
 from .recommendation_policy import assess_recommendation
-from .services import BetanoBetslipImporter, FixtureSearchService, SportyBetShareImporter
+from .services import BetanoBetslipImporter, FixtureSearchService, SportyBetShareImporter, algo_runner_service
 from .performance import (
     add_pick,
     confidence_band,
@@ -2163,14 +2163,25 @@ def _analyse_manual_selection(selection, *, days, request=None):
 
     game = _manual_fixture_game(candidate["match_id"], candidate["match_date"], request=request)
     if not game:
+        on_demand = algo_runner_service.score_cached_fixture_on_demand(
+            candidate["match_id"],
+            match_date=candidate.get("match_date"),
+            reason="slip_review",
+        )
+        game = _manual_fixture_game(candidate["match_id"], candidate["match_date"], request=request)
+    else:
+        on_demand = None
+
+    if not game:
         return {
             "match": match_text,
             "submitted_market": requested_market,
             "status": "matched_unscored",
             "verdict": "pending_analysis",
-            "message": "Fixture matched, but this game has not been scored by the prediction engine yet.",
+            "message": "Fixture matched, but on-demand analysis could not produce market predictions yet.",
             "matched_fixture": candidate,
             "possible_matches": candidates,
+            "on_demand_analysis": on_demand,
         }
 
     markets = game.get("markets") or []
@@ -2210,6 +2221,7 @@ def _analyse_manual_selection(selection, *, days, request=None):
         "best_market": best_market,
         "recommended_market": game.get("recommended_market"),
         "possible_matches": candidates,
+        "on_demand_analysis": on_demand,
     }
 
 

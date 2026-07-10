@@ -1626,6 +1626,90 @@ class AlgoRunnerService:
             fixture.save(update_fields=["status", "error", "updated_at"])
             return {"fixture_id": fixture.id, "status": "failed", "error": str(exc)}
 
+    def score_cached_fixture_on_demand(self, match_id, *, match_date=None, reason="on_demand"):
+        match_id = str(match_id or "").strip()
+        if not match_id:
+            return {"status": "failed", "error": "match_id_required"}
+        existing = MarketPrediction.objects.filter(match_id=match_id).order_by("-run__created_at", "-created_at").first()
+        if existing:
+            return {
+                "status": "already_scored",
+                "match_id": match_id,
+                "run_id": existing.run_id,
+            }
+
+        fixture_query = FixtureCache.objects.filter(match_id=match_id)
+        if match_date:
+            fixture_query = fixture_query.filter(match_date=match_date)
+        cached = fixture_query.order_by("match_date", "-updated_at").first()
+        if not cached:
+            return {"status": "failed", "match_id": match_id, "error": "fixture_cache_not_found"}
+
+        target_date = cached.match_date
+        performance_profile, strategy_profile = self._pipeline_profiles(target_date)
+        algo_run = AlgoRun.objects.create(
+            target_date=target_date,
+            status=AlgoRun.Status.RUNNING,
+            started_at=timezone.now(),
+            fd_fixtures=0,
+            aps_fixtures=1,
+            result={
+                "status": AlgoRun.Status.RUNNING,
+                "date": target_date.isoformat(),
+                "publish_policy": "on_demand_fixture_analysis",
+                "reason": reason,
+                "strategy_profile": strategy_profile,
+                "performance_profile": performance_profile,
+                "storage": self._run_storage_payload(),
+            },
+        )
+        fixture = AlgoFixture.objects.create(
+            run=algo_run,
+            match_date=target_date,
+            fixture=cached.fixture,
+            home_team=cached.home_team,
+            away_team=cached.away_team,
+            home_logo=cached.home_logo,
+            away_logo=cached.away_logo,
+            league=cached.league,
+            league_logo=cached.league_logo,
+            country=cached.country,
+            country_flag=cached.country_flag,
+            round=cached.round,
+            league_type=cached.league_type,
+            kickoff=cached.kickoff,
+            match_id=match_id,
+            source_payload=cached.api_payload or {},
+            status=AlgoFixture.Status.PENDING,
+        )
+        result = self.score_fixture_for_run(fixture.id)
+        fixture.refresh_from_db()
+        scored_count = 1 if result.get("status") == "scored" else 0
+        market_count = int(result.get("market_count") or 0)
+        algo_run.refresh_from_db()
+        algo_run.status = AlgoRun.Status.SUCCESS if scored_count else AlgoRun.Status.NO_DATA
+        algo_run.total_scored = scored_count
+        algo_run.finished_at = timezone.now()
+        run_result = dict(algo_run.result or {})
+        run_result.update({
+            "status": algo_run.status,
+            "total_scored": scored_count,
+            "market_count": market_count,
+            "on_demand_match_id": match_id,
+            "on_demand_fixture_id": fixture.id,
+        })
+        if result.get("error"):
+            algo_run.error = str(result.get("error"))[:2000]
+            run_result["error"] = algo_run.error
+        algo_run.result = run_result
+        algo_run.save(update_fields=["status", "total_scored", "finished_at", "error", "result", "updated_at"])
+        return {
+            **result,
+            "run_id": algo_run.id,
+            "match_id": match_id,
+            "target_date": target_date.isoformat(),
+        }
+
     def publish_fanout_run(self, algo_run: AlgoRun):
         if not isinstance(algo_run, AlgoRun):
             algo_run = AlgoRun.objects.get(id=algo_run)
