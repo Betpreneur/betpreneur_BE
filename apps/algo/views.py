@@ -2263,6 +2263,24 @@ def _provider_event_status(selection):
     return status, match_status
 
 
+def _provider_metadata(selection):
+    provider_payload = selection.get("provider_payload") or {}
+    nested = provider_payload.get("provider_payload") or {}
+    outcome = nested.get("outcome") or {}
+    sport = outcome.get("sport") or {}
+    category = sport.get("category") or {}
+    tournament = category.get("tournament") or {}
+    provider_competition_id = str(tournament.get("id") or "")
+    return {
+        "provider": selection.get("provider") or provider_payload.get("provider") or "",
+        "provider_event_id": provider_payload.get("provider_event_id") or outcome.get("eventId") or "",
+        "provider_competition_id": provider_competition_id,
+        "competition": provider_payload.get("competition") or tournament.get("name") or "",
+        "home_team": provider_payload.get("home_team") or outcome.get("homeTeamName") or "",
+        "away_team": provider_payload.get("away_team") or outcome.get("awayTeamName") or "",
+    }
+
+
 def _selection_expiry(selection):
     status, match_status = _provider_event_status(selection)
     terminal_statuses = {"ended", "finished", "cancelled", "canceled", "postponed", "abandoned"}
@@ -2287,13 +2305,16 @@ def _analyse_manual_selection(selection, *, days, request=None, force_fresh=Fals
     requested_market = selection.get("market", "")
     provider_date = _provider_match_date(selection)
     provider_kickoff = _provider_kickoff_datetime(selection)
+    provider_metadata = _provider_metadata(selection)
     expiry = _selection_expiry(selection)
     resolver_trace = [
         {
             "strategy": "provider_metadata",
             "provider_date": provider_date.isoformat() if provider_date else "",
             "provider_kickoff": provider_kickoff.isoformat() if provider_kickoff else "",
-            "competition": (selection.get("provider_payload") or {}).get("competition") or "",
+            "competition": provider_metadata.get("competition") or "",
+            "provider_event_id": provider_metadata.get("provider_event_id") or "",
+            "provider_competition_id": provider_metadata.get("provider_competition_id") or "",
             "expired": expiry.get("expired", False),
             "expiry_reason": expiry.get("reason", ""),
         }
@@ -2313,19 +2334,34 @@ def _analyse_manual_selection(selection, *, days, request=None, force_fresh=Fals
         }
 
     search_service = FixtureSearchService()
-    search = search_service.search(match_text, days=days, limit=5)
-    candidates = search.get("results") or []
-    resolver_trace.append(
-        {
-            "strategy": "local_or_default_window",
-            "candidate_count": len(candidates),
-            "refreshed": search.get("refreshed", False),
-            "refresh_errors": search.get("refresh_errors", []),
-            "candidate_match_ids": [candidate.get("match_id") for candidate in candidates],
-        }
+    provider_fixture = search_service.get_provider_fixture(
+        provider=provider_metadata.get("provider"),
+        provider_event_id=provider_metadata.get("provider_event_id"),
     )
+    if provider_fixture:
+        candidates = [provider_fixture["fixture"]]
+        resolver_trace.append(
+            {
+                "strategy": "provider_fixture_map",
+                "mapping_id": provider_fixture.get("mapping_id"),
+                "candidate_count": 1,
+                "candidate_match_ids": [provider_fixture["fixture"].get("match_id")],
+            }
+        )
+    else:
+        search = search_service.search(match_text, days=days, limit=5)
+        candidates = search.get("results") or []
+        resolver_trace.append(
+            {
+                "strategy": "local_or_default_window",
+                "candidate_count": len(candidates),
+                "refreshed": search.get("refreshed", False),
+                "refresh_errors": search.get("refresh_errors", []),
+                "candidate_match_ids": [candidate.get("match_id") for candidate in candidates],
+            }
+        )
     best_score = float((candidates[0] if candidates else {}).get("match_score") or 0)
-    if provider_date and best_score < 70:
+    if not provider_fixture and provider_date and best_score < 70:
         search = search_service.search(
             match_text,
             start_date=max(provider_date - timedelta(days=2), timezone.localdate()),
@@ -2345,11 +2381,13 @@ def _analyse_manual_selection(selection, *, days, request=None, force_fresh=Fals
             }
         )
         best_score = float((candidates[0] if candidates else {}).get("match_score") or 0)
-    if provider_date and best_score < 70:
+    if not provider_fixture and provider_date and best_score < 70:
         provider_search = search_service.search_provider_fixture(
             match_text,
             provider_date=provider_date,
-            competition=(selection.get("provider_payload") or {}).get("competition") or "",
+            competition=provider_metadata.get("competition") or "",
+            provider=provider_metadata.get("provider") or "",
+            provider_competition_id=provider_metadata.get("provider_competition_id") or "",
             limit=5,
         )
         candidates = provider_search.get("results") or candidates
@@ -2382,6 +2420,12 @@ def _analyse_manual_selection(selection, *, days, request=None, force_fresh=Fals
             },
             "possible_matches": candidates,
         }
+    search_service.learn_resolution(
+        provider_metadata=provider_metadata,
+        candidate=candidate,
+        confidence=candidate.get("match_score"),
+        method="provider_fixture_map" if provider_fixture else "team_date_league",
+    )
 
     on_demand = None
     if force_fresh:
@@ -2514,6 +2558,7 @@ def process_slip_review_import(review_id):
             {
                 "match": item.get("match", ""),
                 "market": item.get("market", ""),
+                "provider": review.source,
                 "provider_payload": item,
             }
             for item in imported.get("selections") or []

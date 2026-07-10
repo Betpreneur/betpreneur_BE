@@ -17,7 +17,17 @@ from django.db.models import Count, Q
 from django.utils.dateparse import parse_datetime
 from django.utils import timezone
 
-from .models import AlgoFixture, AlgoRun, FixtureCache, MarketPrediction, Pick, StrategyReview
+from .models import (
+    AlgoFixture,
+    AlgoRun,
+    BookmakerLeagueMap,
+    FixtureCache,
+    MarketPrediction,
+    Pick,
+    ProviderFixtureMap,
+    StrategyReview,
+    TeamAliasMap,
+)
 from .recommendation_policy import (
     assess_calibration_trust,
     assess_league_market_trust,
@@ -74,9 +84,102 @@ def json_safe(value):
     return json.loads(json.dumps(value, default=str))
 
 
+TEAM_NAME_ALIASES = {
+    "turun palloseura": {"tps"},
+    "tps": {"turun", "palloseura"},
+    "ekenas idrottsforening": {"eif", "ekenas"},
+    "eif": {"ekenas", "idrottsforening"},
+}
+_team_alias_cache = {}
+
+
+def _mapped_team_alias_tokens(normalized):
+    if not normalized:
+        return set()
+    if normalized in _team_alias_cache:
+        return _team_alias_cache[normalized]
+    try:
+        rows = TeamAliasMap.objects.filter(active=True).filter(
+            Q(alias_normalized=normalized) | Q(canonical_normalized=normalized)
+        )[:20]
+        tokens = set()
+        for row in rows:
+            tokens.update(token for token in normalize_fixture_text(row.alias).split() if len(token) > 1)
+            tokens.update(token for token in normalize_fixture_text(row.canonical_name).split() if len(token) > 1)
+    except Exception:
+        tokens = set()
+    _team_alias_cache[normalized] = tokens
+    return tokens
+
+
+def _team_acronyms(value):
+    normalized = normalize_fixture_text(value)
+    tokens = [token for token in normalized.split() if len(token) > 1]
+    if len(tokens) < 2:
+        return set()
+    acronyms = {"".join(token[0] for token in tokens)}
+    meaningful_tokens = [token for token in tokens if token not in {"fc", "cf", "sc", "afc", "club", "the"}]
+    if len(meaningful_tokens) >= 2:
+        acronyms.add("".join(token[0] for token in meaningful_tokens))
+    return {item for item in acronyms if len(item) >= 2}
+
+
 def _team_tokens(value):
-    stopwords = {"fc", "cf", "sc", "afc", "bk", "city", "club", "united", "the"}
-    return {token for token in normalize_fixture_text(value).split() if len(token) > 2 and token not in stopwords}
+    stopwords = {"fc", "cf", "sc", "afc", "bk", "club", "the"}
+    normalized = normalize_fixture_text(value)
+    tokens = [token for token in normalized.split() if len(token) > 2]
+    meaningful = [token for token in tokens if token not in stopwords]
+    result = set(meaningful or tokens)
+    result.update(TEAM_NAME_ALIASES.get(normalized, set()))
+    result.update(_mapped_team_alias_tokens(normalized))
+    return result
+
+
+def _acronym_match_score(query, fixture_name):
+    query_acronyms = _team_acronyms(query)
+    fixture_acronyms = _team_acronyms(fixture_name)
+    query_tokens = _team_tokens(query)
+    fixture_tokens = _team_tokens(fixture_name)
+    for acronym in query_acronyms:
+        if acronym in fixture_tokens or any(token.startswith(acronym) for token in fixture_tokens):
+            return 0.94
+    for acronym in fixture_acronyms:
+        if acronym in query_tokens or any(token.startswith(acronym) for token in query_tokens):
+            return 0.94
+    return 0.0
+
+
+def _soft_token_coverage(query_tokens, fixture_tokens):
+    if not query_tokens or not fixture_tokens:
+        return 0.0
+    matched = 0
+    for query_token in query_tokens:
+        best = max(
+            SequenceMatcher(None, query_token, fixture_token).ratio()
+            for fixture_token in fixture_tokens
+        )
+        if best >= 0.78:
+            matched += 1
+    return matched / max(min(len(query_tokens), len(fixture_tokens)), 1)
+
+
+def _token_side_score(query, fixture_name):
+    query_tokens = _team_tokens(query)
+    fixture_tokens = _team_tokens(fixture_name)
+    if not query_tokens or not fixture_tokens:
+        return 0.0
+    overlap = query_tokens & fixture_tokens
+    if not overlap:
+        acronym_score = _acronym_match_score(query, fixture_name)
+        soft_coverage = _soft_token_coverage(query_tokens, fixture_tokens)
+        if soft_coverage:
+            return max(acronym_score, min(0.96, 0.70 + (soft_coverage * 0.26)))
+        return acronym_score
+    coverage = max(
+        len(overlap) / max(len(query_tokens), 1),
+        len(overlap) / max(len(fixture_tokens), 1),
+    )
+    return min(1.0, 0.72 + (coverage * 0.28))
 
 
 class FixtureSearchService:
@@ -174,7 +277,16 @@ class FixtureSearchService:
             candidates = self._search_cached(query, start_date=start_date, days=days, limit=limit)
         return {"refreshed": refreshed, "refresh_errors": refresh_errors, "results": candidates}
 
-    def search_provider_fixture(self, query, *, provider_date, competition="", limit=10):
+    def search_provider_fixture(
+        self,
+        query,
+        *,
+        provider_date,
+        competition="",
+        provider="",
+        provider_competition_id="",
+        limit=10,
+    ):
         if not provider_date:
             return {"refreshed": False, "refresh_errors": [], "results": [], "trace": []}
 
@@ -189,7 +301,11 @@ class FixtureSearchService:
             for offset in range(days + 1):
                 target_date = start_date + timedelta(days=offset)
                 params_list = [{"date": target_date.isoformat(), "timezone": "Africa/Lagos"}]
-                league_id = self._provider_league_id(competition)
+                league_id = self._provider_league_id(
+                    competition,
+                    provider=provider,
+                    provider_competition_id=provider_competition_id,
+                )
                 if league_id:
                     params_list.insert(
                         0,
@@ -227,10 +343,19 @@ class FixtureSearchService:
                                 ((fixture.get("fixture") or {}).get("id"))
                                 for fixture in (fixtures or [])[:25]
                             ],
+                            "fixtures": [
+                                {
+                                    "id": ((fixture.get("fixture") or {}).get("id")),
+                                    "home": (((fixture.get("teams") or {}).get("home") or {}).get("name")),
+                                    "away": (((fixture.get("teams") or {}).get("away") or {}).get("name")),
+                                    "league": ((fixture.get("league") or {}).get("name")),
+                                }
+                                for fixture in (fixtures or [])[:10]
+                            ],
                         }
                     )
 
-        candidates = self._search_cached(query, start_date=start_date, days=days, limit=limit)
+        candidates = self._search_cached(query, start_date=start_date, days=days, limit=limit, use_token_filter=False)
         attempts.append(
             {
                 "strategy": "cache_after_provider_lookup",
@@ -248,7 +373,125 @@ class FixtureSearchService:
             "trace": attempts,
         }
 
-    def _provider_league_id(self, competition):
+    def get_provider_fixture(self, *, provider="", provider_event_id=""):
+        provider = str(provider or "").strip()
+        provider_event_id = str(provider_event_id or "").strip()
+        if not provider or not provider_event_id:
+            return None
+        mapping = (
+            ProviderFixtureMap.objects.filter(
+                provider=provider,
+                provider_event_id=provider_event_id,
+                active=True,
+            )
+            .order_by("-verified_at", "-updated_at")
+            .first()
+        )
+        if not mapping:
+            return None
+        cached = FixtureCache.objects.filter(match_id=str(mapping.api_fixture_id)).first()
+        if not cached:
+            self.fetch_fixture_by_id(mapping.api_fixture_id)
+            cached = FixtureCache.objects.filter(match_id=str(mapping.api_fixture_id)).first()
+        if not cached:
+            return None
+        return {
+            "mapping_id": mapping.id,
+            "mapping_confidence": float(mapping.confidence or 0),
+            "fixture": self._serialize_fixture(cached, float(mapping.confidence or 100), "direct"),
+        }
+
+    def fetch_fixture_by_id(self, fixture_id):
+        fixture_id = str(fixture_id or "").strip()
+        if not fixture_id:
+            return {"synced": 0, "errors": ["fixture_id_required"]}
+        from .grindalgo import algo_runner
+
+        errors = []
+        with temporary_env(self.runner_service._runner_env({"APS_TRACK_ALL_LEAGUES": "True", "APS_MAX_FIXTURES": "0"})):
+            try:
+                fixtures = algo_runner.aps_get("/fixtures", {"id": fixture_id, "timezone": "Africa/Lagos"})
+            except Exception as exc:
+                errors.append(str(exc))
+                fixtures = []
+        synced = 0
+        for item in fixtures or []:
+            fixture = item.get("fixture") or {}
+            fixture_date = parse_datetime(str(fixture.get("date") or ""))
+            target_date = fixture_date.date() if fixture_date else timezone.localdate()
+            synced += self._upsert_api_fixtures([item], target_date)
+        return {"synced": synced, "errors": errors}
+
+    def learn_resolution(self, *, provider_metadata, candidate, confidence=None, method="team_date_league"):
+        provider = str((provider_metadata or {}).get("provider") or "").strip()
+        event_id = str((provider_metadata or {}).get("provider_event_id") or "").strip()
+        if not provider or not event_id or not candidate:
+            return
+        score = float(confidence if confidence is not None else candidate.get("match_score") or 0)
+        if score < 90:
+            return
+        now = timezone.now()
+        provider_competition_id = str((provider_metadata or {}).get("provider_competition_id") or "")
+        provider_competition_name = str((provider_metadata or {}).get("competition") or "")
+        api_league_id = self._int_or_none(candidate.get("league_id"))
+        api_home_id = self._int_or_none(candidate.get("home_team_id"))
+        api_away_id = self._int_or_none(candidate.get("away_team_id"))
+        ProviderFixtureMap.objects.update_or_create(
+            provider=provider,
+            provider_event_id=event_id,
+            defaults={
+                "provider_competition_id": provider_competition_id,
+                "provider_competition_name": provider_competition_name,
+                "api_fixture_id": str(candidate.get("match_id") or ""),
+                "api_league_id": api_league_id,
+                "api_league_name": str(candidate.get("league") or ""),
+                "provider_home_team": str((provider_metadata or {}).get("home_team") or ""),
+                "provider_away_team": str((provider_metadata or {}).get("away_team") or ""),
+                "api_home_team": str(candidate.get("home_team") or ""),
+                "api_away_team": str(candidate.get("away_team") or ""),
+                "kickoff_at": candidate.get("kickoff_utc") or None,
+                "confidence": score,
+                "resolution_method": method,
+                "active": True,
+                "payload": json_safe({"provider": provider_metadata, "candidate": candidate}),
+                "verified_at": now,
+            },
+        )
+        self._learn_league_map(
+            provider=provider,
+            provider_competition_id=provider_competition_id,
+            provider_competition_name=provider_competition_name,
+            candidate=candidate,
+            confidence=score,
+            now=now,
+        )
+        self._learn_team_alias(
+            provider=provider,
+            alias=(provider_metadata or {}).get("home_team"),
+            canonical=candidate.get("home_team"),
+            api_team_id=api_home_id,
+            country=candidate.get("country"),
+            confidence=score,
+            now=now,
+        )
+        self._learn_team_alias(
+            provider=provider,
+            alias=(provider_metadata or {}).get("away_team"),
+            canonical=candidate.get("away_team"),
+            api_team_id=api_away_id,
+            country=candidate.get("country"),
+            confidence=score,
+            now=now,
+        )
+
+    def _provider_league_id(self, competition, *, provider="", provider_competition_id=""):
+        mapped = self._mapped_provider_league_id(
+            provider=provider,
+            provider_competition_id=provider_competition_id,
+            competition=competition,
+        )
+        if mapped:
+            return mapped
         normalized = normalize_fixture_text(competition)
         if not normalized:
             return None
@@ -258,6 +501,72 @@ class FixtureSearchService:
             if name in normalized or normalized in name:
                 return league_id
         return None
+
+    def _mapped_provider_league_id(self, *, provider="", provider_competition_id="", competition=""):
+        normalized = normalize_fixture_text(competition)
+        query = BookmakerLeagueMap.objects.filter(active=True)
+        if provider:
+            query = query.filter(provider=provider)
+        mapped = None
+        if provider_competition_id:
+            mapped = query.filter(provider_competition_id=str(provider_competition_id)).order_by("-confidence").first()
+        if not mapped and normalized:
+            mapped = query.filter(provider_competition_normalized=normalized).order_by("-confidence").first()
+        return mapped.api_league_id if mapped else None
+
+    def _learn_league_map(self, *, provider, provider_competition_id, provider_competition_name, candidate, confidence, now):
+        api_league_id = self._int_or_none(candidate.get("league_id"))
+        if not provider or not provider_competition_name or not api_league_id:
+            return
+        BookmakerLeagueMap.objects.update_or_create(
+            provider=provider,
+            provider_competition_id=provider_competition_id or "",
+            provider_competition_normalized=normalize_fixture_text(provider_competition_name),
+            defaults={
+                "provider_competition_name": provider_competition_name,
+                "api_league_id": api_league_id,
+                "api_league_name": str(candidate.get("league") or ""),
+                "country": str(candidate.get("country") or ""),
+                "current_api_season": self._int_or_none(candidate.get("season")),
+                "confidence": confidence,
+                "active": True,
+                "source": "auto",
+                "last_verified_at": now,
+            },
+        )
+
+    def _learn_team_alias(self, *, provider, alias, canonical, api_team_id=None, country="", confidence=100, now=None):
+        alias = str(alias or "").strip()
+        canonical = str(canonical or "").strip()
+        if not alias or not canonical:
+            return
+        alias_normalized = normalize_fixture_text(alias)
+        canonical_normalized = normalize_fixture_text(canonical)
+        if not alias_normalized or not canonical_normalized or alias_normalized == canonical_normalized:
+            return
+        TeamAliasMap.objects.update_or_create(
+            provider=provider or "",
+            alias_normalized=alias_normalized,
+            canonical_normalized=canonical_normalized,
+            defaults={
+                "alias": alias,
+                "canonical_name": canonical,
+                "api_team_id": api_team_id,
+                "country": str(country or ""),
+                "confidence": confidence,
+                "active": True,
+                "source": "auto",
+                "last_seen_at": now or timezone.now(),
+            },
+        )
+
+    def _int_or_none(self, value):
+        try:
+            if value in (None, ""):
+                return None
+            return int(value)
+        except (TypeError, ValueError):
+            return None
 
     def _upsert_api_fixtures(self, fixtures, target_date):
         items = []
@@ -300,11 +609,11 @@ class FixtureSearchService:
             )
         return self._upsert_fixtures(items, target_date)
 
-    def _search_cached(self, query, *, start_date, days, limit):
+    def _search_cached(self, query, *, start_date, days, limit, use_token_filter=True):
         home_query, away_query, normalized_query = parse_match_query(query)
         end_date = start_date + timedelta(days=days)
         queryset = FixtureCache.objects.filter(match_date__range=(start_date, end_date))
-        if normalized_query:
+        if normalized_query and use_token_filter:
             tokens = [token for token in normalized_query.split() if len(token) > 1]
             token_filter = Q()
             for token in tokens[:6]:
@@ -325,14 +634,16 @@ class FixtureSearchService:
         return [self._serialize_fixture(fixture, score, orientation) for score, orientation, fixture in scored[:limit]]
 
     def _has_team_token_overlap(self, fixture, home_query, away_query):
-        home_tokens = _team_tokens(home_query)
-        away_tokens = _team_tokens(away_query)
-        fixture_home_tokens = _team_tokens(fixture.home_team_normalized or fixture.home_team)
-        fixture_away_tokens = _team_tokens(fixture.away_team_normalized or fixture.away_team)
-        if not home_tokens or not away_tokens:
+        if not _team_tokens(home_query) or not _team_tokens(away_query):
             return True
-        direct = bool(home_tokens & fixture_home_tokens) and bool(away_tokens & fixture_away_tokens)
-        reversed_match = bool(home_tokens & fixture_away_tokens) and bool(away_tokens & fixture_home_tokens)
+        direct = (
+            _token_side_score(home_query, fixture.home_team_normalized or fixture.home_team) >= 0.70
+            and _token_side_score(away_query, fixture.away_team_normalized or fixture.away_team) >= 0.70
+        )
+        reversed_match = (
+            _token_side_score(home_query, fixture.away_team_normalized or fixture.away_team) >= 0.70
+            and _token_side_score(away_query, fixture.home_team_normalized or fixture.home_team) >= 0.70
+        )
         return direct or reversed_match
 
     def _match_score(self, fixture, home_query, away_query, normalized_query):
@@ -342,29 +653,44 @@ class FixtureSearchService:
     def _match_score_and_orientation(self, fixture, home_query, away_query, normalized_query):
         fixture_norm = fixture.fixture_normalized or normalize_fixture_text(fixture.fixture)
         if home_query and away_query:
-            direct = (
+            direct_fuzzy = (
                 SequenceMatcher(None, home_query, fixture.home_team_normalized).ratio()
                 + SequenceMatcher(None, away_query, fixture.away_team_normalized).ratio()
             ) / 2
-            reversed_match = (
+            reversed_fuzzy = (
                 SequenceMatcher(None, home_query, fixture.away_team_normalized).ratio()
                 + SequenceMatcher(None, away_query, fixture.home_team_normalized).ratio()
             ) / 2
+            direct_token = (
+                _token_side_score(home_query, fixture.home_team_normalized or fixture.home_team)
+                + _token_side_score(away_query, fixture.away_team_normalized or fixture.away_team)
+            ) / 2
+            reversed_token = (
+                _token_side_score(home_query, fixture.away_team_normalized or fixture.away_team)
+                + _token_side_score(away_query, fixture.home_team_normalized or fixture.home_team)
+            ) / 2
+            direct = max(direct_fuzzy, direct_token)
+            reversed_match = max(reversed_fuzzy, reversed_token)
             if reversed_match > direct:
                 return round(reversed_match * 100, 2), "reversed"
             return round(direct * 100, 2), "direct"
         return round(SequenceMatcher(None, normalized_query, fixture_norm).ratio() * 100, 2), "unknown"
 
     def _serialize_fixture(self, fixture, score, orientation="unknown"):
+        payload = fixture.api_payload or {}
         return {
             "match_id": fixture.match_id,
             "match_date": fixture.match_date,
             "fixture": fixture.fixture,
             "home_team": fixture.home_team,
             "away_team": fixture.away_team,
+            "home_team_id": payload.get("hid") or payload.get("home_team_id"),
+            "away_team_id": payload.get("aid") or payload.get("away_team_id"),
             "home_logo": fixture.home_logo,
             "away_logo": fixture.away_logo,
             "league": fixture.league,
+            "league_id": payload.get("code") or payload.get("league_id"),
+            "season": payload.get("season"),
             "league_logo": fixture.league_logo,
             "country": fixture.country,
             "country_flag": fixture.country_flag,

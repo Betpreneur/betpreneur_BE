@@ -9,14 +9,17 @@ from django.utils import timezone
 from .models import (
     AlgoFixture,
     AlgoRun,
+    BookmakerLeagueMap,
     FixtureCache,
     GameBack,
     MarketPrediction,
     Pick,
     PickBack,
+    ProviderFixtureMap,
     SlipReview,
     SlipSelection,
     StrategyReview,
+    TeamAliasMap,
 )
 from .council import council_review
 from .performance import performance_dashboard
@@ -139,6 +142,87 @@ class FixtureCacheAdmin(admin.ModelAdmin):
         "match_id",
         "league",
         "country",
+    )
+    readonly_fields = ("created_at", "updated_at")
+
+
+@admin.register(BookmakerLeagueMap)
+class BookmakerLeagueMapAdmin(admin.ModelAdmin):
+    list_display = (
+        "provider",
+        "provider_competition_name",
+        "provider_competition_id",
+        "api_league_id",
+        "api_league_name",
+        "country",
+        "current_api_season",
+        "confidence",
+        "active",
+        "last_verified_at",
+    )
+    list_filter = ("provider", "active", "country", "source")
+    search_fields = (
+        "provider_competition_id",
+        "provider_competition_name",
+        "provider_competition_normalized",
+        "api_league_name",
+        "api_league_id",
+        "country",
+    )
+    readonly_fields = ("created_at", "updated_at")
+
+
+@admin.register(TeamAliasMap)
+class TeamAliasMapAdmin(admin.ModelAdmin):
+    list_display = (
+        "provider",
+        "alias",
+        "canonical_name",
+        "api_team_id",
+        "country",
+        "confidence",
+        "active",
+        "last_seen_at",
+    )
+    list_filter = ("provider", "active", "country", "source")
+    search_fields = (
+        "alias",
+        "alias_normalized",
+        "canonical_name",
+        "canonical_normalized",
+        "api_team_id",
+        "country",
+    )
+    readonly_fields = ("created_at", "updated_at")
+
+
+@admin.register(ProviderFixtureMap)
+class ProviderFixtureMapAdmin(admin.ModelAdmin):
+    list_display = (
+        "provider",
+        "provider_event_id",
+        "provider_competition_name",
+        "api_fixture_id",
+        "api_league_name",
+        "provider_home_team",
+        "provider_away_team",
+        "api_home_team",
+        "api_away_team",
+        "confidence",
+        "active",
+        "verified_at",
+    )
+    list_filter = ("provider", "active", "provider_competition_name", "api_league_name", "resolution_method")
+    search_fields = (
+        "provider_event_id",
+        "provider_competition_id",
+        "provider_competition_name",
+        "api_fixture_id",
+        "api_league_name",
+        "provider_home_team",
+        "provider_away_team",
+        "api_home_team",
+        "api_away_team",
     )
     readonly_fields = ("created_at", "updated_at")
 
