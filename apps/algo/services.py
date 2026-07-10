@@ -2,6 +2,7 @@ import os
 import json
 import gc
 import re
+import time
 import unicodedata
 from collections import defaultdict
 from contextlib import contextmanager
@@ -223,10 +224,16 @@ class SportyBetShareImporter:
     def _fetch_share_http(self, code):
         response = requests.get(
             self.SHARE_ENDPOINT.format(code=code),
+            params={"_t": int(time.time() * 1000)},
             headers={
                 "Accept": "*/*",
                 "Accept-Language": "en",
+                "Connection": "keep-alive",
+                "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
                 "Referer": f"https://www.sportybet.com/ng/?shareCode={code}",
+                "Sec-Fetch-Dest": "empty",
+                "Sec-Fetch-Mode": "same-origin",
+                "Sec-Fetch-Site": "same-origin",
                 "User-Agent": (
                     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
                     "(KHTML, like Gecko) Chrome/126.0 Safari/537.36"
@@ -290,25 +297,56 @@ class SportyBetShareImporter:
             page = context.new_page()
             try:
                 page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
-                payload = page.evaluate(
+                page.wait_for_timeout(1500)
+                attempts = page.evaluate(
                     """async (code) => {
-                        const response = await fetch(`/orders/share/${code}?_t=${Date.now()}`, {
-                            method: "GET",
-                            credentials: "omit",
-                            headers: {
-                                clientid: "web",
-                                operid: "2",
-                                platform: "web",
-                                Accept: "*/*"
+                        const paths = [
+                            `/orders/share/${code}?_t=${Date.now()}`,
+                            `/api/ng/orders/share/${code}?_t=${Date.now()}`,
+                            `https://www.sportybet.com/api/ng/orders/share/${code}?_t=${Date.now()}`
+                        ];
+                        const credentialModes = ["omit", "include"];
+                        const results = [];
+                        for (const path of paths) {
+                            for (const credentials of credentialModes) {
+                                try {
+                                    const response = await fetch(path, {
+                                        method: "GET",
+                                        credentials,
+                                        headers: {
+                                            clientid: "web",
+                                            operid: "2",
+                                            platform: "web",
+                                            Accept: "*/*",
+                                            "Accept-Language": "en"
+                                        }
+                                    });
+                                    const text = await response.text();
+                                    results.push({
+                                        url: path,
+                                        credentials,
+                                        ok: response.ok,
+                                        status: response.status,
+                                        contentType: response.headers.get("content-type") || "",
+                                        text
+                                    });
+                                    try {
+                                        JSON.parse(text);
+                                        return results;
+                                    } catch (error) {}
+                                } catch (error) {
+                                    results.push({
+                                        url: path,
+                                        credentials,
+                                        ok: false,
+                                        status: 0,
+                                        contentType: "",
+                                        text: String(error)
+                                    });
+                                }
                             }
-                        });
-                        const text = await response.text();
-                        return {
-                            ok: response.ok,
-                            status: response.status,
-                            contentType: response.headers.get("content-type") || "",
-                            text
-                        };
+                        }
+                        return results;
                     }""",
                     code,
                 )
@@ -318,21 +356,33 @@ class SportyBetShareImporter:
                 context.close()
                 browser.close()
 
-        text = (payload or {}).get("text") or ""
+        attempts = attempts or []
+        for payload in attempts:
+            text = (payload or {}).get("text") or ""
+            try:
+                data = json.loads(text)
+            except ValueError:
+                continue
+            if not (payload or {}).get("ok"):
+                raise BookmakerImportError(
+                    f"SportyBet browser import returned JSON but failed with HTTP {(payload or {}).get('status')}. "
+                    f"Response: {text[:250].replace(chr(10), ' ')}"
+                )
+            return data
+
+        last_payload = attempts[-1] if attempts else {}
+        last_text = (last_payload or {}).get("text") or ""
         try:
-            data = json.loads(text)
+            json.loads(last_text)
         except ValueError as exc:
             raise BookmakerImportError(
                 "SportyBet browser import did not return JSON. "
-                f"status={(payload or {}).get('status')}, content_type={(payload or {}).get('contentType')!r}, "
-                f"response={text[:250].replace(chr(10), ' ')!r}"
+                f"attempts={len(attempts)}, status={(last_payload or {}).get('status')}, "
+                f"content_type={(last_payload or {}).get('contentType')!r}, "
+                f"url={(last_payload or {}).get('url')!r}, "
+                f"response={last_text[:250].replace(chr(10), ' ')!r}"
             ) from exc
-        if not (payload or {}).get("ok"):
-            raise BookmakerImportError(
-                f"SportyBet browser import failed with HTTP {(payload or {}).get('status')}. "
-                f"Response: {text[:250].replace(chr(10), ' ')}"
-            )
-        return data
+        raise BookmakerImportError("SportyBet browser import did not return a usable response.")
 
     def import_share(self, *, code=None, url=None, payload=None):
         share_code = self.extract_code(code or url)
