@@ -2415,7 +2415,7 @@ def process_slip_review_import(review_id):
             "selection_count": imported.get("selection_count", 0),
         }
         review.save(update_fields=["submitted_payload", "updated_at"])
-        return {"review_id": review.id, "status": review.status, **summary}
+        return _json_safe({"review_id": review.id, "status": review.status, **summary})
     except Exception as exc:
         review.status = SlipReview.Status.FAILED
         review.summary = _empty_slip_summary("Slip import failed.", task_id=(review.summary or {}).get("task_id", ""), error=exc)
