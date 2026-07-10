@@ -110,6 +110,8 @@ def import_slip_review(self, review_id):
         from .views import process_slip_review_import
 
         return process_slip_review_import(review_id)
+    except ValueError:
+        raise
     except Exception as exc:
         if self.request.retries < self.max_retries:
             raise self.retry(exc=exc, countdown=60 * (self.request.retries + 1))

@@ -24,6 +24,10 @@ from .recommendation_policy import (
 from .council import CAUTION, REJECT, council_review
 
 
+class BookmakerImportError(ValueError):
+    pass
+
+
 @contextmanager
 def temporary_env(values):
     previous = {key: os.environ.get(key) for key in values}
@@ -211,6 +215,12 @@ class SportyBetShareImporter:
         return ""
 
     def fetch_share(self, code):
+        try:
+            return self._fetch_share_http(code)
+        except BookmakerImportError:
+            return self._fetch_share_with_browser(code)
+
+    def _fetch_share_http(self, code):
         response = requests.get(
             self.SHARE_ENDPOINT.format(code=code),
             headers={
@@ -227,8 +237,102 @@ class SportyBetShareImporter:
             },
             timeout=20,
         )
-        response.raise_for_status()
-        return response.json()
+        try:
+            response.raise_for_status()
+        except requests.HTTPError as exc:
+            status_code = response.status_code
+            body_preview = (response.text or "")[:250].replace("\n", " ")
+            if 400 <= status_code < 500:
+                raise BookmakerImportError(
+                    f"SportyBet rejected the share-code request with HTTP {status_code}. "
+                    f"The provider may be blocking server-side import. Response: {body_preview}"
+                ) from exc
+            raise
+
+        try:
+            return response.json()
+        except ValueError as exc:
+            content_type = response.headers.get("content-type", "")
+            body_preview = (response.text or "")[:250].replace("\n", " ")
+            raise BookmakerImportError(
+                "SportyBet did not return JSON for this share code. "
+                f"content_type={content_type!r}, status={response.status_code}, response={body_preview!r}"
+            ) from exc
+
+    def _fetch_share_with_browser(self, code):
+        try:
+            from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+            from playwright.sync_api import sync_playwright
+        except ImportError as exc:
+            raise RuntimeError(
+                "Playwright is not installed. Install project dependencies and Chromium browser runtime to enable SportyBet browser import."
+            ) from exc
+
+        timeout_ms = int(os.environ.get("SPORTYBET_IMPORT_TIMEOUT_MS", "30000") or 30000)
+        url = f"https://www.sportybet.com/ng/?shareCode={code}"
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch(
+                headless=True,
+                args=[
+                    "--disable-dev-shm-usage",
+                    "--disable-gpu",
+                    "--no-sandbox",
+                ],
+            )
+            context = browser.new_context(
+                locale="en-US",
+                timezone_id="Africa/Lagos",
+                user_agent=(
+                    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+                    "(KHTML, like Gecko) Chrome/126.0 Safari/537.36"
+                ),
+            )
+            page = context.new_page()
+            try:
+                page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
+                payload = page.evaluate(
+                    """async (code) => {
+                        const response = await fetch(`/orders/share/${code}?_t=${Date.now()}`, {
+                            method: "GET",
+                            credentials: "omit",
+                            headers: {
+                                clientid: "web",
+                                operid: "2",
+                                platform: "web",
+                                Accept: "*/*"
+                            }
+                        });
+                        const text = await response.text();
+                        return {
+                            ok: response.ok,
+                            status: response.status,
+                            contentType: response.headers.get("content-type") || "",
+                            text
+                        };
+                    }""",
+                    code,
+                )
+            except PlaywrightTimeoutError as exc:
+                raise RuntimeError("Timed out while loading SportyBet share page.") from exc
+            finally:
+                context.close()
+                browser.close()
+
+        text = (payload or {}).get("text") or ""
+        try:
+            data = json.loads(text)
+        except ValueError as exc:
+            raise BookmakerImportError(
+                "SportyBet browser import did not return JSON. "
+                f"status={(payload or {}).get('status')}, content_type={(payload or {}).get('contentType')!r}, "
+                f"response={text[:250].replace(chr(10), ' ')!r}"
+            ) from exc
+        if not (payload or {}).get("ok"):
+            raise BookmakerImportError(
+                f"SportyBet browser import failed with HTTP {(payload or {}).get('status')}. "
+                f"Response: {text[:250].replace(chr(10), ' ')}"
+            )
+        return data
 
     def import_share(self, *, code=None, url=None, payload=None):
         share_code = self.extract_code(code or url)
@@ -458,7 +562,18 @@ class BetanoBetslipImporter:
                 ) as response_info:
                     page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
                 response = response_info.value
-                target_payload = response.json()
+                try:
+                    target_payload = response.json()
+                except Exception as exc:
+                    content_type = response.headers.get("content-type", "")
+                    try:
+                        body_preview = (response.text() or "")[:250].replace("\n", " ")
+                    except Exception:
+                        body_preview = ""
+                    raise BookmakerImportError(
+                        "Betano getbetslip response was captured, but it was not valid JSON. "
+                        f"content_type={content_type!r}, status={response.status}, response={body_preview!r}"
+                    ) from exc
             except PlaywrightTimeoutError as exc:
                 raise RuntimeError("Timed out while waiting for Betano getbetslip response.") from exc
             finally:
