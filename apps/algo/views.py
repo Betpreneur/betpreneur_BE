@@ -1754,6 +1754,29 @@ def _market_matches(requested, actual):
     return _normalise_market_name(requested) == _normalise_market_name(actual)
 
 
+def _reverse_oriented_market(market):
+    normalized = _normalise_market_name(market)
+    reversed_markets = {
+        "home win": "Away Win",
+        "away win": "Home Win",
+        "dnb home": "DNB Away",
+        "dnb away": "DNB Home",
+        "ah home +0.5": "AH Away +0.5",
+        "ah away +0.5": "AH Home +0.5",
+        "home cs": "Away CS",
+        "away cs": "Home CS",
+        "first to score h": "First to Score A",
+        "first to score a": "First to Score H",
+    }
+    return reversed_markets.get(normalized, market)
+
+
+def _market_for_fixture_orientation(market, candidate):
+    if (candidate or {}).get("match_orientation") == "reversed":
+        return _reverse_oriented_market(market)
+    return market
+
+
 def _manual_fixture_game(match_id, match_date, request=None):
     payload = _game_detail_payload(match_date, match_id, request=request)
     game = payload.get("game")
@@ -2222,11 +2245,14 @@ def _analyse_manual_selection(selection, *, days, request=None, force_fresh=Fals
         }
 
     markets = game.get("markets") or []
-    selected_market = next((market for market in markets if _market_matches(requested_market, market.get("market"))), None)
+    analysis_market = _market_for_fixture_orientation(requested_market, candidate)
+    selected_market = next((market for market in markets if _market_matches(analysis_market, market.get("market"))), None)
     if not selected_market:
         return {
             "match": match_text,
             "submitted_market": requested_market,
+            "analysis_market": analysis_market,
+            "fixture_orientation": candidate.get("match_orientation", ""),
             "status": "market_not_found",
             "verdict": "unmatched_market",
             "message": "Fixture matched, but that market is not available in the scored markets for this game.",
@@ -2241,6 +2267,8 @@ def _analyse_manual_selection(selection, *, days, request=None, force_fresh=Fals
     return {
         "match": match_text,
         "submitted_market": requested_market,
+        "analysis_market": analysis_market,
+        "fixture_orientation": candidate.get("match_orientation", ""),
         "status": "analysed",
         **verdict,
         "matched_fixture": {
@@ -2253,6 +2281,7 @@ def _analyse_manual_selection(selection, *, days, request=None, force_fresh=Fals
             "country": game.get("country"),
             "kickoff": game.get("kickoff"),
             "match_score": candidate.get("match_score"),
+            "match_orientation": candidate.get("match_orientation", ""),
         },
         "selected_market": selected_market,
         "best_market": best_market,

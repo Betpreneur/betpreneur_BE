@@ -170,13 +170,17 @@ class FixtureSearchService:
 
         scored = []
         for fixture in queryset[:500]:
-            score = self._match_score(fixture, home_query, away_query, normalized_query)
+            score, orientation = self._match_score_and_orientation(fixture, home_query, away_query, normalized_query)
             if score >= 35:
-                scored.append((score, fixture))
-        scored.sort(key=lambda item: (item[0], item[1].match_date), reverse=True)
-        return [self._serialize_fixture(fixture, score) for score, fixture in scored[:limit]]
+                scored.append((score, orientation, fixture))
+        scored.sort(key=lambda item: (item[0], item[2].match_date), reverse=True)
+        return [self._serialize_fixture(fixture, score, orientation) for score, orientation, fixture in scored[:limit]]
 
     def _match_score(self, fixture, home_query, away_query, normalized_query):
+        score, _orientation = self._match_score_and_orientation(fixture, home_query, away_query, normalized_query)
+        return score
+
+    def _match_score_and_orientation(self, fixture, home_query, away_query, normalized_query):
         fixture_norm = fixture.fixture_normalized or normalize_fixture_text(fixture.fixture)
         if home_query and away_query:
             direct = (
@@ -187,10 +191,12 @@ class FixtureSearchService:
                 SequenceMatcher(None, home_query, fixture.away_team_normalized).ratio()
                 + SequenceMatcher(None, away_query, fixture.home_team_normalized).ratio()
             ) / 2
-            return round(max(direct, reversed_match) * 100, 2)
-        return round(SequenceMatcher(None, normalized_query, fixture_norm).ratio() * 100, 2)
+            if reversed_match > direct:
+                return round(reversed_match * 100, 2), "reversed"
+            return round(direct * 100, 2), "direct"
+        return round(SequenceMatcher(None, normalized_query, fixture_norm).ratio() * 100, 2), "unknown"
 
-    def _serialize_fixture(self, fixture, score):
+    def _serialize_fixture(self, fixture, score, orientation="unknown"):
         return {
             "match_id": fixture.match_id,
             "match_date": fixture.match_date,
@@ -208,6 +214,7 @@ class FixtureSearchService:
             "kickoff": fixture.kickoff,
             "kickoff_utc": fixture.kickoff_utc,
             "match_score": score,
+            "match_orientation": orientation,
         }
 
 
