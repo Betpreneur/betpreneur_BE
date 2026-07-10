@@ -70,6 +70,10 @@ def parse_match_query(value):
     return "", "", normalized
 
 
+def json_safe(value):
+    return json.loads(json.dumps(value, default=str))
+
+
 def _team_tokens(value):
     stopwords = {"fc", "cf", "sc", "afc", "bk", "city", "club", "united", "the"}
     return {token for token in normalize_fixture_text(value).split() if len(token) > 2 and token not in stopwords}
@@ -150,7 +154,7 @@ class FixtureSearchService:
                     "league_type": item.get("league_type") or "",
                     "kickoff": item.get("kickoff") or "",
                     "kickoff_utc": kickoff_utc,
-                    "api_payload": item,
+                    "api_payload": json_safe(item),
                 },
             )
             count += 1
@@ -252,7 +256,7 @@ class FixtureSearchService:
                     "match_id": match_id,
                     "source": "aps_provider_lookup",
                     "aps_id": match_id,
-                    "date": target_date,
+                    "date": target_date.isoformat(),
                     "season": league.get("season"),
                 }
             )
@@ -1809,7 +1813,7 @@ class AlgoRunnerService:
             league_type=cached.league_type,
             kickoff=cached.kickoff,
             match_id=match_id,
-            source_payload=cached.api_payload or {},
+            source_payload=json_safe(cached.api_payload or {}),
             status=AlgoFixture.Status.PENDING,
         )
         result = self.score_fixture_for_run(fixture.id)
