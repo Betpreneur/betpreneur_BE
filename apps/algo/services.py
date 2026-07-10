@@ -295,6 +295,7 @@ class FixtureSearchService:
         errors = []
         attempts = []
         total = 0
+        provider_match_ids = []
         from .grindalgo import algo_runner
 
         with temporary_env(self.runner_service._runner_env({"APS_TRACK_ALL_LEAGUES": "True", "APS_MAX_FIXTURES": "0"})):
@@ -333,6 +334,11 @@ class FixtureSearchService:
                         continue
                     cached_count = self._upsert_api_fixtures(fixtures, target_date)
                     total += cached_count
+                    provider_match_ids.extend(
+                        str((fixture.get("fixture") or {}).get("id"))
+                        for fixture in (fixtures or [])
+                        if (fixture.get("fixture") or {}).get("id")
+                    )
                     attempts.append(
                         {
                             "strategy": "api_provider_lookup",
@@ -355,7 +361,14 @@ class FixtureSearchService:
                         }
                     )
 
-        candidates = self._search_cached(query, start_date=start_date, days=days, limit=limit, use_token_filter=False)
+        candidates = self._search_cached(
+            query,
+            start_date=start_date,
+            days=days,
+            limit=limit,
+            use_token_filter=False,
+            match_ids=provider_match_ids,
+        )
         attempts.append(
             {
                 "strategy": "cache_after_provider_lookup",
@@ -609,10 +622,12 @@ class FixtureSearchService:
             )
         return self._upsert_fixtures(items, target_date)
 
-    def _search_cached(self, query, *, start_date, days, limit, use_token_filter=True):
+    def _search_cached(self, query, *, start_date, days, limit, use_token_filter=True, match_ids=None):
         home_query, away_query, normalized_query = parse_match_query(query)
         end_date = start_date + timedelta(days=days)
         queryset = FixtureCache.objects.filter(match_date__range=(start_date, end_date))
+        if match_ids:
+            queryset = queryset.filter(match_id__in=[str(item) for item in match_ids])
         if normalized_query and use_token_filter:
             tokens = [token for token in normalized_query.split() if len(token) > 1]
             token_filter = Q()
@@ -624,7 +639,8 @@ class FixtureSearchService:
                 queryset = queryset.filter(token_filter)
 
         scored = []
-        for fixture in queryset[:500]:
+        max_candidates = 2000 if not use_token_filter or match_ids else 500
+        for fixture in queryset[:max_candidates]:
             if home_query and away_query and not self._has_team_token_overlap(fixture, home_query, away_query):
                 continue
             score, orientation = self._match_score_and_orientation(fixture, home_query, away_query, normalized_query)
