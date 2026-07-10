@@ -2409,11 +2409,13 @@ def process_slip_review_import(review_id):
             raise ValueError("No supported football selections were found in this slip.")
 
         summary, safe_results = _populate_slip_review(review, results)
-        review.submitted_payload = {
-            **payload,
-            "provider_code": imported.get("share_code") or imported.get("booking_code") or "",
-            "selection_count": imported.get("selection_count", 0),
-        }
+        review.submitted_payload = _json_safe(
+            {
+                **payload,
+                "provider_code": imported.get("share_code") or imported.get("booking_code") or "",
+                "selection_count": imported.get("selection_count", 0),
+            }
+        )
         review.save(update_fields=["submitted_payload", "updated_at"])
         return _json_safe({"review_id": review.id, "status": review.status, **summary})
     except Exception as exc:

@@ -107,9 +107,9 @@ def explain_picks_for_run(self, run_id):
 )
 def import_slip_review(self, review_id):
     try:
-        from .views import process_slip_review_import
+        from .views import _json_safe, process_slip_review_import
 
-        return process_slip_review_import(review_id)
+        return _json_safe(process_slip_review_import(review_id))
     except ValueError as exc:
         return {
             "review_id": review_id,
