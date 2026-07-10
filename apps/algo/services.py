@@ -1,6 +1,7 @@
 import os
 import json
 import gc
+import logging
 import re
 import time
 import unicodedata
@@ -23,6 +24,9 @@ from .recommendation_policy import (
     assess_recommendation,
 )
 from .council import CAUTION, REJECT, council_review
+
+
+log = logging.getLogger(__name__)
 
 
 class BookmakerImportError(ValueError):
@@ -218,7 +222,8 @@ class SportyBetShareImporter:
     def fetch_share(self, code):
         try:
             return self._fetch_share_http(code)
-        except BookmakerImportError:
+        except BookmakerImportError as exc:
+            log.warning("SportyBet direct import failed for code=%s; trying browser fallback: %s", code, exc)
             return self._fetch_share_with_browser(code)
 
     def _fetch_share_http(self, code):
@@ -244,6 +249,13 @@ class SportyBetShareImporter:
             },
             timeout=20,
         )
+        log.info(
+            "SportyBet HTTP import response code=%s status=%s content_type=%s bytes=%s",
+            code,
+            response.status_code,
+            response.headers.get("content-type", ""),
+            len(response.content or b""),
+        )
         try:
             response.raise_for_status()
         except requests.HTTPError as exc:
@@ -257,7 +269,7 @@ class SportyBetShareImporter:
             raise
 
         try:
-            return response.json()
+            payload = response.json()
         except ValueError as exc:
             content_type = response.headers.get("content-type", "")
             body_preview = (response.text or "")[:250].replace("\n", " ")
@@ -265,6 +277,8 @@ class SportyBetShareImporter:
                 "SportyBet did not return JSON for this share code. "
                 f"content_type={content_type!r}, status={response.status_code}, response={body_preview!r}"
             ) from exc
+        self._log_payload_shape("http", code, payload)
+        return payload
 
     def _fetch_share_with_browser(self, code):
         try:
@@ -357,8 +371,18 @@ class SportyBetShareImporter:
                 browser.close()
 
         attempts = attempts or []
+        log.info("SportyBet browser import attempts code=%s attempts=%s", code, len(attempts))
         for payload in attempts:
             text = (payload or {}).get("text") or ""
+            log.info(
+                "SportyBet browser attempt code=%s url=%s credentials=%s status=%s content_type=%s bytes=%s",
+                code,
+                (payload or {}).get("url", ""),
+                (payload or {}).get("credentials", ""),
+                (payload or {}).get("status"),
+                (payload or {}).get("contentType", ""),
+                len(text),
+            )
             try:
                 data = json.loads(text)
             except ValueError:
@@ -368,6 +392,7 @@ class SportyBetShareImporter:
                     f"SportyBet browser import returned JSON but failed with HTTP {(payload or {}).get('status')}. "
                     f"Response: {text[:250].replace(chr(10), ' ')}"
                 )
+            self._log_payload_shape("browser", code, data)
             return data
 
         last_payload = attempts[-1] if attempts else {}
@@ -395,9 +420,20 @@ class SportyBetShareImporter:
 
         data = payload.get("data") or {}
         ticket = data.get("ticket") or {}
+        outcomes = ticket.get("outcomes") or data.get("outcomes") or []
+        log.info(
+            "SportyBet parse start code=%s biz_code=%s available=%s ticket_keys=%s selections=%s outcomes=%s data_keys=%s",
+            share_code,
+            payload.get("bizCode"),
+            payload.get("isAvailable"),
+            sorted(ticket.keys()),
+            len(ticket.get("selections") or []),
+            len(outcomes),
+            sorted(data.keys()),
+        )
         outcomes_by_event = {
             str(item.get("eventId") or ""): item
-            for item in ticket.get("outcomes") or []
+            for item in outcomes
             if item.get("eventId")
         }
         selections = []
@@ -408,10 +444,23 @@ class SportyBetShareImporter:
             if normalized:
                 selections.append(normalized)
         if not selections:
-            for outcome in ticket.get("outcomes") or []:
+            for outcome in outcomes:
                 normalized = self._selection_from_outcome(outcome)
                 if normalized:
                     selections.append(normalized)
+        log.info(
+            "SportyBet parsed selections code=%s count=%s markets=%s",
+            share_code,
+            len(selections),
+            [
+                {
+                    "match": item.get("match"),
+                    "market": item.get("market"),
+                    "odds": item.get("odds"),
+                }
+                for item in selections[:20]
+            ],
+        )
         return {
             "provider": "sportybet",
             "share_code": share_code,
@@ -419,6 +468,23 @@ class SportyBetShareImporter:
             "selections": selections,
             "raw": payload,
         }
+
+    def _log_payload_shape(self, source, code, payload):
+        data = payload.get("data") if isinstance(payload, dict) else {}
+        ticket = data.get("ticket") if isinstance(data, dict) else {}
+        outcomes = (ticket or {}).get("outcomes") or (data or {}).get("outcomes") or []
+        log.info(
+            "SportyBet %s payload shape code=%s top_keys=%s data_keys=%s ticket_keys=%s selections=%s outcomes=%s",
+            source,
+            code,
+            sorted(payload.keys()) if isinstance(payload, dict) else [],
+            sorted(data.keys()) if isinstance(data, dict) else [],
+            sorted(ticket.keys()) if isinstance(ticket, dict) else [],
+            len((ticket or {}).get("selections") or []),
+            len(outcomes),
+        )
+        if os.environ.get("SPORTYBET_IMPORT_DEBUG_PAYLOAD", "").lower() in {"1", "true", "yes"}:
+            log.info("SportyBet %s raw payload code=%s payload=%s", source, code, json.dumps(payload, default=str)[:8000])
 
     def _selection_from_item(self, item, outcome):
         home = outcome.get("homeTeamName") or ""
