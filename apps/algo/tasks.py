@@ -97,6 +97,25 @@ def explain_picks_for_run(self, run_id):
         raise self.retry(exc=exc, countdown=120 * (self.request.retries + 1))
 
 
+@shared_task(
+    bind=True,
+    ignore_result=False,
+    max_retries=2,
+    default_retry_delay=60,
+    soft_time_limit=120,
+    time_limit=180,
+)
+def import_slip_review(self, review_id):
+    try:
+        from .views import process_slip_review_import
+
+        return process_slip_review_import(review_id)
+    except Exception as exc:
+        if self.request.retries < self.max_retries:
+            raise self.retry(exc=exc, countdown=60 * (self.request.retries + 1))
+        raise
+
+
 @shared_task(bind=True, ignore_result=False)
 def recover_daily_run(self, run_id, rescore_failed=False):
     return algo_runner_service.recover_fanout_run(run_id, rescore_failed=rescore_failed)

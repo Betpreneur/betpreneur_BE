@@ -485,3 +485,168 @@ class BackedGamesResponseSerializer(serializers.Serializer):
     date = serializers.DateField(required=False, allow_null=True)
     count = serializers.IntegerField()
     games = serializers.JSONField()
+
+
+class FixtureSearchQuerySerializer(serializers.Serializer):
+    q = serializers.CharField(
+        min_length=2,
+        help_text="Typed fixture name, for example 'France vs Morocco'.",
+    )
+    days = serializers.IntegerField(
+        required=False,
+        min_value=0,
+        max_value=14,
+        default=3,
+        help_text="Search from today through this many future days. Defaults to 3.",
+    )
+    limit = serializers.IntegerField(
+        required=False,
+        min_value=1,
+        max_value=25,
+        default=10,
+        help_text="Maximum number of candidate fixtures to return.",
+    )
+    refresh = serializers.BooleanField(
+        required=False,
+        default=False,
+        help_text="Force refresh from API-Football before searching.",
+    )
+
+
+class FixtureSearchResponseSerializer(serializers.Serializer):
+    query = serializers.CharField()
+    start_date = serializers.DateField()
+    days = serializers.IntegerField()
+    count = serializers.IntegerField()
+    refreshed = serializers.BooleanField()
+    refresh_errors = serializers.JSONField(required=False)
+    results = serializers.JSONField()
+
+
+class ManualSlipSelectionSerializer(serializers.Serializer):
+    match = serializers.CharField(
+        min_length=2,
+        max_length=255,
+        help_text="Typed fixture name, for example 'France vs Morocco'.",
+    )
+    market = serializers.CharField(
+        min_length=2,
+        max_length=120,
+        help_text="Selected market from the frontend dropdown, for example 'Over 1.5'.",
+    )
+
+
+class ManualSlipReviewRequestSerializer(serializers.Serializer):
+    selections = ManualSlipSelectionSerializer(
+        many=True,
+        min_length=1,
+        max_length=30,
+        help_text="Manual match and market selections to review.",
+    )
+    days = serializers.IntegerField(
+        required=False,
+        min_value=0,
+        max_value=14,
+        default=3,
+        help_text="Search from today through this many future days. Defaults to 3.",
+    )
+
+
+class ManualSlipReviewResponseSerializer(serializers.Serializer):
+    id = serializers.IntegerField()
+    source = serializers.CharField()
+    status = serializers.CharField()
+    count = serializers.IntegerField()
+    analysed_count = serializers.IntegerField()
+    keep_count = serializers.IntegerField()
+    caution_count = serializers.IntegerField()
+    replace_count = serializers.IntegerField()
+    remove_count = serializers.IntegerField()
+    unmatched_count = serializers.IntegerField()
+    pending_analysis_count = serializers.IntegerField()
+    intelligence = serializers.JSONField()
+    selections = serializers.JSONField()
+
+
+class SlipReviewListResponseSerializer(serializers.Serializer):
+    count = serializers.IntegerField()
+    reviews = serializers.JSONField()
+
+
+class SlipReviewDetailResponseSerializer(serializers.Serializer):
+    id = serializers.IntegerField()
+    source = serializers.CharField()
+    status = serializers.CharField()
+    title = serializers.CharField()
+    summary = serializers.JSONField()
+    intelligence = serializers.JSONField(required=False)
+    created_at = serializers.DateTimeField()
+    updated_at = serializers.DateTimeField()
+    selections = serializers.JSONField()
+
+
+class SlipReviewOptionsResponseSerializer(serializers.Serializer):
+    markets = serializers.JSONField()
+    verdicts = serializers.JSONField()
+    sources = serializers.JSONField()
+    limits = serializers.JSONField()
+
+
+class SportyBetSlipImportRequestSerializer(serializers.Serializer):
+    url = serializers.URLField(
+        required=False,
+        allow_blank=True,
+        help_text="SportyBet share URL, for example http://www.sportybet.com/ng/?shareCode=V41T5X.",
+    )
+    code = serializers.CharField(
+        required=False,
+        allow_blank=True,
+        max_length=32,
+        help_text="SportyBet share code, for example V41T5X.",
+    )
+    payload = serializers.JSONField(
+        required=False,
+        help_text="Optional raw SportyBet share JSON payload. Useful if the provider blocks server-side HTTP import.",
+    )
+    days = serializers.IntegerField(
+        required=False,
+        min_value=0,
+        max_value=14,
+        default=3,
+        help_text="Search from today through this many future days. Defaults to 3.",
+    )
+
+    def validate(self, attrs):
+        if not attrs.get("url") and not attrs.get("code") and attrs.get("payload") is None:
+            raise serializers.ValidationError("Provide url, code, or payload.")
+        return attrs
+
+
+class BetanoSlipImportRequestSerializer(serializers.Serializer):
+    url = serializers.URLField(
+        required=False,
+        allow_blank=True,
+        help_text="Betano booking URL, for example https://www.betano.ng/bookingcode/65R4NAGB.",
+    )
+    code = serializers.CharField(
+        required=False,
+        allow_blank=True,
+        max_length=64,
+        help_text="Betano booking code, for example 65R4NAGB.",
+    )
+    payload = serializers.JSONField(
+        required=False,
+        help_text="Optional raw Betano getbetslip JSON response or request payload containing data.legs or betslip.legs. If omitted, the backend opens the booking link with a browser importer.",
+    )
+    days = serializers.IntegerField(
+        required=False,
+        min_value=0,
+        max_value=14,
+        default=3,
+        help_text="Search from today through this many future days. Defaults to 3.",
+    )
+
+    def validate(self, attrs):
+        if not attrs.get("url") and not attrs.get("code") and attrs.get("payload") is None:
+            raise serializers.ValidationError("Provide url, code, or payload.")
+        return attrs

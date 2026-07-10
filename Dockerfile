@@ -7,7 +7,7 @@
 # ------------------------------
 # Stage 1: Base
 # ------------------------------
-FROM python:3.12-slim AS base
+FROM python:3.12-slim-bookworm AS base
 
 # Set environment variables
 ENV PYTHONDONTWRITEBYTECODE=1 \
@@ -17,6 +17,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     PIP_DEFAULT_TIMEOUT=120 \
     PIP_RETRIES=10 \
+    PLAYWRIGHT_BROWSERS_PATH=/ms-playwright \
     TZ=Africa/Lagos
 
 # Set work directory
@@ -32,6 +33,27 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     gunicorn \
     # Docker healthcheck
     curl \
+    # Playwright Chromium runtime for bookmaker slip imports
+    libasound2 \
+    libatk-bridge2.0-0 \
+    libatk1.0-0 \
+    libcairo2 \
+    libcups2 \
+    libdbus-1-3 \
+    libdrm2 \
+    libgbm1 \
+    libglib2.0-0 \
+    libnspr4 \
+    libnss3 \
+    libpango-1.0-0 \
+    libx11-6 \
+    libxcb1 \
+    libxcomposite1 \
+    libxdamage1 \
+    libxext6 \
+    libxfixes3 \
+    libxkbcommon0 \
+    libxrandr2 \
     # Clean up
     && rm -rf /var/lib/apt/lists/*
 
@@ -48,6 +70,7 @@ ENV PATH="/pyenv/bin:$PATH"
 # Install Python dependencies
 COPY requirements.txt .
 RUN pip install --no-cache-dir --progress-bar off --retries 10 --timeout 120 -r requirements.txt
+RUN playwright install chromium
 
 
 # ------------------------------
@@ -57,6 +80,7 @@ FROM base AS application
 
 # Copy virtual environment from dependencies stage
 COPY --from=dependencies /pyenv /pyenv
+COPY --from=dependencies /ms-playwright /ms-playwright
 ENV PATH="/pyenv/bin:$PATH"
 
 # Create non-root user for security

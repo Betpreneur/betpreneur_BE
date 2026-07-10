@@ -161,6 +161,117 @@ class AlgoFixture(models.Model):
         return self.fixture
 
 
+class FixtureCache(models.Model):
+    match_date = models.DateField()
+    fixture = models.CharField(max_length=255)
+    home_team = models.CharField(max_length=255, blank=True)
+    away_team = models.CharField(max_length=255, blank=True)
+    home_team_normalized = models.CharField(max_length=255, blank=True)
+    away_team_normalized = models.CharField(max_length=255, blank=True)
+    fixture_normalized = models.CharField(max_length=520, blank=True)
+    home_logo = models.URLField(blank=True)
+    away_logo = models.URLField(blank=True)
+    league = models.CharField(max_length=255, blank=True)
+    league_logo = models.URLField(blank=True)
+    country = models.CharField(max_length=100, blank=True)
+    country_flag = models.URLField(blank=True)
+    round = models.CharField(max_length=255, blank=True)
+    league_type = models.CharField(max_length=50, blank=True)
+    kickoff = models.CharField(max_length=50, blank=True)
+    kickoff_utc = models.DateTimeField(null=True, blank=True)
+    match_id = models.CharField(max_length=100, unique=True)
+    api_payload = models.JSONField(default=dict, blank=True)
+    source = models.CharField(max_length=30, default="api_football")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["match_date", "country", "league", "kickoff", "fixture"]
+        indexes = [
+            models.Index(fields=["match_date"]),
+            models.Index(fields=["home_team_normalized"]),
+            models.Index(fields=["away_team_normalized"]),
+            models.Index(fields=["fixture_normalized"]),
+            models.Index(fields=["country", "league"]),
+        ]
+
+    def __str__(self):
+        return self.fixture
+
+
+class SlipReview(models.Model):
+    class Source(models.TextChoices):
+        MANUAL = "manual", "Manual"
+        SPORTYBET = "sportybet", "SportyBet"
+        BETANO = "betano", "Betano"
+
+    class Status(models.TextChoices):
+        QUEUED = "queued", "Queued"
+        IMPORTING = "importing", "Importing"
+        ANALYSING = "analysing", "Analysing"
+        COMPLETED = "completed", "Completed"
+        PARTIAL = "partial", "Partial"
+        FAILED = "failed", "Failed"
+
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="slip_reviews",
+    )
+    source = models.CharField(max_length=30, choices=Source.choices, default=Source.MANUAL)
+    status = models.CharField(max_length=30, choices=Status.choices, default=Status.COMPLETED)
+    title = models.CharField(max_length=255, blank=True)
+    submitted_payload = models.JSONField(default=dict, blank=True)
+    summary = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        indexes = [
+            models.Index(fields=["user", "created_at"]),
+            models.Index(fields=["source", "status"]),
+        ]
+
+    def __str__(self):
+        return f"{self.user} {self.source} review #{self.id}"
+
+
+class SlipSelection(models.Model):
+    review = models.ForeignKey(SlipReview, on_delete=models.CASCADE, related_name="selections")
+    order = models.PositiveIntegerField(default=0)
+    submitted_match = models.CharField(max_length=255)
+    submitted_market = models.CharField(max_length=120)
+    status = models.CharField(max_length=40, blank=True)
+    verdict = models.CharField(max_length=40, blank=True)
+    message = models.TextField(blank=True)
+    match_id = models.CharField(max_length=100, blank=True)
+    match_date = models.DateField(null=True, blank=True)
+    fixture = models.CharField(max_length=255, blank=True)
+    home_team = models.CharField(max_length=255, blank=True)
+    away_team = models.CharField(max_length=255, blank=True)
+    league = models.CharField(max_length=255, blank=True)
+    country = models.CharField(max_length=100, blank=True)
+    kickoff = models.CharField(max_length=50, blank=True)
+    selected_market = models.JSONField(default=dict, blank=True)
+    best_market = models.JSONField(default=dict, blank=True)
+    recommended_market = models.JSONField(default=dict, blank=True)
+    possible_matches = models.JSONField(default=list, blank=True)
+    analysis_payload = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["order", "id"]
+        indexes = [
+            models.Index(fields=["review", "order"]),
+            models.Index(fields=["match_id"]),
+            models.Index(fields=["status", "verdict"]),
+        ]
+
+    def __str__(self):
+        return f"{self.submitted_match} - {self.submitted_market}"
+
+
 class GameBack(models.Model):
     user = models.ForeignKey(
         settings.AUTH_USER_MODEL,

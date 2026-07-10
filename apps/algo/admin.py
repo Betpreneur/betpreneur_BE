@@ -6,7 +6,18 @@ from django.urls import path, reverse
 from django.utils.html import format_html, format_html_join
 from django.utils import timezone
 
-from .models import AlgoFixture, AlgoRun, GameBack, MarketPrediction, Pick, PickBack, StrategyReview
+from .models import (
+    AlgoFixture,
+    AlgoRun,
+    FixtureCache,
+    GameBack,
+    MarketPrediction,
+    Pick,
+    PickBack,
+    SlipReview,
+    SlipSelection,
+    StrategyReview,
+)
 from .council import council_review
 from .performance import performance_dashboard
 from .recommendation_policy import assess_recommendation
@@ -87,6 +98,111 @@ class AlgoFixtureInline(admin.TabularInline):
     )
     readonly_fields = fields
     show_change_link = True
+
+
+class SlipSelectionInline(admin.TabularInline):
+    model = SlipSelection
+    extra = 0
+    can_delete = False
+    fields = (
+        "order",
+        "submitted_match",
+        "submitted_market",
+        "fixture",
+        "league",
+        "status",
+        "verdict",
+        "message",
+    )
+    readonly_fields = fields
+    show_change_link = True
+
+
+@admin.register(FixtureCache)
+class FixtureCacheAdmin(admin.ModelAdmin):
+    date_hierarchy = "match_date"
+    list_display = (
+        "match_date",
+        "fixture",
+        "country",
+        "league",
+        "kickoff",
+        "match_id",
+        "updated_at",
+    )
+    list_filter = ("match_date", "country", "league")
+    search_fields = (
+        "fixture",
+        "home_team",
+        "away_team",
+        "fixture_normalized",
+        "match_id",
+        "league",
+        "country",
+    )
+    readonly_fields = ("created_at", "updated_at")
+
+
+@admin.register(SlipReview)
+class SlipReviewAdmin(admin.ModelAdmin):
+    date_hierarchy = "created_at"
+    list_display = (
+        "id",
+        "user",
+        "source",
+        "status",
+        "selection_count",
+        "keep_count",
+        "replace_count",
+        "remove_count",
+        "created_at",
+    )
+    list_filter = ("source", "status", "created_at")
+    search_fields = ("user__email", "user__username", "title")
+    readonly_fields = ("created_at", "updated_at")
+    inlines = [SlipSelectionInline]
+
+    @admin.display(description="Selections")
+    def selection_count(self, obj):
+        return (obj.summary or {}).get("count", 0)
+
+    @admin.display(description="Keep")
+    def keep_count(self, obj):
+        return (obj.summary or {}).get("keep_count", 0)
+
+    @admin.display(description="Replace")
+    def replace_count(self, obj):
+        return (obj.summary or {}).get("replace_count", 0)
+
+    @admin.display(description="Remove")
+    def remove_count(self, obj):
+        return (obj.summary or {}).get("remove_count", 0)
+
+
+@admin.register(SlipSelection)
+class SlipSelectionAdmin(admin.ModelAdmin):
+    list_display = (
+        "id",
+        "review",
+        "submitted_match",
+        "submitted_market",
+        "fixture",
+        "status",
+        "verdict",
+        "created_at",
+    )
+    list_filter = ("status", "verdict", "league", "country")
+    search_fields = (
+        "submitted_match",
+        "submitted_market",
+        "fixture",
+        "home_team",
+        "away_team",
+        "match_id",
+        "league",
+        "country",
+    )
+    readonly_fields = ("created_at",)
 
 
 @admin.action(description="Queue pick generation for selected run dates")

@@ -1,17 +1,21 @@
 import os
 import json
 import gc
+import re
+import unicodedata
 from collections import defaultdict
 from contextlib import contextmanager
 from datetime import timedelta
+from difflib import SequenceMatcher
 from decimal import Decimal
 
 import requests
 from django.conf import settings
 from django.db.models import Count, Q
+from django.utils.dateparse import parse_datetime
 from django.utils import timezone
 
-from .models import AlgoFixture, AlgoRun, MarketPrediction, Pick, StrategyReview
+from .models import AlgoFixture, AlgoRun, FixtureCache, MarketPrediction, Pick, StrategyReview
 from .recommendation_policy import (
     assess_calibration_trust,
     assess_league_market_trust,
@@ -36,6 +40,508 @@ def temporary_env(values):
                 os.environ.pop(key, None)
             else:
                 os.environ[key] = value
+
+
+def normalize_fixture_text(value):
+    text = unicodedata.normalize("NFKD", str(value or ""))
+    text = "".join(char for char in text if not unicodedata.combining(char))
+    text = text.lower().replace("&", " and ")
+    return re.sub(r"[^a-z0-9]+", " ", text).strip()
+
+
+def parse_match_query(value):
+    text = str(value or "").strip()
+    normalized = normalize_fixture_text(text)
+    parts = re.split(r"\s+(?:vs|v|versus)\s+|\s+-\s+", text, maxsplit=1, flags=re.IGNORECASE)
+    if len(parts) == 2:
+        home = normalize_fixture_text(parts[0])
+        away = normalize_fixture_text(parts[1])
+        if home and away:
+            return home, away, normalized
+    return "", "", normalized
+
+
+class FixtureSearchService:
+    DEFAULT_DAYS = 3
+    MAX_DAYS = 14
+
+    def __init__(self, runner_service=None):
+        self.runner_service = runner_service or AlgoRunnerService()
+
+    def sync_upcoming(self, *, start_date=None, days=None):
+        start_date = start_date or timezone.localdate()
+        days = min(int(days or self.DEFAULT_DAYS), self.MAX_DAYS)
+        total = 0
+        errors = []
+
+        from .grindalgo import algo_runner
+
+        with temporary_env(self.runner_service._runner_env()):
+            for offset in range(days + 1):
+                target_date = start_date + timedelta(days=offset)
+                try:
+                    fixtures = algo_runner.fetch_aps_fixtures(target_date.isoformat())
+                except Exception as exc:
+                    errors.append({"date": target_date.isoformat(), "error": str(exc)})
+                    continue
+                total += self._upsert_fixtures(fixtures, target_date)
+        return {"synced": total, "errors": errors}
+
+    def _upsert_fixtures(self, fixtures, target_date):
+        count = 0
+        for item in fixtures:
+            match_id = str(item.get("match_id") or item.get("aps_id") or "").strip()
+            if not match_id:
+                continue
+            home_team = item.get("hname") or item.get("home_team") or ""
+            away_team = item.get("aname") or item.get("away_team") or ""
+            fixture = item.get("fixture") or f"{home_team} vs {away_team}".strip()
+            kickoff_utc = parse_datetime(str(item.get("kickoff_utc") or "")) if item.get("kickoff_utc") else None
+            home_norm = normalize_fixture_text(home_team)
+            away_norm = normalize_fixture_text(away_team)
+            FixtureCache.objects.update_or_create(
+                match_id=match_id,
+                defaults={
+                    "match_date": item.get("date") or target_date,
+                    "fixture": fixture,
+                    "home_team": home_team,
+                    "away_team": away_team,
+                    "home_team_normalized": home_norm,
+                    "away_team_normalized": away_norm,
+                    "fixture_normalized": normalize_fixture_text(f"{home_team} vs {away_team}"),
+                    "home_logo": item.get("home_logo") or "",
+                    "away_logo": item.get("away_logo") or "",
+                    "league": item.get("league") or "",
+                    "league_logo": item.get("league_logo") or "",
+                    "country": item.get("country") or "",
+                    "country_flag": item.get("country_flag") or "",
+                    "round": item.get("round") or "",
+                    "league_type": item.get("league_type") or "",
+                    "kickoff": item.get("kickoff") or "",
+                    "kickoff_utc": kickoff_utc,
+                    "api_payload": item,
+                },
+            )
+            count += 1
+        return count
+
+    def search(self, query, *, start_date=None, days=None, limit=10, refresh=False):
+        start_date = start_date or timezone.localdate()
+        days = min(int(days or self.DEFAULT_DAYS), self.MAX_DAYS)
+        limit = max(1, min(int(limit or 10), 25))
+        refreshed = False
+        refresh_errors = []
+        candidates = self._search_cached(query, start_date=start_date, days=days, limit=limit)
+        if refresh or not candidates:
+            refresh_result = self.sync_upcoming(start_date=start_date, days=days)
+            refresh_errors = refresh_result.get("errors", [])
+            refreshed = True
+            candidates = self._search_cached(query, start_date=start_date, days=days, limit=limit)
+        return {"refreshed": refreshed, "refresh_errors": refresh_errors, "results": candidates}
+
+    def _search_cached(self, query, *, start_date, days, limit):
+        home_query, away_query, normalized_query = parse_match_query(query)
+        end_date = start_date + timedelta(days=days)
+        queryset = FixtureCache.objects.filter(match_date__range=(start_date, end_date))
+        if normalized_query:
+            tokens = [token for token in normalized_query.split() if len(token) > 1]
+            token_filter = Q()
+            for token in tokens[:6]:
+                token_filter |= Q(fixture_normalized__icontains=token)
+                token_filter |= Q(home_team_normalized__icontains=token)
+                token_filter |= Q(away_team_normalized__icontains=token)
+            if token_filter:
+                queryset = queryset.filter(token_filter)
+
+        scored = []
+        for fixture in queryset[:500]:
+            score = self._match_score(fixture, home_query, away_query, normalized_query)
+            if score >= 35:
+                scored.append((score, fixture))
+        scored.sort(key=lambda item: (item[0], item[1].match_date), reverse=True)
+        return [self._serialize_fixture(fixture, score) for score, fixture in scored[:limit]]
+
+    def _match_score(self, fixture, home_query, away_query, normalized_query):
+        fixture_norm = fixture.fixture_normalized or normalize_fixture_text(fixture.fixture)
+        if home_query and away_query:
+            direct = (
+                SequenceMatcher(None, home_query, fixture.home_team_normalized).ratio()
+                + SequenceMatcher(None, away_query, fixture.away_team_normalized).ratio()
+            ) / 2
+            reversed_match = (
+                SequenceMatcher(None, home_query, fixture.away_team_normalized).ratio()
+                + SequenceMatcher(None, away_query, fixture.home_team_normalized).ratio()
+            ) / 2
+            return round(max(direct, reversed_match) * 100, 2)
+        return round(SequenceMatcher(None, normalized_query, fixture_norm).ratio() * 100, 2)
+
+    def _serialize_fixture(self, fixture, score):
+        return {
+            "match_id": fixture.match_id,
+            "match_date": fixture.match_date,
+            "fixture": fixture.fixture,
+            "home_team": fixture.home_team,
+            "away_team": fixture.away_team,
+            "home_logo": fixture.home_logo,
+            "away_logo": fixture.away_logo,
+            "league": fixture.league,
+            "league_logo": fixture.league_logo,
+            "country": fixture.country,
+            "country_flag": fixture.country_flag,
+            "round": fixture.round,
+            "league_type": fixture.league_type,
+            "kickoff": fixture.kickoff,
+            "kickoff_utc": fixture.kickoff_utc,
+            "match_score": score,
+        }
+
+
+class SportyBetShareImporter:
+    SHARE_ENDPOINT = "https://www.sportybet.com/api/ng/orders/share/{code}"
+
+    def extract_code(self, value):
+        text = str(value or "").strip()
+        if not text:
+            return ""
+        match = re.search(r"shareCode=([A-Za-z0-9_-]+)", text)
+        if match:
+            return match.group(1)
+        if re.fullmatch(r"[A-Za-z0-9_-]{4,32}", text):
+            return text
+        return ""
+
+    def fetch_share(self, code):
+        response = requests.get(
+            self.SHARE_ENDPOINT.format(code=code),
+            headers={
+                "Accept": "*/*",
+                "Accept-Language": "en",
+                "Referer": f"https://www.sportybet.com/ng/?shareCode={code}",
+                "User-Agent": (
+                    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+                    "(KHTML, like Gecko) Chrome/126.0 Safari/537.36"
+                ),
+                "clientid": "web",
+                "operid": "2",
+                "platform": "web",
+            },
+            timeout=20,
+        )
+        response.raise_for_status()
+        return response.json()
+
+    def import_share(self, *, code=None, url=None, payload=None):
+        share_code = self.extract_code(code or url)
+        if payload is None:
+            if not share_code:
+                raise ValueError("SportyBet share code or URL is required.")
+            payload = self.fetch_share(share_code)
+        else:
+            share_code = share_code or str((payload.get("data") or {}).get("shareCode") or "").strip()
+
+        data = payload.get("data") or {}
+        ticket = data.get("ticket") or {}
+        outcomes_by_event = {
+            str(item.get("eventId") or ""): item
+            for item in ticket.get("outcomes") or []
+            if item.get("eventId")
+        }
+        selections = []
+        for item in ticket.get("selections") or []:
+            event_id = str(item.get("eventId") or "")
+            outcome = outcomes_by_event.get(event_id) or {}
+            normalized = self._selection_from_item(item, outcome)
+            if normalized:
+                selections.append(normalized)
+        if not selections:
+            for outcome in ticket.get("outcomes") or []:
+                normalized = self._selection_from_outcome(outcome)
+                if normalized:
+                    selections.append(normalized)
+        return {
+            "provider": "sportybet",
+            "share_code": share_code,
+            "selection_count": len(selections),
+            "selections": selections,
+            "raw": payload,
+        }
+
+    def _selection_from_item(self, item, outcome):
+        home = outcome.get("homeTeamName") or ""
+        away = outcome.get("awayTeamName") or ""
+        if not home or not away:
+            return None
+        market = self._market_name(item, outcome)
+        if not market:
+            return None
+        tournament = (((outcome.get("sport") or {}).get("category") or {}).get("tournament") or {}).get("name", "")
+        return {
+            "provider_event_id": item.get("eventId") or outcome.get("eventId") or "",
+            "match": f"{home} vs {away}",
+            "market": market,
+            "home_team": home,
+            "away_team": away,
+            "competition": tournament,
+            "kickoff_ms": outcome.get("estimateStartTime"),
+            "odds": self._selection_odds(item, outcome),
+            "provider_payload": {"selection": item, "outcome": outcome},
+        }
+
+    def _selection_from_outcome(self, outcome):
+        home = outcome.get("homeTeamName") or ""
+        away = outcome.get("awayTeamName") or ""
+        markets = outcome.get("markets") or []
+        market = self._market_name({}, {"markets": markets})
+        if not home or not away or not market:
+            return None
+        return {
+            "provider_event_id": outcome.get("eventId") or "",
+            "match": f"{home} vs {away}",
+            "market": market,
+            "home_team": home,
+            "away_team": away,
+            "competition": (((outcome.get("sport") or {}).get("category") or {}).get("tournament") or {}).get("name", ""),
+            "kickoff_ms": outcome.get("estimateStartTime"),
+            "odds": None,
+            "provider_payload": {"outcome": outcome},
+        }
+
+    def _market_name(self, item, outcome):
+        market_id = str(item.get("marketId") or "")
+        specifier = str(item.get("specifier") or "")
+        outcome_id = str(item.get("outcomeId") or "")
+        market = next(
+            (
+                market
+                for market in outcome.get("markets") or []
+                if str(market.get("id") or "") == market_id
+                and (not specifier or str(market.get("specifier") or "") == specifier)
+            ),
+            None,
+        )
+        if market:
+            outcome_name = self._outcome_name(market, outcome_id)
+            if outcome_name:
+                return self._canonical_market(market.get("name") or market.get("desc"), outcome_name, market.get("specifier") or specifier)
+        return self._canonical_market("", self._fallback_outcome_name(outcome_id), specifier)
+
+    def _outcome_name(self, market, outcome_id):
+        for outcome in market.get("outcomes") or []:
+            if str(outcome.get("id") or "") == str(outcome_id):
+                return str(outcome.get("desc") or outcome.get("name") or "")
+        return ""
+
+    def _fallback_outcome_name(self, outcome_id):
+        return {
+            "1": "Home",
+            "2": "Draw",
+            "3": "Away",
+            "12": "Over",
+            "13": "Under",
+        }.get(str(outcome_id), "")
+
+    def _canonical_market(self, market_name, outcome_name, specifier):
+        market_text = normalize_fixture_text(market_name)
+        outcome_text = normalize_fixture_text(outcome_name)
+        total_match = re.search(r"total=([0-9.]+)", str(specifier or ""))
+        line = total_match.group(1) if total_match else ""
+        if "over under" in market_text or "total goals" in market_text or line:
+            if "under" in outcome_text:
+                return f"Under {line}" if line else "Under"
+            if "over" in outcome_text:
+                return f"Over {line}" if line else "Over"
+        if "match result" in market_text or outcome_text in {"home", "away", "draw"}:
+            if outcome_text == "home":
+                return "Home Win"
+            if outcome_text == "away":
+                return "Away Win"
+            if outcome_text == "draw":
+                return "Draw"
+        if "both teams" in market_text and "yes" in outcome_text:
+            return "GG / BTTS Yes"
+        return outcome_name.strip()
+
+    def _selection_odds(self, item, outcome):
+        market_id = str(item.get("marketId") or "")
+        outcome_id = str(item.get("outcomeId") or "")
+        for market in outcome.get("markets") or []:
+            if str(market.get("id") or "") != market_id:
+                continue
+            for market_outcome in market.get("outcomes") or []:
+                if str(market_outcome.get("id") or "") == outcome_id:
+                    return market_outcome.get("odds")
+        return item.get("odds")
+
+
+class BetanoBetslipImporter:
+    def extract_code(self, value):
+        text = str(value or "").strip()
+        if not text:
+            return ""
+        match = re.search(r"/bookingcode/([A-Za-z0-9_-]+)", text, flags=re.IGNORECASE)
+        if match:
+            return match.group(1)
+        if re.fullmatch(r"[A-Za-z0-9_-]{4,64}", text):
+            return text
+        return ""
+
+    def import_betslip(self, *, code=None, url=None, payload=None):
+        booking_code = self.extract_code(code or url)
+        if payload is None:
+            if not url and booking_code:
+                url = f"https://www.betano.ng/bookingcode/{booking_code}"
+            if not url:
+                raise ValueError("Betano booking URL or code is required.")
+            payload = self.fetch_betslip_payload(url)
+
+        legs = self._legs_from_payload(payload)
+        selections = []
+        for leg in legs:
+            normalized = self._selection_from_leg(leg)
+            if normalized:
+                selections.append(normalized)
+        return {
+            "provider": "betano",
+            "booking_code": booking_code,
+            "selection_count": len(selections),
+            "selections": selections,
+            "raw": payload,
+        }
+
+    def fetch_betslip_payload(self, url):
+        try:
+            from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+            from playwright.sync_api import sync_playwright
+        except ImportError as exc:
+            raise RuntimeError(
+                "Playwright is not installed. Install project dependencies and Chromium browser runtime to enable Betano link import."
+            ) from exc
+
+        timeout_ms = int(os.environ.get("BETANO_IMPORT_TIMEOUT_MS", "30000") or 30000)
+        target_payload = None
+        request_payload = None
+
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch(
+                headless=True,
+                args=[
+                    "--disable-dev-shm-usage",
+                    "--disable-gpu",
+                    "--no-sandbox",
+                ],
+            )
+            context = browser.new_context(
+                locale="en-US",
+                timezone_id="Africa/Lagos",
+                user_agent=(
+                    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+                    "(KHTML, like Gecko) Chrome/126.0 Safari/537.36"
+                ),
+            )
+            page = context.new_page()
+
+            def capture_request(request):
+                nonlocal request_payload
+                if "/api/betslip/v3/getbetslip" not in request.url:
+                    return
+                try:
+                    post_data_json = getattr(request, "post_data_json", None)
+                    request_payload = post_data_json() if callable(post_data_json) else post_data_json
+                except Exception:
+                    request_payload = None
+
+            page.on("request", capture_request)
+            try:
+                with page.expect_response(
+                    lambda response: "/api/betslip/v3/getbetslip" in response.url,
+                    timeout=timeout_ms,
+                ) as response_info:
+                    page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
+                response = response_info.value
+                target_payload = response.json()
+            except PlaywrightTimeoutError as exc:
+                raise RuntimeError("Timed out while waiting for Betano getbetslip response.") from exc
+            finally:
+                context.close()
+                browser.close()
+
+        if target_payload:
+            return target_payload
+        if request_payload:
+            return request_payload
+        raise RuntimeError("Betano getbetslip payload was not captured.")
+
+    def _legs_from_payload(self, payload):
+        data = payload.get("data") if isinstance(payload, dict) else None
+        if isinstance(data, dict) and isinstance(data.get("legs"), list):
+            return data.get("legs") or []
+        betslip = payload.get("betslip") if isinstance(payload, dict) else None
+        if isinstance(betslip, dict) and isinstance(betslip.get("legs"), list):
+            return betslip.get("legs") or []
+        if isinstance(payload.get("legs"), list):
+            return payload.get("legs") or []
+        return []
+
+    def _selection_from_leg(self, leg):
+        if str(leg.get("sportId") or "").upper() not in {"", "FOOT"}:
+            return None
+        participants = leg.get("participants") or []
+        home = (participants[0] or {}).get("name", "") if len(participants) > 0 else ""
+        away = (participants[1] or {}).get("name", "") if len(participants) > 1 else ""
+        if not home or not away:
+            home, away = self._teams_from_event_name(leg.get("eventName"))
+        market = self._canonical_market(leg)
+        if not home or not away or not market:
+            return None
+        return {
+            "provider_event_id": str(leg.get("eventId") or ""),
+            "match": f"{home} vs {away}",
+            "market": market,
+            "home_team": home,
+            "away_team": away,
+            "competition": str(leg.get("league") or leg.get("leagueName") or ""),
+            "kickoff_ms": leg.get("eventStartTime"),
+            "odds": leg.get("odds"),
+            "provider_payload": {"leg": leg},
+        }
+
+    def _teams_from_event_name(self, value):
+        text = str(value or "")
+        if " - " in text:
+            home, away = text.split(" - ", 1)
+            return home.strip(), away.strip()
+        if " vs " in text.lower():
+            parts = re.split(r"\s+vs\s+", text, maxsplit=1, flags=re.IGNORECASE)
+            return parts[0].strip(), parts[1].strip()
+        return "", ""
+
+    def _canonical_market(self, leg):
+        description = str(leg.get("description") or "")
+        market = str(leg.get("market") or "")
+        market_sort = str(leg.get("marketSort") or "")
+        text = normalize_fixture_text(f"{market} {description} {market_sort}")
+        total_match = re.search(r"(over|under)\s+([0-9]+(?:\.[0-9]+)?)", description, flags=re.IGNORECASE)
+        if total_match:
+            side = total_match.group(1).title()
+            line = total_match.group(2)
+            return f"{side} {line}"
+        if "over under" in text or "total goals" in text:
+            line_match = re.search(r"([0-9]+(?:\.[0-9]+)?)", description)
+            if "under" in text and line_match:
+                return f"Under {line_match.group(1)}"
+            if "over" in text and line_match:
+                return f"Over {line_match.group(1)}"
+        if "both teams" in text and "yes" in text:
+            return "GG / BTTS Yes"
+        if "match result" in text or market_sort in {"MRES", "MR12"}:
+            event_home, event_away = self._teams_from_event_name(leg.get("eventName"))
+            if description == event_home:
+                return "Home Win"
+            if description == event_away:
+                return "Away Win"
+            if normalize_fixture_text(description) == "draw":
+                return "Draw"
+        return description.strip()
 
 
 class AlgoRunnerService:

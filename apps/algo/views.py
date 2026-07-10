@@ -19,8 +19,9 @@ from rest_framework.permissions import AllowAny, IsAdminUser, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from .models import AlgoFixture, AlgoRun, GameBack, MarketPrediction, Pick
+from .models import AlgoFixture, AlgoRun, GameBack, MarketPrediction, Pick, SlipReview, SlipSelection
 from .recommendation_policy import assess_recommendation
+from .services import BetanoBetslipImporter, FixtureSearchService, SportyBetShareImporter
 from .performance import (
     add_pick,
     confidence_band,
@@ -35,6 +36,7 @@ from .serializers import (
     AuditorRunSerializer,
     BackedPicksQuerySerializer,
     BackedGamesResponseSerializer,
+    BetanoSlipImportRequestSerializer,
     BulkGameBackRequestSerializer,
     BulkGameBackResponseSerializer,
     DailyPicksQuerySerializer,
@@ -43,6 +45,10 @@ from .serializers import (
     GameBackResponseSerializer,
     GameDetailResponseSerializer,
     GameListResponseSerializer,
+    FixtureSearchQuerySerializer,
+    FixtureSearchResponseSerializer,
+    ManualSlipReviewRequestSerializer,
+    ManualSlipReviewResponseSerializer,
     MarketHealthQuerySerializer,
     MarketHealthResponseSerializer,
     PickSerializer,
@@ -52,11 +58,15 @@ from .serializers import (
     RecordQuerySerializer,
     ResultsUpdateSerializer,
     SingleGameBackRequestSerializer,
+    SlipReviewDetailResponseSerializer,
+    SlipReviewListResponseSerializer,
+    SlipReviewOptionsResponseSerializer,
+    SportyBetSlipImportRequestSerializer,
     TaskQueuedSerializer,
     TaskStatusSerializer,
     TopPickResponseSerializer,
 )
-from .tasks import generate_daily_picks, run_monthly_auditor, settle_daily_results
+from .tasks import generate_daily_picks, import_slip_review, run_monthly_auditor, settle_daily_results
 
 
 log = logging.getLogger(__name__)
@@ -68,6 +78,35 @@ PICK_TIER_RANK = {
     Pick.Tier.WILD_CARD: 1,
 }
 EXCLUDED_MARKETS = {"DC: 1X", "DC: X2"}
+SLIP_REVIEW_MARKET_OPTIONS = [
+    {"value": "Home Win", "label": "Home Win", "group": "Result", "meaning": "Home team to win"},
+    {"value": "Away Win", "label": "Away Win", "group": "Result", "meaning": "Away team to win"},
+    {"value": "Draw", "label": "Draw", "group": "Result", "meaning": "Match ends in a draw"},
+    {"value": "DNB Home", "label": "Draw No Bet - Home", "group": "Result", "meaning": "Home win, draw refunds"},
+    {"value": "DNB Away", "label": "Draw No Bet - Away", "group": "Result", "meaning": "Away win, draw refunds"},
+    {"value": "AH Home +0.5", "label": "Home +0.5", "group": "Asian Handicap", "meaning": "Home win or draw"},
+    {"value": "AH Away +0.5", "label": "Away +0.5", "group": "Asian Handicap", "meaning": "Away win or draw"},
+    {"value": "Over 1.5", "label": "Over 1.5 Goals", "group": "Goals", "meaning": "2 or more total goals"},
+    {"value": "Over 2.5", "label": "Over 2.5 Goals", "group": "Goals", "meaning": "3 or more total goals"},
+    {"value": "Over 3.5", "label": "Over 3.5 Goals", "group": "Goals", "meaning": "4 or more total goals"},
+    {"value": "Under 1.5", "label": "Under 1.5 Goals", "group": "Goals", "meaning": "1 or 0 total goals"},
+    {"value": "Under 2.5", "label": "Under 2.5 Goals", "group": "Goals", "meaning": "2 or fewer total goals"},
+    {"value": "Under 3.5", "label": "Under 3.5 Goals", "group": "Goals", "meaning": "3 or fewer total goals"},
+    {"value": "GG / BTTS Yes", "label": "Both Teams To Score", "group": "Goals", "meaning": "Both teams to score"},
+    {"value": "GG + Over 2.5", "label": "BTTS + Over 2.5", "group": "Goals", "meaning": "Both score and 3+ goals"},
+    {"value": "Home CS", "label": "Home Clean Sheet", "group": "Clean Sheet", "meaning": "Home team keeps clean sheet"},
+    {"value": "Away CS", "label": "Away Clean Sheet", "group": "Clean Sheet", "meaning": "Away team keeps clean sheet"},
+    {"value": "First to Score H", "label": "Home First To Score", "group": "Scoring", "meaning": "Home team scores first"},
+    {"value": "First to Score A", "label": "Away First To Score", "group": "Scoring", "meaning": "Away team scores first"},
+]
+SLIP_REVIEW_VERDICT_OPTIONS = [
+    {"value": "keep", "label": "Keep", "description": "Selection is strong enough to stay on the slip."},
+    {"value": "caution", "label": "Caution", "description": "Selection has some support but carries warnings."},
+    {"value": "replace", "label": "Replace", "description": "A stronger market exists for the same game."},
+    {"value": "remove", "label": "Remove", "description": "Selection does not show enough edge."},
+    {"value": "unmatched", "label": "Unmatched", "description": "Fixture could not be confidently matched."},
+    {"value": "pending_analysis", "label": "Pending Analysis", "description": "Fixture matched but has not been scored yet."},
+]
 
 
 def _payload_etag(payload):
@@ -1662,6 +1701,767 @@ class GamesView(APIView):
         query.is_valid(raise_exception=True)
         target_date = query.validated_data.get("date") or timezone.localdate()
         return _private_cached_response(_all_games_payload(target_date, request), request=request)
+
+
+class FixtureSearchView(APIView):
+    permission_classes = [IsAuthenticated]
+    serializer_class = FixtureSearchResponseSerializer
+
+    @extend_schema(
+        summary="Search upcoming fixtures",
+        description=(
+            "Authenticated user endpoint. Searches the local upcoming-fixture cache first using a typed match name "
+            "such as 'France vs Morocco'. If no local match exists, the backend refreshes today plus the requested "
+            "future-day window from API-Football and searches again."
+        ),
+        tags=["Games"],
+        parameters=[FixtureSearchQuerySerializer],
+        responses={200: FixtureSearchResponseSerializer},
+    )
+    def get(self, request):
+        query = FixtureSearchQuerySerializer(data=request.query_params)
+        query.is_valid(raise_exception=True)
+        search_text = query.validated_data["q"]
+        days = query.validated_data.get("days", 3)
+        limit = query.validated_data.get("limit", 10)
+        refresh = query.validated_data.get("refresh", False)
+        start_date = timezone.localdate()
+        search = FixtureSearchService().search(
+            search_text,
+            start_date=start_date,
+            days=days,
+            limit=limit,
+            refresh=refresh,
+        )
+        return Response(
+            {
+                "query": search_text,
+                "start_date": start_date,
+                "days": days,
+                "count": len(search["results"]),
+                "refreshed": search["refreshed"],
+                "refresh_errors": search.get("refresh_errors", []),
+                "results": search["results"],
+            }
+        )
+
+
+def _normalise_market_name(value):
+    return " ".join(str(value or "").strip().lower().split())
+
+
+def _market_matches(requested, actual):
+    return _normalise_market_name(requested) == _normalise_market_name(actual)
+
+
+def _manual_fixture_game(match_id, match_date, request=None):
+    payload = _game_detail_payload(match_date, match_id, request=request)
+    game = payload.get("game")
+    if game and game.get("markets"):
+        return game
+
+    prediction = (
+        MarketPrediction.objects.select_related("run", "selected_pick")
+        .filter(match_id=str(match_id))
+        .order_by("-run__created_at", "-created_at")
+        .first()
+    )
+    if not prediction:
+        return None
+
+    algo_run = prediction.run
+    predictions = (
+        MarketPrediction.objects.filter(run=algo_run, match_id=str(match_id))
+        .select_related("selected_pick")
+        .order_by("-confidence", "-ev", "market")
+    )
+    markets = [
+        _market_prediction_payload(item)
+        for item in predictions
+        if item.market not in EXCLUDED_MARKETS
+    ]
+    fixture_summary = {
+        "fixture": prediction.fixture,
+        "home_team": prediction.home_team,
+        "away_team": prediction.away_team,
+        "league": prediction.league,
+        "kickoff": prediction.kickoff,
+        "match_id": prediction.match_id,
+        "home_recent_form": prediction.home_recent_form,
+        "away_recent_form": prediction.away_recent_form,
+        "fixture_context": prediction.fixture_context,
+        "team_news": prediction.team_news,
+        "markets": markets,
+    }
+    return _game_summary_from_fixture(
+        fixture_summary,
+        _picks_by_match(algo_run),
+        request=request,
+        include_markets=True,
+    )
+
+
+def _manual_verdict(selected_market, best_market):
+    status_value = selected_market.get("recommendation_status") or "no_edge"
+    selected_score = float(selected_market.get("display_score") or 0)
+    best_score = float((best_market or {}).get("display_score") or selected_score)
+    best_market_name = (best_market or {}).get("market")
+    has_better_market = bool(best_market_name and best_market_name != selected_market.get("market") and best_score >= selected_score + 10)
+
+    if selected_market.get("recommended") or selected_market.get("selected"):
+        verdict = "keep"
+        message = "This selection is strong enough to keep."
+    elif status_value == "watchlist":
+        verdict = "replace" if has_better_market else "caution"
+        message = (
+            "A stronger market is available for this game."
+            if has_better_market
+            else "This selection is playable for tracking, but it is not strong enough as a recommended pick."
+        )
+    elif status_value == "no_edge":
+        verdict = "replace" if has_better_market else "remove"
+        message = (
+            "The selected market does not show enough edge; consider the stronger market."
+            if has_better_market
+            else "The selected market does not show enough edge from the current analysis."
+        )
+    else:
+        verdict = "caution"
+        message = "This selection has some support, but there are enough warnings to treat it carefully."
+
+    return {
+        "verdict": verdict,
+        "message": message,
+        "better_market_available": has_better_market,
+    }
+
+
+def _json_safe(value):
+    return json.loads(json.dumps(value, default=str))
+
+
+def _float_or_none(value):
+    try:
+        if value in (None, ""):
+            return None
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _selection_original_odds(item):
+    provider_payload = item.get("provider_payload") or {}
+    odds = provider_payload.get("odds")
+    if odds is None:
+        odds = ((provider_payload.get("provider_payload") or {}).get("selection") or {}).get("odds")
+    if odds is None:
+        odds = ((provider_payload.get("provider_payload") or {}).get("leg") or {}).get("odds")
+    if odds is None:
+        odds = (item.get("selected_market") or {}).get("odds")
+    return _float_or_none(odds)
+
+
+def _selection_suggested_odds(item):
+    if item.get("verdict") == "remove":
+        return None
+    if item.get("verdict") == "replace":
+        return _float_or_none((item.get("best_market") or {}).get("odds"))
+    return _selection_original_odds(item) or _float_or_none((item.get("selected_market") or {}).get("odds"))
+
+
+def _combined_odds(values):
+    odds = [value for value in values if value and value > 1]
+    if not odds:
+        return None
+    total = 1.0
+    for value in odds:
+        total *= value
+    return round(total, 2)
+
+
+def _selection_strength_score(item):
+    if item.get("status") != "analysed":
+        return 20
+    market = item.get("selected_market") or {}
+    final_confidence = _float_or_none(market.get("final_confidence") or market.get("confidence")) or 0
+    display_score = _float_or_none(market.get("display_score")) or final_confidence
+    verdict_bonus = {
+        "keep": 12,
+        "caution": -4,
+        "replace": -18,
+        "remove": -35,
+    }.get(item.get("verdict"), -20)
+    risk_penalty = min(len(market.get("risk_flags") or []) * 2.5, 18)
+    score = final_confidence * 0.6 + display_score * 0.25 + verdict_bonus - risk_penalty
+    return round(max(0, min(100, score)), 1)
+
+
+def _selection_card(item):
+    matched = item.get("matched_fixture") or {}
+    selected_market = item.get("selected_market") or {}
+    best_market = item.get("best_market") or {}
+    return {
+        "match": item.get("match"),
+        "fixture": matched.get("fixture") or item.get("match"),
+        "match_id": matched.get("match_id", ""),
+        "submitted_market": item.get("submitted_market"),
+        "verdict": item.get("verdict"),
+        "status": item.get("status"),
+        "score": item.get("selection_score"),
+        "confidence": selected_market.get("final_confidence") or selected_market.get("confidence"),
+        "odds": _selection_original_odds(item),
+        "suggested_market": best_market.get("market") if item.get("verdict") == "replace" else item.get("submitted_market"),
+        "suggested_odds": _selection_suggested_odds(item),
+        "message": item.get("message", ""),
+        "warnings": (selected_market.get("risk_flags") or [])[:5],
+    }
+
+
+def _slip_intelligence(results):
+    enriched = []
+    for item in results:
+        copy = dict(item)
+        copy["selection_score"] = _selection_strength_score(copy)
+        enriched.append(copy)
+
+    analysed = [item for item in enriched if item.get("status") == "analysed"]
+    if analysed:
+        overall_score = round(sum(item["selection_score"] for item in analysed) / len(analysed), 1)
+    else:
+        overall_score = 0.0
+
+    remove_items = [item for item in enriched if item.get("verdict") == "remove"]
+    replace_items = [item for item in enriched if item.get("verdict") == "replace"]
+    caution_items = [item for item in enriched if item.get("verdict") == "caution"]
+    keep_items = [item for item in enriched if item.get("verdict") == "keep"]
+    unverified_items = [item for item in enriched if item.get("status") != "analysed"]
+
+    if remove_items or len(replace_items) >= 3 or overall_score < 45:
+        risk_level = "high"
+    elif replace_items or len(caution_items) >= 2 or overall_score < 65:
+        risk_level = "medium"
+    else:
+        risk_level = "low"
+
+    strongest = sorted(analysed, key=lambda item: item.get("selection_score", 0), reverse=True)[:3]
+    weakest = sorted(enriched, key=lambda item: item.get("selection_score", 0))[:3]
+    original_combined = _combined_odds(_selection_original_odds(item) for item in enriched)
+    suggested_combined = _combined_odds(_selection_suggested_odds(item) for item in enriched)
+
+    if remove_items:
+        verdict = f"Remove {len(remove_items)} leg(s) before trusting this slip."
+    elif replace_items:
+        verdict = f"Replace {len(replace_items)} leg(s) with stronger markets."
+    elif caution_items:
+        verdict = "Playable, but treat the caution legs carefully."
+    elif keep_items and len(keep_items) == len(analysed) and not unverified_items:
+        verdict = "This slip is clean from the current model view."
+    else:
+        verdict = "Some selections still need verification before this slip is reliable."
+
+    return enriched, {
+        "overall_score": overall_score,
+        "risk_level": risk_level,
+        "verdict": verdict,
+        "original_combined_odds": original_combined,
+        "suggested_combined_odds": suggested_combined,
+        "strongest_legs": [_selection_card(item) for item in strongest],
+        "weakest_legs": [_selection_card(item) for item in weakest],
+        "legs_to_keep": [_selection_card(item) for item in keep_items],
+        "legs_to_caution": [_selection_card(item) for item in caution_items],
+        "legs_to_replace": [_selection_card(item) for item in replace_items],
+        "legs_to_remove": [_selection_card(item) for item in remove_items],
+        "unverified_legs": [_selection_card(item) for item in unverified_items],
+    }
+
+
+def _manual_review_summary(results):
+    enriched, intelligence = _slip_intelligence(results)
+    return {
+        "count": len(enriched),
+        "analysed_count": sum(1 for item in enriched if item.get("status") == "analysed"),
+        "keep_count": sum(1 for item in enriched if item.get("verdict") == "keep"),
+        "caution_count": sum(1 for item in enriched if item.get("verdict") == "caution"),
+        "replace_count": sum(1 for item in enriched if item.get("verdict") == "replace"),
+        "remove_count": sum(1 for item in enriched if item.get("verdict") == "remove"),
+        "unmatched_count": sum(1 for item in enriched if item.get("status") in {"unmatched", "ambiguous_match", "market_not_found"}),
+        "pending_analysis_count": sum(1 for item in enriched if item.get("status") == "matched_unscored"),
+        "intelligence": intelligence,
+    }
+
+
+def _review_status_from_summary(summary):
+    if summary.get("count") and summary.get("analysed_count") == summary.get("count"):
+        return SlipReview.Status.COMPLETED
+    if summary.get("analysed_count") or summary.get("pending_analysis_count"):
+        return SlipReview.Status.PARTIAL
+    return SlipReview.Status.FAILED
+
+
+def _populate_slip_review(review, results):
+    safe_results = _json_safe(results)
+    safe_results, _ = _slip_intelligence(safe_results)
+    summary = _manual_review_summary(safe_results)
+    review.status = _review_status_from_summary(summary)
+    review.summary = summary
+    review.save(update_fields=["status", "summary", "updated_at"])
+    review.selections.all().delete()
+    rows = []
+    for index, item in enumerate(safe_results, start=1):
+        matched = item.get("matched_fixture") or {}
+        rows.append(
+            SlipSelection(
+                review=review,
+                order=index,
+                submitted_match=item.get("match", ""),
+                submitted_market=item.get("submitted_market", ""),
+                status=item.get("status", ""),
+                verdict=item.get("verdict", ""),
+                message=item.get("message", ""),
+                match_id=matched.get("match_id") or "",
+                match_date=matched.get("match_date") or None,
+                fixture=matched.get("fixture") or "",
+                home_team=matched.get("home_team") or "",
+                away_team=matched.get("away_team") or "",
+                league=matched.get("league") or "",
+                country=matched.get("country") or "",
+                kickoff=matched.get("kickoff") or "",
+                selected_market=item.get("selected_market") or {},
+                best_market=item.get("best_market") or {},
+                recommended_market=item.get("recommended_market") or {},
+                possible_matches=item.get("possible_matches") or [],
+                analysis_payload=item,
+            )
+        )
+    SlipSelection.objects.bulk_create(rows, batch_size=100)
+    return summary, safe_results
+
+
+def _create_slip_review(user, *, source, submitted_payload, results):
+    review = SlipReview.objects.create(
+        user=user,
+        source=source,
+        status=SlipReview.Status.ANALYSING,
+        title=f"{source.title()} review",
+        submitted_payload=_json_safe(submitted_payload),
+        summary=_empty_slip_summary("Slip analysis started."),
+    )
+    summary, safe_results = _populate_slip_review(review, results)
+    return review, summary, safe_results
+
+
+def _empty_slip_summary(verdict, *, task_id="", error=""):
+    summary = {
+        "count": 0,
+        "analysed_count": 0,
+        "keep_count": 0,
+        "caution_count": 0,
+        "replace_count": 0,
+        "remove_count": 0,
+        "unmatched_count": 0,
+        "pending_analysis_count": 0,
+        "intelligence": {
+            "overall_score": 0,
+            "risk_level": "medium" if not error else "high",
+            "verdict": verdict,
+            "original_combined_odds": None,
+            "suggested_combined_odds": None,
+            "strongest_legs": [],
+            "weakest_legs": [],
+            "legs_to_keep": [],
+            "legs_to_caution": [],
+            "legs_to_replace": [],
+            "legs_to_remove": [],
+            "unverified_legs": [],
+        },
+    }
+    if task_id:
+        summary["task_id"] = task_id
+    if error:
+        summary["error"] = str(error)
+    return summary
+
+
+def _create_queued_slip_review(user, *, source, submitted_payload):
+    return SlipReview.objects.create(
+        user=user,
+        source=source,
+        status=SlipReview.Status.QUEUED,
+        title=f"{source.title()} review",
+        submitted_payload=_json_safe(submitted_payload),
+        summary=_empty_slip_summary("Slip import queued."),
+    )
+
+
+def _create_failed_slip_review(user, *, source, submitted_payload, error):
+    summary = _empty_slip_summary("Slip import failed.", error=error)
+    return SlipReview.objects.create(
+        user=user,
+        source=source,
+        status=SlipReview.Status.FAILED,
+        title=f"{source.title()} review",
+        submitted_payload=_json_safe(submitted_payload),
+        summary=summary,
+    )
+
+
+def _slip_selection_payload(selection):
+    payload = dict(selection.analysis_payload or {})
+    payload.setdefault("match", selection.submitted_match)
+    payload.setdefault("submitted_market", selection.submitted_market)
+    payload.setdefault("status", selection.status)
+    payload.setdefault("verdict", selection.verdict)
+    payload.setdefault("message", selection.message)
+    return payload
+
+
+def _slip_review_payload(review, *, include_selections=True):
+    summary = review.summary or {}
+    payload = {
+        "id": review.id,
+        "source": review.source,
+        "status": review.status,
+        "title": review.title,
+        "summary": summary,
+        "intelligence": summary.get("intelligence", {}),
+        "created_at": review.created_at,
+        "updated_at": review.updated_at,
+    }
+    if include_selections:
+        payload["selections"] = [
+            _slip_selection_payload(selection)
+            for selection in review.selections.all().order_by("order", "id")
+        ]
+    return payload
+
+
+def _analyse_manual_selection(selection, *, days, request=None):
+    match_text = selection.get("match", "")
+    requested_market = selection.get("market", "")
+    search = FixtureSearchService().search(match_text, days=days, limit=5)
+    candidates = search.get("results") or []
+    if not candidates:
+        return {
+            "match": match_text,
+            "submitted_market": requested_market,
+            "status": "unmatched",
+            "verdict": "unmatched",
+            "message": "We could not find this fixture in the upcoming fixture cache or API-Football search window.",
+            "possible_matches": [],
+        }
+
+    candidate = candidates[0]
+    if float(candidate.get("match_score") or 0) < 70:
+        return {
+            "match": match_text,
+            "submitted_market": requested_market,
+            "status": "ambiguous_match",
+            "verdict": "unmatched",
+            "message": "We found possible fixtures, but none were clear enough to analyse automatically.",
+            "possible_matches": candidates,
+        }
+
+    game = _manual_fixture_game(candidate["match_id"], candidate["match_date"], request=request)
+    if not game:
+        return {
+            "match": match_text,
+            "submitted_market": requested_market,
+            "status": "matched_unscored",
+            "verdict": "pending_analysis",
+            "message": "Fixture matched, but this game has not been scored by the prediction engine yet.",
+            "matched_fixture": candidate,
+            "possible_matches": candidates,
+        }
+
+    markets = game.get("markets") or []
+    selected_market = next((market for market in markets if _market_matches(requested_market, market.get("market"))), None)
+    if not selected_market:
+        return {
+            "match": match_text,
+            "submitted_market": requested_market,
+            "status": "market_not_found",
+            "verdict": "unmatched_market",
+            "message": "Fixture matched, but that market is not available in the scored markets for this game.",
+            "matched_fixture": candidate,
+            "available_markets": [market.get("market") for market in markets],
+            "best_market": game.get("best_market"),
+            "recommended_market": game.get("recommended_market"),
+        }
+
+    best_market = game.get("recommended_market") or game.get("best_market") or game.get("top_market")
+    verdict = _manual_verdict(selected_market, best_market)
+    return {
+        "match": match_text,
+        "submitted_market": requested_market,
+        "status": "analysed",
+        **verdict,
+        "matched_fixture": {
+            "match_id": game.get("match_id"),
+            "match_date": candidate.get("match_date"),
+            "fixture": game.get("fixture"),
+            "home_team": game.get("home_team"),
+            "away_team": game.get("away_team"),
+            "league": game.get("league"),
+            "country": game.get("country"),
+            "kickoff": game.get("kickoff"),
+            "match_score": candidate.get("match_score"),
+        },
+        "selected_market": selected_market,
+        "best_market": best_market,
+        "recommended_market": game.get("recommended_market"),
+        "possible_matches": candidates,
+    }
+
+
+def process_slip_review_import(review_id):
+    review = SlipReview.objects.get(id=review_id)
+    payload = review.submitted_payload or {}
+    review.status = SlipReview.Status.IMPORTING
+    review.summary = {
+        **(review.summary or {}),
+        **_empty_slip_summary("Importing slip selections.", task_id=(review.summary or {}).get("task_id", "")),
+    }
+    review.save(update_fields=["status", "summary", "updated_at"])
+
+    try:
+        if review.source == SlipReview.Source.SPORTYBET:
+            imported = SportyBetShareImporter().import_share(
+                url=payload.get("url"),
+                code=payload.get("code"),
+                payload=payload.get("payload"),
+            )
+        elif review.source == SlipReview.Source.BETANO:
+            imported = BetanoBetslipImporter().import_betslip(
+                url=payload.get("url"),
+                code=payload.get("code"),
+                payload=payload.get("payload"),
+            )
+        else:
+            raise ValueError(f"Unsupported async slip source: {review.source}")
+
+        review.status = SlipReview.Status.ANALYSING
+        review.summary = {
+            **(review.summary or {}),
+            **_empty_slip_summary("Analysing imported selections.", task_id=(review.summary or {}).get("task_id", "")),
+        }
+        review.save(update_fields=["status", "summary", "updated_at"])
+
+        selections = [
+            {
+                "match": item.get("match", ""),
+                "market": item.get("market", ""),
+                "provider_payload": item,
+            }
+            for item in imported.get("selections") or []
+            if item.get("match") and item.get("market")
+        ]
+        results = []
+        for selection in selections:
+            result = _analyse_manual_selection(selection, days=payload.get("days", 3), request=None)
+            result["provider"] = review.source
+            result["provider_payload"] = _json_safe(selection.get("provider_payload") or {})
+            results.append(result)
+
+        if not results:
+            raise ValueError("No supported football selections were found in this slip.")
+
+        summary, safe_results = _populate_slip_review(review, results)
+        review.submitted_payload = {
+            **payload,
+            "provider_code": imported.get("share_code") or imported.get("booking_code") or "",
+            "selection_count": imported.get("selection_count", 0),
+        }
+        review.save(update_fields=["submitted_payload", "updated_at"])
+        return {"review_id": review.id, "status": review.status, **summary}
+    except Exception as exc:
+        review.status = SlipReview.Status.FAILED
+        review.summary = _empty_slip_summary("Slip import failed.", task_id=(review.summary or {}).get("task_id", ""), error=exc)
+        review.save(update_fields=["status", "summary", "updated_at"])
+        raise
+
+
+class ManualSlipReviewView(APIView):
+    permission_classes = [IsAuthenticated]
+    serializer_class = ManualSlipReviewResponseSerializer
+
+    @extend_schema(
+        summary="Review manual match predictions",
+        description=(
+            "Authenticated user endpoint. Accepts manually typed matches and selected markets, matches each fixture "
+            "against the upcoming fixture cache/API-Football fallback, and reviews the selected market using existing "
+            "scored market analysis when available."
+        ),
+        tags=["Slip Reviews"],
+        request=ManualSlipReviewRequestSerializer,
+        responses={200: ManualSlipReviewResponseSerializer},
+    )
+    def post(self, request):
+        serializer = ManualSlipReviewRequestSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        days = serializer.validated_data.get("days", 3)
+        results = [
+            _analyse_manual_selection(selection, days=days, request=request)
+            for selection in serializer.validated_data["selections"]
+        ]
+        review, summary, safe_results = _create_slip_review(
+            request.user,
+            source=SlipReview.Source.MANUAL,
+            submitted_payload=serializer.validated_data,
+            results=results,
+        )
+        return Response(
+            {
+                "id": review.id,
+                "source": review.source,
+                "status": review.status,
+                **summary,
+                "selections": safe_results,
+            }
+        )
+
+
+class SportyBetSlipImportView(APIView):
+    permission_classes = [IsAuthenticated]
+    serializer_class = SlipReviewDetailResponseSerializer
+
+    @extend_schema(
+        summary="Import SportyBet slip",
+        description=(
+            "Authenticated user endpoint. Accepts a SportyBet share URL/code or raw share payload, imports the booked "
+            "football selections asynchronously, matches them against cached fixtures, analyses each selected market, "
+            "and saves the review. Returns a queued review immediately; poll the review detail endpoint until the "
+            "status becomes completed, partial, or failed."
+        ),
+        tags=["Slip Reviews"],
+        request=SportyBetSlipImportRequestSerializer,
+        responses={202: SlipReviewDetailResponseSerializer},
+    )
+    def post(self, request):
+        serializer = SportyBetSlipImportRequestSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+        review = _create_queued_slip_review(
+            request.user,
+            source=SlipReview.Source.SPORTYBET,
+            submitted_payload=data,
+        )
+        task = import_slip_review.delay(review.id)
+        review.summary = _empty_slip_summary("Slip import queued.", task_id=task.id)
+        review.save(update_fields=["summary", "updated_at"])
+        return Response(_slip_review_payload(review, include_selections=True), status=status.HTTP_202_ACCEPTED)
+
+
+class BetanoSlipImportView(APIView):
+    permission_classes = [IsAuthenticated]
+    serializer_class = SlipReviewDetailResponseSerializer
+
+    @extend_schema(
+        summary="Import Betano slip",
+        description=(
+            "Authenticated user endpoint. Accepts a Betano booking URL/code, opens it with the backend browser "
+            "importer, captures the getbetslip payload, imports the booked football selections, matches them against "
+            "cached fixtures, analyses each selected market, and saves the review asynchronously. A raw getbetslip "
+            "payload can also be supplied as a fallback. Returns a queued review immediately; poll the review detail "
+            "endpoint until the status becomes completed, partial, or failed."
+        ),
+        tags=["Slip Reviews"],
+        request=BetanoSlipImportRequestSerializer,
+        responses={202: SlipReviewDetailResponseSerializer},
+    )
+    def post(self, request):
+        serializer = BetanoSlipImportRequestSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+        review = _create_queued_slip_review(
+            request.user,
+            source=SlipReview.Source.BETANO,
+            submitted_payload=data,
+        )
+        task = import_slip_review.delay(review.id)
+        review.summary = _empty_slip_summary("Slip import queued.", task_id=task.id)
+        review.save(update_fields=["summary", "updated_at"])
+        return Response(_slip_review_payload(review, include_selections=True), status=status.HTTP_202_ACCEPTED)
+
+
+class SlipReviewListView(APIView):
+    permission_classes = [IsAuthenticated]
+    serializer_class = SlipReviewListResponseSerializer
+
+    @extend_schema(
+        summary="List slip reviews",
+        description="Authenticated user endpoint. Returns previous manual/bookmaker slip reviews for the current user.",
+        tags=["Slip Reviews"],
+        responses={200: SlipReviewListResponseSerializer},
+    )
+    def get(self, request):
+        try:
+            limit = int(request.query_params.get("limit", 20))
+        except (TypeError, ValueError):
+            limit = 20
+        limit = max(1, min(limit, 100))
+        reviews = (
+            SlipReview.objects.filter(user=request.user)
+            .prefetch_related("selections")
+            .order_by("-created_at")[:limit]
+        )
+        return Response(
+            {
+                "count": len(reviews),
+                "reviews": [
+                    _slip_review_payload(review, include_selections=False)
+                    for review in reviews
+                ],
+            }
+        )
+
+
+class SlipReviewOptionsView(APIView):
+    permission_classes = [IsAuthenticated]
+    serializer_class = SlipReviewOptionsResponseSerializer
+
+    @extend_schema(
+        summary="Slip review frontend options",
+        description="Authenticated user endpoint. Returns stable market dropdown options, verdict labels, source labels, and request limits for slip review screens.",
+        tags=["Slip Reviews"],
+        responses={200: SlipReviewOptionsResponseSerializer},
+    )
+    def get(self, request):
+        return Response(
+            {
+                "markets": SLIP_REVIEW_MARKET_OPTIONS,
+                "verdicts": SLIP_REVIEW_VERDICT_OPTIONS,
+                "sources": [
+                    {"value": "manual", "label": "Manual"},
+                    {"value": "sportybet", "label": "SportyBet"},
+                    {"value": "betano", "label": "Betano"},
+                ],
+                "limits": {
+                    "manual_max_selections": 30,
+                    "search_max_days": 14,
+                    "search_default_days": 3,
+                    "fixture_search_limit": 25,
+                },
+            }
+        )
+
+
+class SlipReviewDetailView(APIView):
+    permission_classes = [IsAuthenticated]
+    serializer_class = SlipReviewDetailResponseSerializer
+
+    @extend_schema(
+        summary="Slip review detail",
+        description="Authenticated user endpoint. Returns one previous slip review with all reviewed selections.",
+        tags=["Slip Reviews"],
+        responses={200: SlipReviewDetailResponseSerializer},
+    )
+    def get(self, request, review_id):
+        review = get_object_or_404(
+            SlipReview.objects.prefetch_related("selections"),
+            id=review_id,
+            user=request.user,
+        )
+        return Response(_slip_review_payload(review, include_selections=True))
 
 
 class GameDetailView(APIView):
