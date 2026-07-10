@@ -78,6 +78,17 @@ def _team_tokens(value):
 class FixtureSearchService:
     DEFAULT_DAYS = 3
     MAX_DAYS = 14
+    PROVIDER_LEAGUE_IDS = {
+        "world cup": 1,
+        "fifa world cup": 1,
+        "uefa champions league": 2,
+        "uefa europa league": 3,
+        "uefa europa conference league": 848,
+        "club friendly games": 667,
+        "friendlies clubs": 667,
+        "chinese super league": 169,
+        "super league": 169,
+    }
 
     def __init__(self, runner_service=None):
         self.runner_service = runner_service or AlgoRunnerService()
@@ -158,6 +169,94 @@ class FixtureSearchService:
             refreshed = True
             candidates = self._search_cached(query, start_date=start_date, days=days, limit=limit)
         return {"refreshed": refreshed, "refresh_errors": refresh_errors, "results": candidates}
+
+    def search_provider_fixture(self, query, *, provider_date, competition="", limit=10):
+        if not provider_date:
+            return {"refreshed": False, "refresh_errors": [], "results": []}
+
+        start_date = max(provider_date - timedelta(days=1), timezone.localdate())
+        days = 2
+        errors = []
+        total = 0
+        from .grindalgo import algo_runner
+
+        with temporary_env(self.runner_service._runner_env({"APS_TRACK_ALL_LEAGUES": "True", "APS_MAX_FIXTURES": "0"})):
+            for offset in range(days + 1):
+                target_date = start_date + timedelta(days=offset)
+                params_list = [{"date": target_date.isoformat(), "timezone": "Africa/Lagos"}]
+                league_id = self._provider_league_id(competition)
+                if league_id:
+                    params_list.insert(
+                        0,
+                        {
+                            "date": target_date.isoformat(),
+                            "league": league_id,
+                            "season": provider_date.year,
+                            "timezone": "Africa/Lagos",
+                        },
+                    )
+                for params in params_list:
+                    try:
+                        fixtures = algo_runner.aps_get("/fixtures", params)
+                    except Exception as exc:
+                        errors.append({"date": target_date.isoformat(), "params": params, "error": str(exc)})
+                        continue
+                    total += self._upsert_api_fixtures(fixtures, target_date)
+
+        candidates = self._search_cached(query, start_date=start_date, days=days, limit=limit)
+        return {"refreshed": True, "refresh_errors": errors, "synced": total, "results": candidates}
+
+    def _provider_league_id(self, competition):
+        normalized = normalize_fixture_text(competition)
+        if not normalized:
+            return None
+        if normalized in self.PROVIDER_LEAGUE_IDS:
+            return self.PROVIDER_LEAGUE_IDS[normalized]
+        for name, league_id in self.PROVIDER_LEAGUE_IDS.items():
+            if name in normalized or normalized in name:
+                return league_id
+        return None
+
+    def _upsert_api_fixtures(self, fixtures, target_date):
+        items = []
+        for item in fixtures or []:
+            fixture = item.get("fixture") or {}
+            teams = item.get("teams") or {}
+            league = item.get("league") or {}
+            home = teams.get("home") or {}
+            away = teams.get("away") or {}
+            match_id = fixture.get("id")
+            if not match_id or not home.get("name") or not away.get("name"):
+                continue
+            status = (fixture.get("status") or {}).get("short", "")
+            if status in ("FT", "AET", "PEN", "CANC", "ABD"):
+                continue
+            items.append(
+                {
+                    "fixture": f"{home.get('name')} vs {away.get('name')}",
+                    "hname": home.get("name") or "",
+                    "aname": away.get("name") or "",
+                    "home_logo": home.get("logo") or "",
+                    "away_logo": away.get("logo") or "",
+                    "hid": home.get("id"),
+                    "aid": away.get("id"),
+                    "league": league.get("name") or "",
+                    "league_logo": league.get("logo") or "",
+                    "country": league.get("country") or "",
+                    "country_flag": league.get("flag") or "",
+                    "round": league.get("round") or "",
+                    "league_type": league.get("type") or "",
+                    "code": str(league.get("id") or ""),
+                    "kickoff": "",
+                    "kickoff_utc": fixture.get("date") or "",
+                    "match_id": match_id,
+                    "source": "aps_provider_lookup",
+                    "aps_id": match_id,
+                    "date": target_date,
+                    "season": league.get("season"),
+                }
+            )
+        return self._upsert_fixtures(items, target_date)
 
     def _search_cached(self, query, *, start_date, days, limit):
         home_query, away_query, normalized_query = parse_match_query(query)

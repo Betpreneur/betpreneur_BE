@@ -2239,6 +2239,15 @@ def _analyse_manual_selection(selection, *, days, request=None, force_fresh=Fals
             unrestricted=True,
         )
         candidates = search.get("results") or candidates
+        best_score = float((candidates[0] if candidates else {}).get("match_score") or 0)
+    if provider_date and best_score < 70:
+        provider_search = search_service.search_provider_fixture(
+            match_text,
+            provider_date=provider_date,
+            competition=(selection.get("provider_payload") or {}).get("competition") or "",
+            limit=5,
+        )
+        candidates = provider_search.get("results") or candidates
     if not candidates:
         return {
             "match": match_text,
