@@ -77,7 +77,7 @@ class FixtureSearchService:
     def __init__(self, runner_service=None):
         self.runner_service = runner_service or AlgoRunnerService()
 
-    def sync_upcoming(self, *, start_date=None, days=None):
+    def sync_upcoming(self, *, start_date=None, days=None, unrestricted=False):
         start_date = start_date or timezone.localdate()
         days = min(int(days or self.DEFAULT_DAYS), self.MAX_DAYS)
         total = 0
@@ -85,7 +85,13 @@ class FixtureSearchService:
 
         from .grindalgo import algo_runner
 
-        with temporary_env(self.runner_service._runner_env()):
+        extra_env = {}
+        if unrestricted:
+            extra_env = {
+                "APS_TRACK_ALL_LEAGUES": "True",
+                "APS_MAX_FIXTURES": "0",
+            }
+        with temporary_env(self.runner_service._runner_env(extra_env)):
             for offset in range(days + 1):
                 target_date = start_date + timedelta(days=offset)
                 try:
@@ -134,7 +140,7 @@ class FixtureSearchService:
             count += 1
         return count
 
-    def search(self, query, *, start_date=None, days=None, limit=10, refresh=False):
+    def search(self, query, *, start_date=None, days=None, limit=10, refresh=False, unrestricted=False):
         start_date = start_date or timezone.localdate()
         days = min(int(days or self.DEFAULT_DAYS), self.MAX_DAYS)
         limit = max(1, min(int(limit or 10), 25))
@@ -142,7 +148,7 @@ class FixtureSearchService:
         refresh_errors = []
         candidates = self._search_cached(query, start_date=start_date, days=days, limit=limit)
         if refresh or not candidates:
-            refresh_result = self.sync_upcoming(start_date=start_date, days=days)
+            refresh_result = self.sync_upcoming(start_date=start_date, days=days, unrestricted=unrestricted)
             refresh_errors = refresh_result.get("errors", [])
             refreshed = True
             candidates = self._search_cached(query, start_date=start_date, days=days, limit=limit)
@@ -1626,12 +1632,12 @@ class AlgoRunnerService:
             fixture.save(update_fields=["status", "error", "updated_at"])
             return {"fixture_id": fixture.id, "status": "failed", "error": str(exc)}
 
-    def score_cached_fixture_on_demand(self, match_id, *, match_date=None, reason="on_demand"):
+    def score_cached_fixture_on_demand(self, match_id, *, match_date=None, reason="on_demand", force=False):
         match_id = str(match_id or "").strip()
         if not match_id:
             return {"status": "failed", "error": "match_id_required"}
         existing = MarketPrediction.objects.filter(match_id=match_id).order_by("-run__created_at", "-created_at").first()
-        if existing:
+        if existing and not force:
             return {
                 "status": "already_scored",
                 "match_id": match_id,

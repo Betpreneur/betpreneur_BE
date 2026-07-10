@@ -1,4 +1,4 @@
-from datetime import timedelta
+from datetime import datetime, timedelta
 import csv
 import hashlib
 import json
@@ -2135,11 +2135,40 @@ def _slip_review_payload(review, *, include_selections=True):
     return payload
 
 
-def _analyse_manual_selection(selection, *, days, request=None):
+def _provider_match_date(selection):
+    provider_payload = selection.get("provider_payload") or {}
+    kickoff_ms = provider_payload.get("kickoff_ms")
+    if kickoff_ms in (None, ""):
+        nested = provider_payload.get("provider_payload") or {}
+        kickoff_ms = ((nested.get("outcome") or {}).get("estimateStartTime"))
+        if kickoff_ms in (None, ""):
+            kickoff_ms = ((nested.get("leg") or {}).get("eventStartTime"))
+    try:
+        if kickoff_ms in (None, ""):
+            return None
+        return datetime.fromtimestamp(float(kickoff_ms) / 1000, tz=timezone.get_current_timezone()).date()
+    except (TypeError, ValueError, OSError):
+        return None
+
+
+def _analyse_manual_selection(selection, *, days, request=None, force_fresh=False):
     match_text = selection.get("match", "")
     requested_market = selection.get("market", "")
-    search = FixtureSearchService().search(match_text, days=days, limit=5)
+    provider_date = _provider_match_date(selection)
+    search_service = FixtureSearchService()
+    search = search_service.search(match_text, days=days, limit=5)
     candidates = search.get("results") or []
+    best_score = float((candidates[0] if candidates else {}).get("match_score") or 0)
+    if provider_date and best_score < 70:
+        search = search_service.search(
+            match_text,
+            start_date=max(provider_date - timedelta(days=1), timezone.localdate()),
+            days=2,
+            limit=5,
+            refresh=True,
+            unrestricted=True,
+        )
+        candidates = search.get("results") or candidates
     if not candidates:
         return {
             "match": match_text,
@@ -2161,16 +2190,24 @@ def _analyse_manual_selection(selection, *, days, request=None):
             "possible_matches": candidates,
         }
 
-    game = _manual_fixture_game(candidate["match_id"], candidate["match_date"], request=request)
-    if not game:
+    on_demand = None
+    if force_fresh:
         on_demand = algo_runner_service.score_cached_fixture_on_demand(
             candidate["match_id"],
             match_date=candidate.get("match_date"),
             reason="slip_review",
+            force=True,
         )
         game = _manual_fixture_game(candidate["match_id"], candidate["match_date"], request=request)
     else:
-        on_demand = None
+        game = _manual_fixture_game(candidate["match_id"], candidate["match_date"], request=request)
+        if not game:
+            on_demand = algo_runner_service.score_cached_fixture_on_demand(
+                candidate["match_id"],
+                match_date=candidate.get("match_date"),
+                reason="slip_review",
+            )
+            game = _manual_fixture_game(candidate["match_id"], candidate["match_date"], request=request)
 
     if not game:
         return {
@@ -2269,7 +2306,12 @@ def process_slip_review_import(review_id):
         ]
         results = []
         for selection in selections:
-            result = _analyse_manual_selection(selection, days=payload.get("days", 3), request=None)
+            result = _analyse_manual_selection(
+                selection,
+                days=payload.get("days", 3),
+                request=None,
+                force_fresh=True,
+            )
             result["provider"] = review.source
             result["provider_payload"] = _json_safe(selection.get("provider_payload") or {})
             results.append(result)
@@ -2312,7 +2354,7 @@ class ManualSlipReviewView(APIView):
         serializer.is_valid(raise_exception=True)
         days = serializer.validated_data.get("days", 3)
         results = [
-            _analyse_manual_selection(selection, days=days, request=request)
+            _analyse_manual_selection(selection, days=days, request=request, force_fresh=True)
             for selection in serializer.validated_data["selections"]
         ]
         review, summary, safe_results = _create_slip_review(
