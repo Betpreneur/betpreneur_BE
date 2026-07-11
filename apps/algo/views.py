@@ -78,6 +78,23 @@ PICK_TIER_RANK = {
     Pick.Tier.WILD_CARD: 1,
 }
 EXCLUDED_MARKETS = {"DC: 1X", "DC: X2"}
+MATCH_CHECKER_MEMORY_FLAGS = {
+    "market_suppressed",
+    "strategy_suppressed",
+    "market_cooling",
+    "strategy_cooling",
+    "market_loss_streak",
+    "market_recent_losses",
+    "limited_market_history",
+}
+MATCH_CHECKER_SERIOUS_FLAGS = {
+    "best_price_far_above_consensus",
+    "wide_odds_market",
+    "goal_line_boundary",
+    "under35_blowout_risk",
+    "nordic_under_volatility",
+    "draw_boundary_risk",
+}
 SLIP_REVIEW_MARKET_OPTIONS = [
     {"value": "Home Win", "label": "Home Win", "group": "Result", "meaning": "Home team to win"},
     {"value": "Away Win", "label": "Away Win", "group": "Result", "meaning": "Away team to win"},
@@ -1784,14 +1801,177 @@ def _market_matches(requested, actual):
     )
 
 
-def _replacement_market_for_slip(game):
-    market = game.get("recommended_market")
+def _match_checker_risk_penalty(risk_flags):
+    flags = set(risk_flags or [])
+    penalty = 0.0
+    penalty += len(flags & MATCH_CHECKER_MEMORY_FLAGS) * 3.0
+    penalty += len(flags & MATCH_CHECKER_SERIOUS_FLAGS) * 6.0
+    penalty += max(0, len(flags) - 8) * 1.25
+    return min(penalty, 34.0)
+
+
+def _match_checker_advisory_score(market):
+    review = market.get("council_review") or {}
+    final_confidence = _float_or_none(review.get("final_confidence") or market.get("final_confidence") or market.get("confidence")) or 0
+    consensus = _float_or_none(review.get("consensus_score")) or final_confidence
+    disagreement = _float_or_none(review.get("disagreement_score")) or 0
+    market_fit = _market_reviewer_score(market, "market_fit") or consensus
+    scoreline_fit = _market_reviewer_score(market, "scoreline_pattern") or consensus
+    value_score = _market_reviewer_score(market, "value") or consensus
+    ev_score = _bounded_ev_score(market.get("ev"))
+    decision = str(review.get("decision") or "")
+    odds = _float_or_none(market.get("odds")) or 0
+
+    score = (
+        final_confidence * 0.34
+        + consensus * 0.20
+        + market_fit * 0.17
+        + scoreline_fit * 0.17
+        + value_score * 0.08
+        + ev_score
+        - disagreement * 0.22
+    )
+    if decision == "approve":
+        score += 6.0
+    elif decision == "caution":
+        score += 2.0
+    elif decision == "reject":
+        score -= 10.0
+
+    status_value = market.get("recommendation_status")
+    if market.get("recommended") or status_value in {"strong", "recommended", "playable"}:
+        score += 4.0
+    elif status_value == "watchlist":
+        score += 1.0
+    elif status_value == "no_edge":
+        score -= 4.0
+
+    if market.get("market") == "DC: 12":
+        score -= 5.0
+        if _market_publicly_paused("DC: 12"):
+            score -= 7.0
+    if odds and odds <= 1.06:
+        score -= 5.0
+    elif odds >= 10:
+        score -= 15.0
+    elif odds >= 6:
+        score -= 8.0
+
+    score -= _match_checker_risk_penalty(market.get("risk_flags") or [])
+    return round(max(0, min(100, score)), 1)
+
+
+def _match_checker_status(score):
+    if score >= 78:
+        return "strong"
+    if score >= 66:
+        return "playable"
+    if score >= 55:
+        return "caution"
+    return "avoid"
+
+
+def _match_checker_warnings(market):
+    flags = list(market.get("risk_flags") or [])
+    warnings = []
+    for flag in flags:
+        if flag in MATCH_CHECKER_MEMORY_FLAGS or flag in MATCH_CHECKER_SERIOUS_FLAGS:
+            warnings.append(flag)
+    for flag in flags:
+        if flag not in warnings:
+            warnings.append(flag)
+        if len(warnings) >= 6:
+            break
+    return warnings[:6]
+
+
+def _match_checker_evidence(market):
+    insights = market.get("insights") or {}
+    league_trust = insights.get("league_trust") or {}
+    calibration_trust = insights.get("calibration_trust") or {}
+    review = market.get("council_review") or {}
+    reviewers = review.get("reviewers") or []
+    market_fit = _market_reviewer_score(market, "market_fit")
+    scoreline_fit = _market_reviewer_score(market, "scoreline_pattern")
+    sample_size = (
+        league_trust.get("market_sample")
+        or calibration_trust.get("sample")
+        or league_trust.get("league_sample")
+        or 0
+    )
+    historical_accuracy = (
+        league_trust.get("market_hit_rate")
+        or calibration_trust.get("hit_rate")
+        or league_trust.get("league_hit_rate")
+    )
+    similar_market_roi = (
+        league_trust.get("market_roi")
+        if league_trust.get("market_roi") is not None
+        else calibration_trust.get("roi")
+    )
+    return {
+        "historical_accuracy": _float_or_none(historical_accuracy),
+        "similar_market_roi": _float_or_none(similar_market_roi),
+        "sample_size": int(sample_size or 0),
+        "league_trust": league_trust.get("status", ""),
+        "confidence_calibration": calibration_trust.get("status", ""),
+        "market_fit_score": round(float(market_fit), 1) if market_fit is not None else None,
+        "scoreline_fit_score": round(float(scoreline_fit), 1) if scoreline_fit is not None else None,
+        "reviewer_count": len(reviewers),
+    }
+
+
+def _match_checker_alternative_reason(submitted_market, alternative):
+    alt_market = alternative.get("market") or "the suggested market"
+    submitted = submitted_market or "the submitted market"
+    evidence = alternative.get("advisory_evidence") or {}
+    scoreline_fit = evidence.get("scoreline_fit_score")
+    market_fit = evidence.get("market_fit_score")
+    confidence = alternative.get("final_confidence") or alternative.get("confidence")
+    if scoreline_fit and scoreline_fit >= 70:
+        return f"{alt_market} fits the match scoreline pattern better than {submitted}."
+    if market_fit and market_fit >= 70:
+        return f"{alt_market} has stronger market fit for this fixture than {submitted}."
+    if confidence:
+        return f"{alt_market} carries stronger match-specific confidence than {submitted}."
+    return f"{alt_market} is the safer alternative from this match analysis."
+
+
+def _with_match_checker_advisory(market):
     if not market:
         return None
-    status_value = market.get("recommendation_status")
-    if market.get("recommended") or status_value in {"recommended", "playable"}:
-        return market
-    return None
+    payload = dict(market)
+    score = _match_checker_advisory_score(payload)
+    payload["advisory_score"] = score
+    payload["advisory_status"] = _match_checker_status(score)
+    payload["advisory_warnings"] = _match_checker_warnings(payload)
+    payload["advisory_evidence"] = _match_checker_evidence(payload)
+    payload["advisory_basis"] = "match_specific_analysis"
+    return payload
+
+
+def _replacement_market_for_slip(game, selected_market=None):
+    markets = [
+        _with_match_checker_advisory(market)
+        for market in (game.get("markets") or [])
+        if market.get("market") not in EXCLUDED_MARKETS
+    ]
+    markets = [market for market in markets if market]
+    if selected_market:
+        selected_name = selected_market.get("market")
+        markets = [market for market in markets if not _market_matches(selected_name, market.get("market"))]
+    candidates = [market for market in markets if (market.get("advisory_score") or 0) >= 55]
+    if not candidates:
+        return None
+    return sorted(
+        candidates,
+        key=lambda market: (
+            market.get("advisory_score") or 0,
+            market.get("final_confidence") or market.get("confidence") or 0,
+            _float_or_none(market.get("ev")) or -1,
+        ),
+        reverse=True,
+    )[0]
 
 
 def _market_is_better_for_slip(selected_market, replacement_market):
@@ -1799,9 +1979,9 @@ def _market_is_better_for_slip(selected_market, replacement_market):
         return False
     if _market_matches(selected_market.get("market"), replacement_market.get("market")):
         return False
-    selected_score = float(selected_market.get("display_score") or 0)
-    replacement_score = float(replacement_market.get("display_score") or 0)
-    return replacement_score >= selected_score + 10
+    selected_score = _float_or_none(selected_market.get("advisory_score")) or float(selected_market.get("display_score") or 0)
+    replacement_score = _float_or_none(replacement_market.get("advisory_score")) or float(replacement_market.get("display_score") or 0)
+    return replacement_score >= selected_score + 6 and replacement_score >= 58
 
 
 def _reverse_oriented_market(market):
@@ -1877,21 +2057,37 @@ def _manual_fixture_game(match_id, match_date, request=None):
 def _manual_verdict(selected_market, replacement_market):
     status_value = selected_market.get("recommendation_status") or "no_edge"
     has_better_market = _market_is_better_for_slip(selected_market, replacement_market)
+    advisory_score = _float_or_none(selected_market.get("advisory_score")) or 0
+    advisory_status = selected_market.get("advisory_status") or _match_checker_status(advisory_score)
 
-    if selected_market.get("recommended") or selected_market.get("selected"):
+    if (selected_market.get("recommended") or selected_market.get("selected")) and not has_better_market:
         verdict = "keep"
         message = "This selection is strong enough to keep."
+    elif advisory_status in {"strong", "playable"}:
+        verdict = "replace" if has_better_market else ("keep" if advisory_status == "strong" else "caution")
+        message = (
+            "A stronger market fits this match better."
+            if has_better_market
+            else "This selection has enough match-specific support, even if it is not a headline pick."
+        )
+    elif advisory_status == "caution":
+        verdict = "replace" if has_better_market else "caution"
+        message = (
+            "This selection is fragile; the alternative market has better match-specific support."
+            if has_better_market
+            else "This selection has some support, but the match and league signals require caution."
+        )
     elif status_value == "watchlist":
         verdict = "replace" if has_better_market else "caution"
         message = (
-            "A stronger market is available for this game."
+            "A stronger market fits this match better."
             if has_better_market
             else "This selection is playable for tracking, but it is not strong enough as a recommended pick."
         )
     elif status_value == "no_edge":
         verdict = "replace" if has_better_market else "remove"
         message = (
-            "The selected market does not show enough edge; consider the stronger market."
+            "The selected market does not show enough edge; consider the stronger match-specific alternative."
             if has_better_market
             else "The selected market does not show enough edge from the current analysis."
         )
@@ -1903,6 +2099,8 @@ def _manual_verdict(selected_market, replacement_market):
         "verdict": verdict,
         "message": message,
         "better_market_available": has_better_market,
+        "advisory_score": advisory_score,
+        "advisory_status": advisory_status,
     }
 
 
@@ -1951,10 +2149,46 @@ def _combined_odds(values):
     return round(total, 2)
 
 
+def _combined_probability(scores):
+    probabilities = [
+        max(1.0, min(95.0, float(score))) / 100.0
+        for score in scores
+        if score is not None
+    ]
+    if not probabilities:
+        return None
+    total = 1.0
+    for probability in probabilities:
+        total *= probability
+    return round(total * 100, 1)
+
+
+def _optimized_leg_score(item):
+    if item.get("status") != "analysed":
+        return None
+    if item.get("verdict") == "remove":
+        return None
+    if item.get("verdict") == "replace":
+        return _float_or_none((item.get("replacement_market") or {}).get("advisory_score"))
+    return _float_or_none(item.get("advisory_score") or (item.get("selected_market") or {}).get("advisory_score"))
+
+
+def _ticket_health_summary(score, risk_level, remove_count, replace_count, caution_count, unverified_count):
+    weak_count = remove_count + replace_count
+    if unverified_count and not weak_count:
+        return f"{unverified_count} leg(s) still need verification before this ticket is reliable."
+    if risk_level == "high":
+        return f"This ticket is risky. {weak_count or caution_count} leg(s) are likely to spoil it."
+    if risk_level == "medium":
+        return f"This ticket is playable, but {replace_count + caution_count} leg(s) need attention."
+    return "This ticket looks healthy from the current Match Checker analysis."
+
+
 def _selection_strength_score(item):
     if item.get("status") != "analysed":
         return None
     market = item.get("selected_market") or {}
+    advisory_score = _float_or_none(item.get("advisory_score") or market.get("advisory_score"))
     final_confidence = _float_or_none(market.get("final_confidence") or market.get("confidence")) or 0
     display_score = _float_or_none(market.get("display_score")) or final_confidence
     verdict_bonus = {
@@ -1964,7 +2198,8 @@ def _selection_strength_score(item):
         "remove": -35,
     }.get(item.get("verdict"), -20)
     risk_penalty = min(len(market.get("risk_flags") or []) * 2.5, 18)
-    score = final_confidence * 0.6 + display_score * 0.25 + verdict_bonus - risk_penalty
+    base_score = advisory_score if advisory_score is not None else (final_confidence * 0.6 + display_score * 0.25)
+    score = base_score + verdict_bonus - risk_penalty
     return round(max(0, min(100, score)), 1)
 
 
@@ -1972,22 +2207,62 @@ def _selection_card(item):
     matched = item.get("matched_fixture") or {}
     selected_market = item.get("selected_market") or {}
     replacement_market = item.get("replacement_market") or {}
+    action = item.get("verdict")
+    leg_score = item.get("selection_score")
+    if leg_score is None:
+        risk_level = "unknown"
+    elif leg_score < 45 or action == "remove":
+        risk_level = "high"
+    elif leg_score < 65 or action in {"replace", "caution"}:
+        risk_level = "medium"
+    else:
+        risk_level = "low"
+    alternative = None
+    if replacement_market:
+        alternative = {
+            "market": replacement_market.get("market"),
+            "confidence": replacement_market.get("final_confidence") or replacement_market.get("confidence"),
+            "advisory_score": replacement_market.get("advisory_score"),
+            "risk_level": (
+                "low"
+                if (replacement_market.get("advisory_score") or 0) >= 78
+                else "medium"
+                if (replacement_market.get("advisory_score") or 0) >= 55
+                else "high"
+            ),
+            "odds": _float_or_none(replacement_market.get("odds")),
+            "ev": _float_or_none(replacement_market.get("ev")),
+            "reason": _match_checker_alternative_reason(item.get("submitted_market"), replacement_market),
+            "evidence": replacement_market.get("advisory_evidence") or {},
+            "warnings": replacement_market.get("advisory_warnings") or [],
+        }
     return {
         "match": item.get("match"),
         "fixture": matched.get("fixture") or item.get("match"),
         "match_id": matched.get("match_id", ""),
         "submitted_market": item.get("submitted_market"),
         "verdict": item.get("verdict"),
+        "recommended_action": action,
         "status": item.get("status"),
         "score": item.get("selection_score"),
         "submitted_pick_score": item.get("selection_score"),
+        "leg_score": leg_score,
+        "risk_level": risk_level,
+        "advisory_score": item.get("advisory_score") or selected_market.get("advisory_score"),
+        "advisory_status": item.get("advisory_status") or selected_market.get("advisory_status"),
+        "advisory_basis": selected_market.get("advisory_basis"),
+        "evidence": selected_market.get("advisory_evidence") or {},
         "match_resolution_score": (matched.get("match_score") if matched else None),
         "confidence": selected_market.get("final_confidence") or selected_market.get("confidence"),
         "odds": _selection_original_odds(item),
         "suggested_market": replacement_market.get("market") if item.get("verdict") == "replace" else item.get("submitted_market"),
         "suggested_odds": _selection_suggested_odds(item),
+        "suggested_advisory_score": replacement_market.get("advisory_score") if replacement_market else None,
+        "suggested_advisory_status": replacement_market.get("advisory_status") if replacement_market else "",
+        "alternative": alternative,
         "message": item.get("message", ""),
-        "warnings": (selected_market.get("risk_flags") or [])[:5],
+        "why_risky": (selected_market.get("advisory_warnings") or selected_market.get("risk_flags") or [])[:4],
+        "warnings": (selected_market.get("advisory_warnings") or selected_market.get("risk_flags") or [])[:6],
     }
 
 
@@ -2029,6 +2304,18 @@ def _slip_intelligence(results):
     )[:3]
     original_combined = _combined_odds(_selection_original_odds(item) for item in enriched)
     suggested_combined = _combined_odds(_selection_suggested_odds(item) for item in enriched)
+    original_success = _combined_probability(
+        (item.get("advisory_score") or (item.get("selected_market") or {}).get("advisory_score"))
+        for item in analysed
+    )
+    optimized_scores = [_optimized_leg_score(item) for item in analysed]
+    optimized_success = _combined_probability(optimized_scores)
+    optimized_leg_count = sum(1 for score in optimized_scores if score is not None)
+    improvement = (
+        round(optimized_success - original_success, 1)
+        if optimized_success is not None and original_success is not None
+        else None
+    )
 
     if remove_items:
         verdict = f"Remove {len(remove_items)} leg(s) before trusting this slip."
@@ -2041,10 +2328,51 @@ def _slip_intelligence(results):
     else:
         verdict = "Some selections still need verification before this slip is reliable."
 
+    ticket_health = {
+        "health_score": overall_score,
+        "risk_level": risk_level,
+        "summary": _ticket_health_summary(
+            overall_score,
+            risk_level,
+            len(remove_items),
+            len(replace_items),
+            len(caution_items),
+            len(unverified_items),
+        ),
+    }
+    original_ticket = {
+        "legs": len(analysed),
+        "estimated_success": original_success,
+        "combined_odds": original_combined,
+    }
+    optimized_ticket = {
+        "legs": optimized_leg_count,
+        "estimated_success": optimized_success,
+        "combined_odds": suggested_combined,
+    }
+    improvement_text = f"+{improvement}%" if improvement is not None and improvement > 0 else (
+        f"{improvement}%" if improvement is not None else ""
+    )
+    learning_tracking = {
+        "status": "captured",
+        "tracked_items": len(analysed),
+        "tracks_submitted_market": True,
+        "tracks_suggested_alternative": True,
+        "outcome_tracking": "pending_settlement",
+    }
+
     return enriched, {
         "overall_score": overall_score,
+        "health_score": overall_score,
         "risk_level": risk_level,
         "verdict": verdict,
+        "summary": ticket_health["summary"],
+        "ticket_health": ticket_health,
+        "original_ticket": original_ticket,
+        "optimized_ticket": optimized_ticket,
+        "improvement": improvement_text,
+        "improvement_percent": improvement,
+        "learning_tracking": learning_tracking,
         "original_combined_odds": original_combined,
         "suggested_combined_odds": suggested_combined,
         "strongest_legs": [_selection_card(item) for item in strongest],
@@ -2070,6 +2398,14 @@ def _manual_review_summary(results):
         "expired_count": sum(1 for item in enriched if item.get("status") == "expired"),
         "unmatched_count": sum(1 for item in enriched if item.get("status") in {"unmatched", "ambiguous_match", "market_not_found"}),
         "pending_analysis_count": sum(1 for item in enriched if item.get("status") == "matched_unscored"),
+        "health_score": intelligence.get("health_score", 0),
+        "risk_level": intelligence.get("risk_level", ""),
+        "ticket_health": intelligence.get("ticket_health", {}),
+        "original_ticket": intelligence.get("original_ticket", {}),
+        "optimized_ticket": intelligence.get("optimized_ticket", {}),
+        "improvement": intelligence.get("improvement", ""),
+        "improvement_percent": intelligence.get("improvement_percent"),
+        "learning_tracking": intelligence.get("learning_tracking", {}),
         "intelligence": intelligence,
     }
 
@@ -2487,7 +2823,10 @@ def _analyse_manual_selection(selection, *, days, request=None, force_fresh=Fals
 
     best_market = game.get("best_market") or game.get("top_market")
     recommended_market = game.get("recommended_market")
-    replacement_market = _replacement_market_for_slip(game)
+    selected_market = _with_match_checker_advisory(selected_market)
+    best_market = _with_match_checker_advisory(best_market)
+    recommended_market = _with_match_checker_advisory(recommended_market)
+    replacement_market = _replacement_market_for_slip(game, selected_market=selected_market)
     verdict = _manual_verdict(selected_market, replacement_market)
     return {
         "match": match_text,
