@@ -572,6 +572,7 @@ class ManualSlipReviewResponseSerializer(serializers.Serializer):
     improvement = serializers.CharField(required=False, allow_blank=True)
     improvement_percent = serializers.FloatField(required=False, allow_null=True)
     learning_tracking = serializers.JSONField(required=False)
+    public = serializers.JSONField(required=False)
     intelligence = serializers.JSONField()
     selections = serializers.JSONField()
 
@@ -587,6 +588,7 @@ class SlipReviewDetailResponseSerializer(serializers.Serializer):
     status = serializers.CharField()
     title = serializers.CharField()
     summary = serializers.JSONField()
+    public = serializers.JSONField(required=False)
     intelligence = serializers.JSONField(required=False)
     created_at = serializers.DateTimeField()
     updated_at = serializers.DateTimeField()

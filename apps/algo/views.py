@@ -2184,6 +2184,75 @@ def _ticket_health_summary(score, risk_level, remove_count, replace_count, cauti
     return "This ticket looks healthy from the current Match Checker analysis."
 
 
+def _public_risk_label(value):
+    return {
+        "low": "Low",
+        "medium": "Medium",
+        "high": "High",
+        "unknown": "Unknown",
+    }.get(str(value or "").lower(), "Unknown")
+
+
+def _public_action_label(verdict):
+    return {
+        "keep": "Play",
+        "caution": "Consider",
+        "replace": "Replace",
+        "remove": "Avoid",
+        "expired": "Expired",
+        "unmatched": "Needs review",
+        "unmatched_market": "Needs review",
+        "pending_analysis": "Analysing",
+    }.get(str(verdict or "").lower(), "Review")
+
+
+def _public_verdict_label(verdict):
+    return {
+        "keep": "PLAY",
+        "caution": "CONSIDER",
+        "replace": "REPLACE",
+        "remove": "DON'T PLAY",
+        "expired": "EXPIRED",
+        "unmatched": "NEEDS REVIEW",
+        "unmatched_market": "NEEDS REVIEW",
+        "pending_analysis": "ANALYSING",
+    }.get(str(verdict or "").lower(), "REVIEW")
+
+
+def _public_market_pick(market, *, fallback_market="", fallback_odds=None):
+    if not market and not fallback_market:
+        return None
+    return {
+        "market": (market or {}).get("market") or fallback_market,
+        "confidence": (market or {}).get("final_confidence") or (market or {}).get("confidence"),
+        "odds": _float_or_none((market or {}).get("odds")) if market else fallback_odds,
+    }
+
+
+def _public_why_from_card(card):
+    why = []
+    evidence = card.get("evidence") or {}
+    alternative = card.get("alternative") or {}
+    alt_evidence = alternative.get("evidence") or {}
+    historical_accuracy = alt_evidence.get("historical_accuracy") or evidence.get("historical_accuracy")
+    sample_size = alt_evidence.get("sample_size") or evidence.get("sample_size")
+    roi = alt_evidence.get("similar_market_roi") if alt_evidence.get("similar_market_roi") is not None else evidence.get("similar_market_roi")
+    league_trust = alt_evidence.get("league_trust") or evidence.get("league_trust")
+    if historical_accuracy is not None:
+        why.append(f"Similar bets won {round(float(historical_accuracy), 1)}%.")
+    if sample_size:
+        why.append(f"Based on {int(sample_size)} historical samples.")
+    if roi is not None:
+        why.append(f"Similar market ROI is {round(float(roi), 1)}%.")
+    if league_trust:
+        why.append(f"League-market trust is {league_trust}.")
+    if alternative.get("reason"):
+        why.append(alternative["reason"])
+    if not why and card.get("message"):
+        why.append(card["message"])
+    return why[:4]
+
+
 def _selection_strength_score(item):
     if item.get("status") != "analysed":
         return None
@@ -2263,6 +2332,38 @@ def _selection_card(item):
         "message": item.get("message", ""),
         "why_risky": (selected_market.get("advisory_warnings") or selected_market.get("risk_flags") or [])[:4],
         "warnings": (selected_market.get("advisory_warnings") or selected_market.get("risk_flags") or [])[:6],
+    }
+
+
+def _public_selection_card(item):
+    card = _selection_card(item)
+    selected_market = item.get("selected_market") or {}
+    replacement_market = item.get("replacement_market") or {}
+    verdict = item.get("verdict")
+    ai_pick = None
+    if verdict == "replace" and replacement_market:
+        ai_pick = _public_market_pick(replacement_market)
+    elif verdict in {"keep", "caution"}:
+        ai_pick = _public_market_pick(selected_market, fallback_market=item.get("submitted_market"), fallback_odds=_selection_original_odds(item))
+    return {
+        "match": card.get("fixture") or card.get("match"),
+        "match_id": card.get("match_id", ""),
+        "your_pick": {
+            "market": item.get("submitted_market"),
+            "confidence": card.get("confidence"),
+            "odds": card.get("odds"),
+        },
+        "verdict": _public_verdict_label(verdict),
+        "action": _public_action_label(verdict),
+        "confidence": card.get("advisory_score") or card.get("confidence"),
+        "risk": _public_risk_label(card.get("risk_level")),
+        "ai_pick": ai_pick,
+        "why": _public_why_from_card(card),
+        "technical_ref": {
+            "status": item.get("status"),
+            "match_resolution_score": card.get("match_resolution_score"),
+            "has_technical_details": True,
+        },
     }
 
 
@@ -2361,12 +2462,44 @@ def _slip_intelligence(results):
         "outcome_tracking": "pending_settlement",
     }
 
+    public_selections = [_public_selection_card(item) for item in enriched]
+    recommended_changes = [
+        selection
+        for selection in public_selections
+        if selection.get("action") in {"Replace", "Avoid"}
+    ]
+    money_saved = {
+        "potential_losing_legs_removed": len(remove_items) + len(replace_items),
+        "risk_reduction": improvement_text,
+        "message": (
+            f"Replacing or removing {len(remove_items) + len(replace_items)} risky leg(s) improves this ticket."
+            if remove_items or replace_items
+            else "No major risky legs were found in the analysed selections."
+        ),
+    }
+    public_review = {
+        "summary": ticket_health["summary"],
+        "ticket_health": ticket_health,
+        "original_ticket": original_ticket,
+        "optimized_ticket": optimized_ticket,
+        "improvement": {
+            "from": original_success,
+            "to": optimized_success,
+            "difference": improvement,
+            "label": improvement_text,
+        },
+        "money_saved": money_saved,
+        "recommended_changes": recommended_changes,
+        "selections": public_selections,
+    }
+
     return enriched, {
         "overall_score": overall_score,
         "health_score": overall_score,
         "risk_level": risk_level,
         "verdict": verdict,
         "summary": ticket_health["summary"],
+        "public": public_review,
         "ticket_health": ticket_health,
         "original_ticket": original_ticket,
         "optimized_ticket": optimized_ticket,
@@ -2406,6 +2539,7 @@ def _manual_review_summary(results):
         "improvement": intelligence.get("improvement", ""),
         "improvement_percent": intelligence.get("improvement_percent"),
         "learning_tracking": intelligence.get("learning_tracking", {}),
+        "public": intelligence.get("public", {}),
         "intelligence": intelligence,
     }
 
@@ -2538,14 +2672,26 @@ def _slip_selection_payload(selection):
     return payload
 
 
-def _slip_review_payload(review, *, include_selections=True):
+def _slip_review_payload(review, *, include_selections=True, public_only=False):
     summary = review.summary or {}
+    public_payload = summary.get("public") or (summary.get("intelligence") or {}).get("public", {})
+    if public_only:
+        return {
+            "id": review.id,
+            "source": review.source,
+            "status": review.status,
+            "title": review.title,
+            "public": public_payload,
+            "created_at": review.created_at,
+            "updated_at": review.updated_at,
+        }
     payload = {
         "id": review.id,
         "source": review.source,
         "status": review.status,
         "title": review.title,
         "summary": summary,
+        "public": public_payload,
         "intelligence": summary.get("intelligence", {}),
         "created_at": review.created_at,
         "updated_at": review.updated_at,
@@ -2969,6 +3115,7 @@ class ManualSlipReviewView(APIView):
                 "id": review.id,
                 "source": review.source,
                 "status": review.status,
+                "public": summary.get("public", {}),
                 **summary,
                 "selections": safe_results,
             }
@@ -3116,7 +3263,8 @@ class SlipReviewDetailView(APIView):
             id=review_id,
             user=request.user,
         )
-        return Response(_slip_review_payload(review, include_selections=True))
+        public_only = str(request.query_params.get("view", "")).lower() == "public"
+        return Response(_slip_review_payload(review, include_selections=True, public_only=public_only))
 
 
 class GameDetailView(APIView):
