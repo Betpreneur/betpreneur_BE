@@ -2178,10 +2178,25 @@ def _ticket_health_summary(score, risk_level, remove_count, replace_count, cauti
     if unverified_count and not weak_count:
         return f"{unverified_count} leg(s) still need verification before this ticket is reliable."
     if risk_level == "high":
-        return f"This ticket is risky. {weak_count or caution_count} leg(s) are likely to spoil it."
+        if weak_count:
+            return f"This ticket is risky. {weak_count} pick(s) need attention."
+        return f"This ticket is risky. {caution_count} pick(s) need caution."
     if risk_level == "medium":
         return f"This ticket is playable, but {replace_count + caution_count} leg(s) need attention."
     return "This ticket looks healthy from the current Match Checker analysis."
+
+
+def _ticket_health_label(score):
+    score = _float_or_none(score) or 0
+    if score >= 80:
+        return "Excellent"
+    if score >= 65:
+        return "Good"
+    if score >= 45:
+        return "Risky"
+    if score >= 20:
+        return "Poor"
+    return "Very Poor"
 
 
 def _public_risk_label(value):
@@ -2206,31 +2221,63 @@ def _public_action_label(verdict):
     }.get(str(verdict or "").lower(), "Review")
 
 
-def _public_verdict_label(verdict):
+def _public_verdict_message(verdict, submitted_market=None):
+    market = submitted_market or "This pick"
     return {
-        "keep": "PLAY",
-        "caution": "CONSIDER",
-        "replace": "REPLACE",
-        "remove": "DON'T PLAY",
-        "expired": "EXPIRED",
-        "unmatched": "NEEDS REVIEW",
-        "unmatched_market": "NEEDS REVIEW",
-        "pending_analysis": "ANALYSING",
-    }.get(str(verdict or "").lower(), "REVIEW")
+        "keep": f"{market} is playable from the current analysis.",
+        "caution": f"{market} is playable, but it carries extra risk.",
+        "replace": f"{market} is too risky compared with the suggested alternative.",
+        "remove": f"{market} is too risky to trust from the current analysis.",
+        "expired": "This event has already started or ended.",
+        "unmatched": "We could not confidently match this fixture.",
+        "unmatched_market": "We matched the fixture, but not this market.",
+        "pending_analysis": "This fixture is still being analysed.",
+    }.get(str(verdict or "").lower(), "This pick needs review.")
+
+
+def _public_verdict_object(verdict, submitted_market=None):
+    code = str(verdict or "review").lower()
+    return {
+        "code": code,
+        "label": _public_action_label(code),
+        "message": _public_verdict_message(code, submitted_market=submitted_market),
+    }
 
 
 def _public_market_pick(market, *, fallback_market="", fallback_odds=None):
     if not market and not fallback_market:
         return None
+    odds_source = (market or {}).get("odds_source", "")
+    odds_status = "estimated" if str(odds_source).lower() == "estimated" else "verified" if market else ""
+    score = _float_or_none((market or {}).get("advisory_score"))
     return {
         "market": (market or {}).get("market") or fallback_market,
         "confidence": (market or {}).get("final_confidence") or (market or {}).get("confidence"),
         "odds": _float_or_none((market or {}).get("odds")) if market else fallback_odds,
+        "score": score,
+        "status": _match_checker_status(score or 0) if score is not None else "",
+        "odds_status": odds_status,
     }
+
+
+def _public_recommendation_strength(pick):
+    if not pick:
+        return "no_recommendation"
+    score = _float_or_none(pick.get("score")) or 0
+    if score >= 78:
+        return "strong_recommendation"
+    if score >= 66:
+        return "playable"
+    if score >= 55:
+        return "safer_alternative"
+    if score > 0:
+        return "caution"
+    return "no_recommendation"
 
 
 def _public_why_from_card(card):
     why = []
+    codes = []
     evidence = card.get("evidence") or {}
     alternative = card.get("alternative") or {}
     alt_evidence = alternative.get("evidence") or {}
@@ -2239,18 +2286,27 @@ def _public_why_from_card(card):
     roi = alt_evidence.get("similar_market_roi") if alt_evidence.get("similar_market_roi") is not None else evidence.get("similar_market_roi")
     league_trust = alt_evidence.get("league_trust") or evidence.get("league_trust")
     if historical_accuracy is not None:
-        why.append(f"Similar bets won {round(float(historical_accuracy), 1)}%.")
+        sample_text = f" across {int(sample_size)} tracked results" if sample_size else ""
+        why.append(f"Similar selections won {round(float(historical_accuracy), 1)}%{sample_text}.")
+        codes.append("historical_accuracy")
     if sample_size:
-        why.append(f"Based on {int(sample_size)} historical samples.")
+        codes.append("historical_sample")
     if roi is not None:
-        why.append(f"Similar market ROI is {round(float(roi), 1)}%.")
-    if league_trust:
-        why.append(f"League-market trust is {league_trust}.")
+        why.append(f"Similar markets have returned {round(float(roi), 1)}% ROI.")
+        codes.append("market_roi")
+    if league_trust == "trusted":
+        why.append("This market has reliable history in similar league conditions.")
+        codes.append("trusted_league_market")
+    elif league_trust in {"probation", "restricted"}:
+        why.append("There is limited competition-specific history, so some caution remains.")
+        codes.append("limited_league_sample")
     if alternative.get("reason"):
         why.append(alternative["reason"])
+        codes.append("better_alternative")
     if not why and card.get("message"):
         why.append(card["message"])
-    return why[:4]
+        codes.append("model_message")
+    return why[:4], list(dict.fromkeys(codes))[:6]
 
 
 def _selection_strength_score(item):
@@ -2345,20 +2401,26 @@ def _public_selection_card(item):
         ai_pick = _public_market_pick(replacement_market)
     elif verdict in {"keep", "caution"}:
         ai_pick = _public_market_pick(selected_market, fallback_market=item.get("submitted_market"), fallback_odds=_selection_original_odds(item))
+    if ai_pick:
+        ai_pick["recommendation_strength"] = _public_recommendation_strength(ai_pick)
+    why, reason_codes = _public_why_from_card(card)
     return {
+        "id": card.get("match_id") or item.get("match"),
         "match": card.get("fixture") or card.get("match"),
         "match_id": card.get("match_id", ""),
         "your_pick": {
             "market": item.get("submitted_market"),
             "confidence": card.get("confidence"),
             "odds": card.get("odds"),
+            "score": card.get("advisory_score"),
+            "status": card.get("advisory_status") or _match_checker_status(card.get("advisory_score") or 0),
         },
-        "verdict": _public_verdict_label(verdict),
-        "action": _public_action_label(verdict),
-        "confidence": card.get("advisory_score") or card.get("confidence"),
+        "verdict": _public_verdict_object(verdict, submitted_market=item.get("submitted_market")),
+        "risk_level": str(card.get("risk_level") or "unknown").lower(),
         "risk": _public_risk_label(card.get("risk_level")),
         "ai_pick": ai_pick,
-        "why": _public_why_from_card(card),
+        "why": why,
+        "reason_codes": reason_codes,
         "technical_ref": {
             "status": item.get("status"),
             "match_resolution_score": card.get("match_resolution_score"),
@@ -2430,7 +2492,9 @@ def _slip_intelligence(results):
         verdict = "Some selections still need verification before this slip is reliable."
 
     ticket_health = {
-        "health_score": overall_score,
+        "score": overall_score,
+        "max_score": 100,
+        "label": _ticket_health_label(overall_score),
         "risk_level": risk_level,
         "summary": _ticket_health_summary(
             overall_score,
@@ -2451,8 +2515,8 @@ def _slip_intelligence(results):
         "estimated_success": optimized_success,
         "combined_odds": suggested_combined,
     }
-    improvement_text = f"+{improvement}%" if improvement is not None and improvement > 0 else (
-        f"{improvement}%" if improvement is not None else ""
+    improvement_text = f"+{improvement} percentage points" if improvement is not None and improvement > 0 else (
+        f"{improvement} percentage points" if improvement is not None else ""
     )
     learning_tracking = {
         "status": "captured",
@@ -2463,34 +2527,100 @@ def _slip_intelligence(results):
     }
 
     public_selections = [_public_selection_card(item) for item in enriched]
-    recommended_changes = [
-        selection
+    recommended_change_ids = [
+        selection.get("id")
         for selection in public_selections
-        if selection.get("action") in {"Replace", "Avoid"}
+        if (selection.get("verdict") or {}).get("code") in {"replace", "remove"}
     ]
-    money_saved = {
-        "potential_losing_legs_removed": len(remove_items) + len(replace_items),
-        "risk_reduction": improvement_text,
+    ticket_impact = {
         "message": (
-            f"Replacing or removing {len(remove_items) + len(replace_items)} risky leg(s) improves this ticket."
+            f"Replacing or removing {len(replace_items) + len(remove_items)} risky pick(s) improves the estimated ticket success rate."
             if remove_items or replace_items
-            else "No major risky legs were found in the analysed selections."
+            else "No major risky picks were found in the analysed selections."
         ),
+        "picks_changed": len(replace_items) + len(remove_items),
+        "estimated_success_increase_points": improvement,
+        "original_odds": original_combined,
+        "optimized_odds": suggested_combined,
     }
+    verdict_code = "review"
+    verdict_label = "Review ticket"
+    verdict_message = verdict
+    if remove_items and replace_items:
+        verdict_code = "replace_or_remove"
+        verdict_label = f"Change {len(remove_items) + len(replace_items)} picks"
+        verdict_message = f"{len(remove_items) + len(replace_items)} submitted pick(s) need attention."
+    elif remove_items:
+        verdict_code = "avoid_risky_picks"
+        verdict_label = f"Avoid {len(remove_items)} picks"
+        verdict_message = f"{len(remove_items)} submitted pick(s) are too risky."
+    elif replace_items:
+        verdict_code = "replace_picks" if len(replace_items) != len(analysed) else "replace_all"
+        verdict_label = f"Replace {len(replace_items)} picks" if len(replace_items) != len(analysed) else f"Replace all {len(replace_items)} picks"
+        verdict_message = (
+            "Every submitted pick has a safer or stronger alternative."
+            if len(replace_items) == len(analysed)
+            else f"{len(replace_items)} submitted pick(s) have safer alternatives."
+        )
+    elif caution_items:
+        verdict_code = "play_with_caution"
+        verdict_label = "Play with caution"
+        verdict_message = f"{len(caution_items)} pick(s) need caution."
+    elif keep_items and len(keep_items) == len(analysed) and not unverified_items:
+        verdict_code = "playable"
+        verdict_label = "Playable"
+        verdict_message = "This ticket looks clean from the current analysis."
+
     public_review = {
-        "summary": ticket_health["summary"],
+        "ticket": {
+            "title": "Slip Review",
+            "total_legs": len(enriched),
+            "analysed_legs": len(analysed),
+            "unmatched_legs": len(unverified_items),
+            "expired_legs": len(expired_items),
+        },
         "ticket_health": ticket_health,
-        "original_ticket": original_ticket,
-        "optimized_ticket": optimized_ticket,
+        "verdict": {
+            "code": verdict_code,
+            "label": verdict_label,
+            "message": verdict_message,
+        },
+        "comparison": {
+            "original": {
+                "legs": original_ticket["legs"],
+                "combined_odds": original_ticket["combined_odds"],
+                "model_estimated_success_percent": original_ticket["estimated_success"],
+            },
+            "optimized": {
+                "legs": optimized_ticket["legs"],
+                "combined_odds": optimized_ticket["combined_odds"],
+                "model_estimated_success_percent": optimized_ticket["estimated_success"],
+            },
+            "success_increase_percentage_points": improvement,
+            "picks_changed": len(replace_items) + len(remove_items),
+        },
         "improvement": {
-            "from": original_success,
-            "to": optimized_success,
-            "difference": improvement,
+            "original_success_percent": original_success,
+            "optimized_success_percent": optimized_success,
+            "increase_percentage_points": improvement,
             "label": improvement_text,
         },
-        "money_saved": money_saved,
-        "recommended_changes": recommended_changes,
+        "ticket_impact": ticket_impact,
+        "recommended_change_ids": recommended_change_ids,
+        "counts": {
+            "keep": len(keep_items),
+            "caution": len(caution_items),
+            "replace": len(replace_items),
+            "remove": len(remove_items),
+            "unmatched": len(unverified_items),
+            "expired": len(expired_items),
+        },
         "selections": public_selections,
+        "tracking": {
+            "enabled": True,
+            "status": "pending_settlement",
+            "tracked_selections": len(analysed),
+        },
     }
 
     return enriched, {
