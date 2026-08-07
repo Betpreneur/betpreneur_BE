@@ -273,34 +273,6 @@ class FixtureSearchService:
             enriched.append(item)
         return enriched
 
-    def _hydrate_statpal_scoring_context(self, fixture):
-        provider_match_id = str(fixture.get("statpal_provider_match_id") or "").strip()
-        provider_competition_id = str(fixture.get("statpal_provider_competition_id") or fixture.get("code") or "").strip()
-        match_id = str(fixture.get("match_id") or fixture.get("aps_id") or "").strip()
-        if not provider_match_id and not match_id:
-            return fixture
-
-        from .statpal_snapshots import statpal_snapshot_service
-
-        try:
-            refresh = statpal_snapshot_service.refresh_fixture_snapshots(
-                match_id=match_id,
-                provider_match_id=provider_match_id,
-                provider_competition_id=provider_competition_id,
-            )
-            context = statpal_snapshot_service.fixture_context(
-                match_id=match_id,
-                provider_match_id=provider_match_id,
-            )
-        except Exception as exc:
-            refresh = {"errors": [{"provider": "statpal", "error": str(exc)}]}
-            context = {"available": False, "snapshots": {}}
-
-        enriched = dict(fixture)
-        enriched["statpal_refresh"] = refresh
-        enriched["statpal_context"] = context
-        return enriched
-
     def _upsert_fixtures(self, fixtures, target_date):
         count = 0
         for item in fixtures:
@@ -1451,6 +1423,34 @@ class AlgoRunnerService:
         if payload.get("aps_id") and not payload.get("match_id"):
             payload["match_id"] = payload["aps_id"]
         return json_safe(payload)
+
+    def _hydrate_statpal_scoring_context(self, fixture):
+        provider_match_id = str(fixture.get("statpal_provider_match_id") or "").strip()
+        provider_competition_id = str(fixture.get("statpal_provider_competition_id") or fixture.get("code") or "").strip()
+        match_id = str(fixture.get("match_id") or fixture.get("aps_id") or "").strip()
+        if not provider_match_id and not match_id:
+            return fixture
+
+        from .statpal_snapshots import statpal_snapshot_service
+
+        try:
+            refresh = statpal_snapshot_service.refresh_fixture_snapshots(
+                match_id=match_id,
+                provider_match_id=provider_match_id,
+                provider_competition_id=provider_competition_id,
+            )
+            context = statpal_snapshot_service.fixture_context(
+                match_id=match_id,
+                provider_match_id=provider_match_id,
+            )
+        except Exception as exc:
+            refresh = {"errors": [{"provider": "statpal", "error": str(exc)}]}
+            context = {"available": False, "snapshots": {}}
+
+        enriched = dict(fixture)
+        enriched["statpal_refresh"] = refresh
+        enriched["statpal_context"] = context
+        return enriched
 
     def _persist_selected_picks(self, algo_run: AlgoRun, result):
         selected_picks = result.get("selected_picks") or []
