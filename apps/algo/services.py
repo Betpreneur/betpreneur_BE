@@ -1396,6 +1396,62 @@ class AlgoRunnerService:
     def _text(self, value):
         return "" if value is None else str(value)
 
+    def _cached_fixture_runner_payload(self, cached: FixtureCache):
+        payload = dict(cached.api_payload or {})
+        raw_fixture = payload.get("fixture") if isinstance(payload.get("fixture"), dict) else {}
+        raw_teams = payload.get("teams") if isinstance(payload.get("teams"), dict) else {}
+        raw_league = payload.get("league") if isinstance(payload.get("league"), dict) else {}
+        raw_home = raw_teams.get("home") if isinstance(raw_teams.get("home"), dict) else {}
+        raw_away = raw_teams.get("away") if isinstance(raw_teams.get("away"), dict) else {}
+
+        if raw_fixture and raw_home and raw_away:
+            payload = {
+                "fixture": f"{raw_home.get('name') or cached.home_team} vs {raw_away.get('name') or cached.away_team}",
+                "hname": raw_home.get("name") or cached.home_team,
+                "aname": raw_away.get("name") or cached.away_team,
+                "home_logo": raw_home.get("logo") or cached.home_logo,
+                "away_logo": raw_away.get("logo") or cached.away_logo,
+                "hid": raw_home.get("id"),
+                "aid": raw_away.get("id"),
+                "league": raw_league.get("name") or cached.league,
+                "league_logo": raw_league.get("logo") or cached.league_logo,
+                "country": raw_league.get("country") or cached.country,
+                "country_flag": raw_league.get("flag") or cached.country_flag,
+                "round": raw_league.get("round") or cached.round,
+                "league_type": raw_league.get("type") or cached.league_type,
+                "code": str(raw_league.get("id") or ""),
+                "kickoff": cached.kickoff,
+                "kickoff_utc": raw_fixture.get("date") or (cached.kickoff_utc.isoformat() if cached.kickoff_utc else ""),
+                "match_id": raw_fixture.get("id") or cached.match_id,
+                "source": "aps_provider_lookup",
+                "aps_id": raw_fixture.get("id") or cached.match_id,
+                "date": cached.match_date,
+                "season": raw_league.get("season"),
+            }
+
+        payload.setdefault("fixture", cached.fixture)
+        payload.setdefault("hname", cached.home_team)
+        payload.setdefault("aname", cached.away_team)
+        payload.setdefault("home_team", cached.home_team)
+        payload.setdefault("away_team", cached.away_team)
+        payload.setdefault("home_logo", cached.home_logo)
+        payload.setdefault("away_logo", cached.away_logo)
+        payload.setdefault("league", cached.league)
+        payload.setdefault("league_logo", cached.league_logo)
+        payload.setdefault("country", cached.country)
+        payload.setdefault("country_flag", cached.country_flag)
+        payload.setdefault("round", cached.round)
+        payload.setdefault("league_type", cached.league_type)
+        payload.setdefault("kickoff", cached.kickoff)
+        payload.setdefault("kickoff_utc", cached.kickoff_utc.isoformat() if cached.kickoff_utc else "")
+        payload.setdefault("match_id", cached.match_id)
+        payload.setdefault("date", cached.match_date)
+        if str(cached.match_id).isdigit():
+            payload.setdefault("aps_id", cached.match_id)
+        if payload.get("aps_id") and not payload.get("match_id"):
+            payload["match_id"] = payload["aps_id"]
+        return json_safe(payload)
+
     def _persist_selected_picks(self, algo_run: AlgoRun, result):
         selected_picks = result.get("selected_picks") or []
         if not selected_picks:
@@ -2241,6 +2297,29 @@ class AlgoRunnerService:
                 "storage": self._run_storage_payload(),
             },
         )
+        source_payload = self._cached_fixture_runner_payload(cached)
+        if not source_payload.get("aps_id"):
+            message = "api_football_fixture_id_required_for_on_demand_scoring"
+            algo_run.status = AlgoRun.Status.NO_DATA
+            algo_run.error = message
+            algo_run.finished_at = timezone.now()
+            run_result = dict(algo_run.result or {})
+            run_result.update({
+                "status": algo_run.status,
+                "total_scored": 0,
+                "market_count": 0,
+                "on_demand_match_id": match_id,
+                "error": message,
+            })
+            algo_run.result = run_result
+            algo_run.save(update_fields=["status", "error", "finished_at", "result", "updated_at"])
+            return {
+                "status": "failed",
+                "match_id": match_id,
+                "run_id": algo_run.id,
+                "target_date": target_date.isoformat(),
+                "error": message,
+            }
         fixture = AlgoFixture.objects.create(
             run=algo_run,
             match_date=target_date,
@@ -2257,7 +2336,7 @@ class AlgoRunnerService:
             league_type=cached.league_type,
             kickoff=cached.kickoff,
             match_id=match_id,
-            source_payload=json_safe(cached.api_payload or {}),
+            source_payload=source_payload,
             status=AlgoFixture.Status.PENDING,
         )
         result = self.score_fixture_for_run(fixture.id)
