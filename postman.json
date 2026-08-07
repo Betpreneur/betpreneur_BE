@@ -1,0 +1,1645 @@
+{
+  "info": {
+    "_postman_id": "1d7d1d4d-betpreneur-api",
+    "name": "Betpreneur Backend API",
+    "description": "Complete Postman collection for Betpreneur backend endpoints. Set base_url, login, then use the saved access_token variable for authenticated requests.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "auth": {
+    "type": "bearer",
+    "bearer": [
+      {
+        "key": "token",
+        "value": "{{access_token}}",
+        "type": "string"
+      }
+    ]
+  },
+  "event": [
+    {
+      "listen": "prerequest",
+      "script": {
+        "type": "text/javascript",
+        "exec": []
+      }
+    },
+    {
+      "listen": "test",
+      "script": {
+        "type": "text/javascript",
+        "exec": []
+      }
+    }
+  ],
+  "variable": [
+    {
+      "key": "base_url",
+      "value": "https://api.betpreneur.ng"
+    },
+    {
+      "key": "access_token",
+      "value": ""
+    },
+    {
+      "key": "refresh_token",
+      "value": ""
+    },
+    {
+      "key": "username",
+      "value": "testuser"
+    },
+    {
+      "key": "email",
+      "value": "test@example.com"
+    },
+    {
+      "key": "password",
+      "value": "ChangeMe123!"
+    },
+    {
+      "key": "date",
+      "value": "2026-07-10"
+    },
+    {
+      "key": "days",
+      "value": "90"
+    },
+    {
+      "key": "match_id",
+      "value": "1489374"
+    },
+    {
+      "key": "pick_id",
+      "value": "1"
+    },
+    {
+      "key": "run_id",
+      "value": "1"
+    },
+    {
+      "key": "task_id",
+      "value": ""
+    },
+    {
+      "key": "review_id",
+      "value": "1"
+    },
+    {
+      "key": "market",
+      "value": "Over 1.5"
+    },
+    {
+      "key": "fixture_query",
+      "value": "France vs Morocco"
+    },
+    {
+      "key": "sportybet_code",
+      "value": "V41T5X"
+    },
+    {
+      "key": "betano_code",
+      "value": "65R4NAGB"
+    }
+  ],
+  "item": [
+    {
+      "name": "Health and Docs",
+      "item": [
+        {
+          "name": "Health Check",
+          "request": {
+            "auth": {
+              "type": "noauth"
+            },
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/health/",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "health",
+                ""
+              ]
+            },
+            "description": "Public health endpoint."
+          }
+        },
+        {
+          "name": "OpenAPI Schema",
+          "request": {
+            "auth": {
+              "type": "noauth"
+            },
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/schema/",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "schema",
+                ""
+              ]
+            }
+          }
+        },
+        {
+          "name": "Swagger UI",
+          "request": {
+            "auth": {
+              "type": "noauth"
+            },
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/docs/",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "docs",
+                ""
+              ]
+            }
+          }
+        },
+        {
+          "name": "Redoc",
+          "request": {
+            "auth": {
+              "type": "noauth"
+            },
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/redoc/",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "redoc",
+                ""
+              ]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Authentication",
+      "item": [
+        {
+          "name": "Signup",
+          "request": {
+            "auth": {
+              "type": "noauth"
+            },
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"username\": \"{{username}}\",\n  \"email\": \"{{email}}\",\n  \"password\": \"{{password}}\"\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/api/auth/signup/",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "auth",
+                "signup",
+                ""
+              ]
+            }
+          }
+        },
+        {
+          "name": "Verify Email",
+          "request": {
+            "auth": {
+              "type": "noauth"
+            },
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"{{email}}\",\n  \"code\": \"123456\"\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/api/auth/verify-email/",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "auth",
+                "verify-email",
+                ""
+              ]
+            }
+          }
+        },
+        {
+          "name": "Resend Verification",
+          "request": {
+            "auth": {
+              "type": "noauth"
+            },
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"{{email}}\"\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/api/auth/resend-verification/",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "auth",
+                "resend-verification",
+                ""
+              ]
+            }
+          }
+        },
+        {
+          "name": "Login",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (pm.response.code === 200) {",
+                  "  const json = pm.response.json();",
+                  "  if (json.access) pm.collectionVariables.set('access_token', json.access);",
+                  "  if (json.refresh) pm.collectionVariables.set('refresh_token', json.refresh);",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "auth": {
+              "type": "noauth"
+            },
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"username\": \"{{username}}\",\n  \"password\": \"{{password}}\"\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/api/auth/login/",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "auth",
+                "login",
+                ""
+              ]
+            },
+            "description": "Saves access_token and refresh_token collection variables on success."
+          }
+        },
+        {
+          "name": "Refresh Token",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (pm.response.code === 200) {",
+                  "  const json = pm.response.json();",
+                  "  if (json.access) pm.collectionVariables.set('access_token', json.access);",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "auth": {
+              "type": "noauth"
+            },
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"refresh\": \"{{refresh_token}}\"\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/api/auth/token/refresh/",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "auth",
+                "token",
+                "refresh",
+                ""
+              ]
+            }
+          }
+        },
+        {
+          "name": "Me",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/auth/me/",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "auth",
+                "me",
+                ""
+              ]
+            }
+          }
+        },
+        {
+          "name": "Update Me",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"whatsapp_country_code\": \"+234\",\n  \"whatsapp_number\": \"8012345678\"\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/api/auth/me/",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "auth",
+                "me",
+                ""
+              ]
+            }
+          }
+        },
+        {
+          "name": "Forgot Password",
+          "request": {
+            "auth": {
+              "type": "noauth"
+            },
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"{{email}}\"\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/api/auth/forgot-password/",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "auth",
+                "forgot-password",
+                ""
+              ]
+            }
+          }
+        },
+        {
+          "name": "Reset Password",
+          "request": {
+            "auth": {
+              "type": "noauth"
+            },
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"user_id\": \"00000000-0000-0000-0000-000000000000\",\n  \"token\": \"123456\",\n  \"new_password\": \"{{password}}\",\n  \"confirm_password\": \"{{password}}\"\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/api/auth/reset-password/",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "auth",
+                "reset-password",
+                ""
+              ]
+            }
+          }
+        },
+        {
+          "name": "Change Password",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"old_password\": \"{{password}}\",\n  \"new_password\": \"{{password}}\",\n  \"confirm_password\": \"{{password}}\"\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/api/auth/change-password/",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "auth",
+                "change-password",
+                ""
+              ]
+            }
+          }
+        },
+        {
+          "name": "Logout",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"refresh\": \"{{refresh_token}}\"\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/api/auth/logout/",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "auth",
+                "logout",
+                ""
+              ]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Algo - Public",
+      "item": [
+        {
+          "name": "Public Summary",
+          "request": {
+            "auth": {
+              "type": "noauth"
+            },
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/algo/public/summary/",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "algo",
+                "public",
+                "summary",
+                ""
+              ]
+            }
+          }
+        },
+        {
+          "name": "Public Record",
+          "request": {
+            "auth": {
+              "type": "noauth"
+            },
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/algo/public/record/?days={{days}}",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "algo",
+                "public",
+                "record",
+                ""
+              ],
+              "query": [
+                {
+                  "key": "days",
+                  "value": "{{days}}"
+                }
+              ]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Algo - Picks and Games",
+      "item": [
+        {
+          "name": "Daily Picks",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/algo/picks/?date={{date}}",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "algo",
+                "picks",
+                ""
+              ],
+              "query": [
+                {
+                  "key": "date",
+                  "value": "{{date}}"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Download Daily Picks",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/algo/picks/download/?date={{date}}",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "algo",
+                "picks",
+                "download",
+                ""
+              ],
+              "query": [
+                {
+                  "key": "date",
+                  "value": "{{date}}"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Pick Detail",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/algo/picks/{{pick_id}}/?date={{date}}",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "algo",
+                "picks",
+                "{{pick_id}}",
+                ""
+              ],
+              "query": [
+                {
+                  "key": "date",
+                  "value": "{{date}}"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Top Picks",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/algo/top-picks/?date={{date}}",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "algo",
+                "top-picks",
+                ""
+              ],
+              "query": [
+                {
+                  "key": "date",
+                  "value": "{{date}}"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Top Pick Legacy",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/algo/top-pick/?date={{date}}",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "algo",
+                "top-pick",
+                ""
+              ],
+              "query": [
+                {
+                  "key": "date",
+                  "value": "{{date}}"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "All Games",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/algo/games/?date={{date}}",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "algo",
+                "games",
+                ""
+              ],
+              "query": [
+                {
+                  "key": "date",
+                  "value": "{{date}}"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Game Detail",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/algo/games/{{match_id}}/?date={{date}}",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "algo",
+                "games",
+                "{{match_id}}",
+                ""
+              ],
+              "query": [
+                {
+                  "key": "date",
+                  "value": "{{date}}"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Fixture Search",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/algo/fixtures/search/?q={{fixture_query}}&days=3&limit=10&refresh=false",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "algo",
+                "fixtures",
+                "search",
+                ""
+              ],
+              "query": [
+                {
+                  "key": "q",
+                  "value": "{{fixture_query}}"
+                },
+                {
+                  "key": "days",
+                  "value": "3"
+                },
+                {
+                  "key": "limit",
+                  "value": "10"
+                },
+                {
+                  "key": "refresh",
+                  "value": "false"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Market Health",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/algo/markets/health/?days={{days}}&scope=all&market={{market}}",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "algo",
+                "markets",
+                "health",
+                ""
+              ],
+              "query": [
+                {
+                  "key": "days",
+                  "value": "{{days}}"
+                },
+                {
+                  "key": "scope",
+                  "value": "all"
+                },
+                {
+                  "key": "market",
+                  "value": "{{market}}"
+                }
+              ]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Algo - Backed Games",
+      "item": [
+        {
+          "name": "Back Game Default Market",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"date\": \"{{date}}\"\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/api/algo/games/{{match_id}}/backed/",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "algo",
+                "games",
+                "{{match_id}}",
+                "backed",
+                ""
+              ]
+            },
+            "description": "Backs the recommended market first, then best market if no recommended market exists."
+          }
+        },
+        {
+          "name": "Back Game Specific Market",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"market\": \"{{market}}\",\n  \"date\": \"{{date}}\"\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/api/algo/games/{{match_id}}/backed/",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "algo",
+                "games",
+                "{{match_id}}",
+                "backed",
+                ""
+              ]
+            }
+          }
+        },
+        {
+          "name": "Delete Backed Game",
+          "request": {
+            "method": "DELETE",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"market\": \"{{market}}\"\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/api/algo/games/{{match_id}}/backed/",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "algo",
+                "games",
+                "{{match_id}}",
+                "backed",
+                ""
+              ]
+            }
+          }
+        },
+        {
+          "name": "Back Multiple Default Markets",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"match_ids\": [\n    \"{{match_id}}\"\n  ],\n  \"date\": \"{{date}}\"\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/api/algo/games/backed/",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "algo",
+                "games",
+                "backed",
+                ""
+              ]
+            }
+          }
+        },
+        {
+          "name": "Back Multiple Specific Markets",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"games\": [\n    {\n      \"match_id\": \"{{match_id}}\",\n      \"market\": \"{{market}}\"\n    }\n  ],\n  \"date\": \"{{date}}\"\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/api/algo/games/backed/",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "algo",
+                "games",
+                "backed",
+                ""
+              ]
+            }
+          }
+        },
+        {
+          "name": "List Backed Games",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/algo/games/backed/?date={{date}}",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "algo",
+                "games",
+                "backed",
+                ""
+              ],
+              "query": [
+                {
+                  "key": "date",
+                  "value": "{{date}}"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Clear Backed Games",
+          "request": {
+            "method": "DELETE",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/algo/games/backed/?date={{date}}",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "algo",
+                "games",
+                "backed",
+                ""
+              ],
+              "query": [
+                {
+                  "key": "date",
+                  "value": "{{date}}"
+                }
+              ]
+            },
+            "description": "Deletes all backed markets for the current user on the optional date."
+          }
+        }
+      ]
+    },
+    {
+      "name": "Slip Reviews",
+      "item": [
+        {
+          "name": "Slip Review Options",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/algo/slip-reviews/options/",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "algo",
+                "slip-reviews",
+                "options",
+                ""
+              ]
+            }
+          }
+        },
+        {
+          "name": "Manual Slip Review",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (pm.response.code === 200) {",
+                  "  const json = pm.response.json();",
+                  "  if (json.id) pm.collectionVariables.set('review_id', String(json.id));",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"days\": 3,\n  \"selections\": [\n    {\n      \"match\": \"France vs Morocco\",\n      \"market\": \"Home Win\"\n    },\n    {\n      \"match\": \"Nomme Kalju FC vs Linfield FC\",\n      \"market\": \"Over 1.5\"\n    }\n  ]\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/api/algo/slip-reviews/manual/",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "algo",
+                "slip-reviews",
+                "manual",
+                ""
+              ]
+            }
+          }
+        },
+        {
+          "name": "Import SportyBet Slip By Code",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (pm.response.code === 202) {",
+                  "  const json = pm.response.json();",
+                  "  if (json.id) pm.collectionVariables.set('review_id', String(json.id));",
+                  "  if (json.summary && json.summary.task_id) pm.collectionVariables.set('task_id', json.summary.task_id);",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"code\": \"{{sportybet_code}}\",\n  \"days\": 3\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/api/algo/slip-reviews/sportybet/",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "algo",
+                "slip-reviews",
+                "sportybet",
+                ""
+              ]
+            },
+            "description": "Async endpoint. Poll Slip Review Detail until status is completed, partial, or failed."
+          }
+        },
+        {
+          "name": "Import SportyBet Slip By URL",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (pm.response.code === 202) {",
+                  "  const json = pm.response.json();",
+                  "  if (json.id) pm.collectionVariables.set('review_id', String(json.id));",
+                  "  if (json.summary && json.summary.task_id) pm.collectionVariables.set('task_id', json.summary.task_id);",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"url\": \"http://www.sportybet.com/ng/?shareCode={{sportybet_code}}\",\n  \"days\": 3\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/api/algo/slip-reviews/sportybet/",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "algo",
+                "slip-reviews",
+                "sportybet",
+                ""
+              ]
+            }
+          }
+        },
+        {
+          "name": "Import SportyBet Slip With Raw Payload",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (pm.response.code === 202) {",
+                  "  const json = pm.response.json();",
+                  "  if (json.id) pm.collectionVariables.set('review_id', String(json.id));",
+                  "  if (json.summary && json.summary.task_id) pm.collectionVariables.set('task_id', json.summary.task_id);",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"days\": 3,\n  \"payload\": {\n    \"bizCode\": 10000,\n    \"data\": {\n      \"shareCode\": \"{{sportybet_code}}\",\n      \"ticket\": {\n        \"selections\": [\n          {\n            \"eventId\": \"sr:match:72158306\",\n            \"marketId\": \"18\",\n            \"specifier\": \"total=1.5\",\n            \"outcomeId\": \"12\"\n          }\n        ],\n        \"outcomes\": [\n          {\n            \"eventId\": \"sr:match:72158306\",\n            \"homeTeamName\": \"Nomme Kalju FC\",\n            \"awayTeamName\": \"Linfield FC\",\n            \"sport\": {\n              \"name\": \"Football\",\n              \"category\": {\n                \"tournament\": {\n                  \"name\": \"UEFA Conference League\"\n                }\n              }\n            },\n            \"markets\": [\n              {\n                \"id\": \"18\",\n                \"specifier\": \"total=1.5\",\n                \"name\": \"Over/Under\",\n                \"outcomes\": [\n                  {\n                    \"id\": \"12\",\n                    \"desc\": \"Over 1.5\",\n                    \"odds\": \"1.40\"\n                  }\n                ]\n              }\n            ]\n          }\n        ]\n      }\n    }\n  }\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/api/algo/slip-reviews/sportybet/",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "algo",
+                "slip-reviews",
+                "sportybet",
+                ""
+              ]
+            }
+          }
+        },
+        {
+          "name": "Import Betano Slip By Code",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (pm.response.code === 202) {",
+                  "  const json = pm.response.json();",
+                  "  if (json.id) pm.collectionVariables.set('review_id', String(json.id));",
+                  "  if (json.summary && json.summary.task_id) pm.collectionVariables.set('task_id', json.summary.task_id);",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"code\": \"{{betano_code}}\",\n  \"days\": 3\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/api/algo/slip-reviews/betano/",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "algo",
+                "slip-reviews",
+                "betano",
+                ""
+              ]
+            },
+            "description": "Async endpoint. Requires Celery worker. Betano URL/code import uses backend browser automation."
+          }
+        },
+        {
+          "name": "Import Betano Slip By URL",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (pm.response.code === 202) {",
+                  "  const json = pm.response.json();",
+                  "  if (json.id) pm.collectionVariables.set('review_id', String(json.id));",
+                  "  if (json.summary && json.summary.task_id) pm.collectionVariables.set('task_id', json.summary.task_id);",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"url\": \"https://www.betano.ng/bookingcode/{{betano_code}}\",\n  \"days\": 3\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/api/algo/slip-reviews/betano/",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "algo",
+                "slip-reviews",
+                "betano",
+                ""
+              ]
+            }
+          }
+        },
+        {
+          "name": "Import Betano Slip With Raw Payload",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (pm.response.code === 202) {",
+                  "  const json = pm.response.json();",
+                  "  if (json.id) pm.collectionVariables.set('review_id', String(json.id));",
+                  "  if (json.summary && json.summary.task_id) pm.collectionVariables.set('task_id', json.summary.task_id);",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"days\": 3,\n  \"payload\": {\n    \"data\": {\n      \"legs\": [\n        {\n          \"sportId\": \"FOOT\",\n          \"eventName\": \"France - Morocco\",\n          \"eventId\": \"88540009\",\n          \"eventStartTime\": 1783627200000,\n          \"leagueId\": 201663,\n          \"description\": \"France\",\n          \"market\": \"Match Result\",\n          \"odds\": 1.67,\n          \"participants\": [\n            {\n              \"name\": \"France\"\n            },\n            {\n              \"name\": \"Morocco\"\n            }\n          ]\n        },\n        {\n          \"sportId\": \"FOOT\",\n          \"eventName\": \"JK Nomme Kalju - Linfield FC\",\n          \"eventId\": \"88628100\",\n          \"eventStartTime\": 1783612800000,\n          \"description\": \"Over 1.5\",\n          \"market\": \"Over/Under Total Goals\",\n          \"odds\": 1.40,\n          \"participants\": [\n            {\n              \"name\": \"JK Nomme Kalju\"\n            },\n            {\n              \"name\": \"Linfield FC\"\n            }\n          ]\n        }\n      ]\n    }\n  }\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/api/algo/slip-reviews/betano/",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "algo",
+                "slip-reviews",
+                "betano",
+                ""
+              ]
+            }
+          }
+        },
+        {
+          "name": "List Slip Reviews",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/algo/slip-reviews/?limit=20",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "algo",
+                "slip-reviews",
+                ""
+              ],
+              "query": [
+                {
+                  "key": "limit",
+                  "value": "20"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Slip Review Detail",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/algo/slip-reviews/{{review_id}}/",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "algo",
+                "slip-reviews",
+                "{{review_id}}",
+                ""
+              ]
+            },
+            "description": "Poll this after SportyBet/Betano import until status is completed, partial, or failed."
+          }
+        }
+      ]
+    },
+    {
+      "name": "Admin Algo and Tasks",
+      "item": [
+        {
+          "name": "List Algo Runs",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/algo/runs/",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "algo",
+                "runs",
+                ""
+              ]
+            },
+            "description": "Staff/admin token required."
+          }
+        },
+        {
+          "name": "Get Algo Run",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/algo/runs/{{run_id}}/",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "algo",
+                "runs",
+                "{{run_id}}",
+                ""
+              ]
+            }
+          }
+        },
+        {
+          "name": "Queue Algo Run",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (pm.response.code === 202) {",
+                  "  const json = pm.response.json();",
+                  "  if (json.task_id) pm.collectionVariables.set('task_id', json.task_id);",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"target_date\": \"{{date}}\"\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/api/algo/runs/",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "algo",
+                "runs",
+                ""
+              ]
+            }
+          }
+        },
+        {
+          "name": "Queue Result Settlement",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (pm.response.code === 202) {",
+                  "  const json = pm.response.json();",
+                  "  if (json.task_id) pm.collectionVariables.set('task_id', json.task_id);",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"target_date\": \"{{date}}\"\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/api/algo/runs/update-results/",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "algo",
+                "runs",
+                "update-results",
+                ""
+              ]
+            }
+          }
+        },
+        {
+          "name": "Queue Auditor",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (pm.response.code === 202) {",
+                  "  const json = pm.response.json();",
+                  "  if (json.task_id) pm.collectionVariables.set('task_id', json.task_id);",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"from_date\": \"2026-07-01\",\n  \"to_date\": \"{{date}}\"\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/api/algo/runs/run-auditor/",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "algo",
+                "runs",
+                "run-auditor",
+                ""
+              ]
+            }
+          }
+        },
+        {
+          "name": "Task Status",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/algo/tasks/{{task_id}}/",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "algo",
+                "tasks",
+                "{{task_id}}",
+                ""
+              ]
+            },
+            "description": "Staff/admin token required. Also useful for queued algo runs and slip import task IDs if staff user."
+          }
+        }
+      ]
+    }
+  ]
+}

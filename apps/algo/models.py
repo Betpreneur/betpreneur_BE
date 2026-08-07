@@ -161,6 +161,368 @@ class AlgoFixture(models.Model):
         return self.fixture
 
 
+class FixtureCache(models.Model):
+    match_date = models.DateField()
+    fixture = models.CharField(max_length=255)
+    home_team = models.CharField(max_length=255, blank=True)
+    away_team = models.CharField(max_length=255, blank=True)
+    home_team_normalized = models.CharField(max_length=255, blank=True)
+    away_team_normalized = models.CharField(max_length=255, blank=True)
+    fixture_normalized = models.CharField(max_length=520, blank=True)
+    home_logo = models.URLField(blank=True)
+    away_logo = models.URLField(blank=True)
+    league = models.CharField(max_length=255, blank=True)
+    league_logo = models.URLField(blank=True)
+    country = models.CharField(max_length=100, blank=True)
+    country_flag = models.URLField(blank=True)
+    round = models.CharField(max_length=255, blank=True)
+    league_type = models.CharField(max_length=50, blank=True)
+    kickoff = models.CharField(max_length=50, blank=True)
+    kickoff_utc = models.DateTimeField(null=True, blank=True)
+    match_id = models.CharField(max_length=100, unique=True)
+    api_payload = models.JSONField(default=dict, blank=True)
+    source = models.CharField(max_length=30, default="api_football")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["match_date", "country", "league", "kickoff", "fixture"]
+        indexes = [
+            models.Index(fields=["match_date"]),
+            models.Index(fields=["home_team_normalized"]),
+            models.Index(fields=["away_team_normalized"]),
+            models.Index(fields=["fixture_normalized"]),
+            models.Index(fields=["country", "league"]),
+        ]
+
+    def __str__(self):
+        return self.fixture
+
+
+class BookmakerLeagueMap(models.Model):
+    provider = models.CharField(max_length=30)
+    provider_competition_id = models.CharField(max_length=100, blank=True)
+    provider_competition_name = models.CharField(max_length=255)
+    provider_competition_normalized = models.CharField(max_length=255, blank=True)
+    api_league_id = models.PositiveIntegerField()
+    api_league_name = models.CharField(max_length=255, blank=True)
+    country = models.CharField(max_length=100, blank=True)
+    current_api_season = models.PositiveIntegerField(null=True, blank=True)
+    confidence = models.DecimalField(max_digits=5, decimal_places=2, default=100)
+    active = models.BooleanField(default=True)
+    source = models.CharField(max_length=50, default="auto")
+    last_verified_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["provider", "provider_competition_name"]
+        indexes = [
+            models.Index(fields=["provider", "provider_competition_id"]),
+            models.Index(fields=["provider", "provider_competition_normalized"]),
+            models.Index(fields=["api_league_id"]),
+            models.Index(fields=["active"]),
+        ]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["provider", "provider_competition_id", "provider_competition_normalized"],
+                name="unique_bookmaker_league_map_provider_competition",
+            )
+        ]
+
+    def __str__(self):
+        return f"{self.provider}: {self.provider_competition_name} -> {self.api_league_name or self.api_league_id}"
+
+
+class TeamAliasMap(models.Model):
+    provider = models.CharField(max_length=30, blank=True)
+    api_team_id = models.PositiveIntegerField(null=True, blank=True)
+    canonical_name = models.CharField(max_length=255)
+    canonical_normalized = models.CharField(max_length=255, blank=True)
+    alias = models.CharField(max_length=255)
+    alias_normalized = models.CharField(max_length=255)
+    country = models.CharField(max_length=100, blank=True)
+    confidence = models.DecimalField(max_digits=5, decimal_places=2, default=100)
+    active = models.BooleanField(default=True)
+    source = models.CharField(max_length=50, default="auto")
+    last_seen_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["alias"]
+        indexes = [
+            models.Index(fields=["provider", "alias_normalized"]),
+            models.Index(fields=["api_team_id"]),
+            models.Index(fields=["canonical_normalized"]),
+            models.Index(fields=["active"]),
+        ]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["provider", "alias_normalized", "canonical_normalized"],
+                name="unique_team_alias_provider_alias_canonical",
+            )
+        ]
+
+    def __str__(self):
+        provider = f"{self.provider}: " if self.provider else ""
+        return f"{provider}{self.alias} -> {self.canonical_name}"
+
+
+class ProviderTeamMap(models.Model):
+    provider = models.CharField(max_length=30)
+    provider_team_id = models.CharField(max_length=120)
+    provider_team_name = models.CharField(max_length=255)
+    provider_team_normalized = models.CharField(max_length=255, blank=True)
+    internal_team_id = models.CharField(max_length=120, blank=True)
+    internal_team_name = models.CharField(max_length=255, blank=True)
+    internal_team_normalized = models.CharField(max_length=255, blank=True)
+    api_team_id = models.PositiveIntegerField(null=True, blank=True)
+    country = models.CharField(max_length=100, blank=True)
+    confidence = models.DecimalField(max_digits=5, decimal_places=2, default=100)
+    resolution_method = models.CharField(max_length=80, default="provider_id")
+    active = models.BooleanField(default=True)
+    payload = models.JSONField(default=dict, blank=True)
+    verified_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["provider", "provider_team_name"]
+        indexes = [
+            models.Index(fields=["provider", "provider_team_id"]),
+            models.Index(fields=["provider", "provider_team_normalized"]),
+            models.Index(fields=["internal_team_id"]),
+            models.Index(fields=["api_team_id"]),
+            models.Index(fields=["active"]),
+        ]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["provider", "provider_team_id"],
+                name="unique_provider_team_map_provider_team",
+            )
+        ]
+
+    def __str__(self):
+        target = self.internal_team_name or self.api_team_id or self.internal_team_id or "unmapped"
+        return f"{self.provider}: {self.provider_team_name} -> {target}"
+
+
+class ProviderPlayerMap(models.Model):
+    provider = models.CharField(max_length=30)
+    provider_player_id = models.CharField(max_length=120)
+    provider_player_name = models.CharField(max_length=255)
+    provider_player_normalized = models.CharField(max_length=255, blank=True)
+    internal_player_id = models.CharField(max_length=120, blank=True)
+    internal_player_name = models.CharField(max_length=255, blank=True)
+    internal_player_normalized = models.CharField(max_length=255, blank=True)
+    provider_team_id = models.CharField(max_length=120, blank=True)
+    provider_team_name = models.CharField(max_length=255, blank=True)
+    internal_team_id = models.CharField(max_length=120, blank=True)
+    internal_team_name = models.CharField(max_length=255, blank=True)
+    position = models.CharField(max_length=80, blank=True)
+    nationality = models.CharField(max_length=100, blank=True)
+    confidence = models.DecimalField(max_digits=5, decimal_places=2, default=100)
+    resolution_method = models.CharField(max_length=80, default="provider_id")
+    active = models.BooleanField(default=True)
+    payload = models.JSONField(default=dict, blank=True)
+    verified_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["provider", "provider_player_name"]
+        indexes = [
+            models.Index(fields=["provider", "provider_player_id"]),
+            models.Index(fields=["provider", "provider_player_normalized"]),
+            models.Index(fields=["internal_player_id"]),
+            models.Index(fields=["provider_team_id"]),
+            models.Index(fields=["active"]),
+        ]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["provider", "provider_player_id"],
+                name="unique_provider_player_map_provider_player",
+            )
+        ]
+
+    def __str__(self):
+        target = self.internal_player_name or self.internal_player_id or "unmapped"
+        return f"{self.provider}: {self.provider_player_name} -> {target}"
+
+
+class ProviderFixtureMap(models.Model):
+    provider = models.CharField(max_length=30)
+    provider_event_id = models.CharField(max_length=120)
+    provider_competition_id = models.CharField(max_length=100, blank=True)
+    provider_competition_name = models.CharField(max_length=255, blank=True)
+    api_fixture_id = models.CharField(max_length=100)
+    api_league_id = models.PositiveIntegerField(null=True, blank=True)
+    api_league_name = models.CharField(max_length=255, blank=True)
+    provider_home_team = models.CharField(max_length=255, blank=True)
+    provider_away_team = models.CharField(max_length=255, blank=True)
+    api_home_team = models.CharField(max_length=255, blank=True)
+    api_away_team = models.CharField(max_length=255, blank=True)
+    kickoff_at = models.DateTimeField(null=True, blank=True)
+    confidence = models.DecimalField(max_digits=5, decimal_places=2, default=100)
+    resolution_method = models.CharField(max_length=80, default="team_date_league")
+    active = models.BooleanField(default=True)
+    payload = models.JSONField(default=dict, blank=True)
+    verified_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["provider", "provider_event_id"]
+        indexes = [
+            models.Index(fields=["provider", "provider_event_id"]),
+            models.Index(fields=["api_fixture_id"]),
+            models.Index(fields=["provider_competition_id"]),
+            models.Index(fields=["active"]),
+        ]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["provider", "provider_event_id"],
+                name="unique_provider_fixture_map_event",
+            )
+        ]
+
+    def __str__(self):
+        return f"{self.provider}: {self.provider_event_id} -> {self.api_fixture_id}"
+
+
+class StatPalFixtureSnapshot(models.Model):
+    class SnapshotType(models.TextChoices):
+        INJURIES_SUSPENSIONS = "injuries_suspensions", "Injuries & Suspensions"
+        TEAM_STATS = "team_stats", "Team Stats"
+        PREMATCH_ODDS = "prematch_odds", "Pre-Match Odds"
+        LIVE_ODDS = "live_odds", "Live Odds"
+        LINEUPS = "lineups", "Lineups"
+        PREDICTIONS = "predictions", "Predictions"
+        DETAILED_STATS = "detailed_stats", "Detailed Stats"
+        RAW = "raw", "Raw"
+
+    provider_fixture = models.ForeignKey(
+        ProviderFixtureMap,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="statpal_snapshots",
+    )
+    fixture = models.ForeignKey(
+        FixtureCache,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="statpal_snapshots",
+    )
+    match_id = models.CharField(max_length=120, blank=True)
+    provider_match_id = models.CharField(max_length=120, blank=True)
+    provider_competition_id = models.CharField(max_length=100, blank=True)
+    snapshot_type = models.CharField(max_length=40, choices=SnapshotType.choices)
+    source_endpoint = models.CharField(max_length=160, blank=True)
+    status = models.CharField(max_length=30, default="available")
+    payload = models.JSONField(default=dict, blank=True)
+    summary = models.JSONField(default=dict, blank=True)
+    fetched_at = models.DateTimeField(null=True, blank=True)
+    expires_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-fetched_at", "-updated_at"]
+        indexes = [
+            models.Index(fields=["match_id", "snapshot_type"]),
+            models.Index(fields=["provider_match_id", "snapshot_type"]),
+            models.Index(fields=["provider_competition_id", "snapshot_type"]),
+            models.Index(fields=["snapshot_type", "status"]),
+            models.Index(fields=["expires_at"]),
+        ]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["match_id", "provider_match_id", "snapshot_type"],
+                name="unique_statpal_snapshot_fixture_type",
+            )
+        ]
+
+    def __str__(self):
+        target = self.match_id or self.provider_match_id or "unmapped"
+        return f"StatPal {self.snapshot_type} for {target}"
+
+
+class SlipReview(models.Model):
+    class Source(models.TextChoices):
+        MANUAL = "manual", "Manual"
+        SPORTYBET = "sportybet", "SportyBet"
+        BETANO = "betano", "Betano"
+
+    class Status(models.TextChoices):
+        QUEUED = "queued", "Queued"
+        IMPORTING = "importing", "Importing"
+        ANALYSING = "analysing", "Analysing"
+        COMPLETED = "completed", "Completed"
+        PARTIAL = "partial", "Partial"
+        FAILED = "failed", "Failed"
+
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="slip_reviews",
+    )
+    source = models.CharField(max_length=30, choices=Source.choices, default=Source.MANUAL)
+    status = models.CharField(max_length=30, choices=Status.choices, default=Status.COMPLETED)
+    title = models.CharField(max_length=255, blank=True)
+    submitted_payload = models.JSONField(default=dict, blank=True)
+    summary = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        indexes = [
+            models.Index(fields=["user", "created_at"]),
+            models.Index(fields=["source", "status"]),
+        ]
+
+    def __str__(self):
+        return f"{self.user} {self.source} review #{self.id}"
+
+
+class SlipSelection(models.Model):
+    review = models.ForeignKey(SlipReview, on_delete=models.CASCADE, related_name="selections")
+    order = models.PositiveIntegerField(default=0)
+    submitted_match = models.CharField(max_length=255)
+    submitted_market = models.CharField(max_length=120)
+    status = models.CharField(max_length=40, blank=True)
+    verdict = models.CharField(max_length=40, blank=True)
+    message = models.TextField(blank=True)
+    match_id = models.CharField(max_length=100, blank=True)
+    match_date = models.DateField(null=True, blank=True)
+    fixture = models.CharField(max_length=255, blank=True)
+    home_team = models.CharField(max_length=255, blank=True)
+    away_team = models.CharField(max_length=255, blank=True)
+    league = models.CharField(max_length=255, blank=True)
+    country = models.CharField(max_length=100, blank=True)
+    kickoff = models.CharField(max_length=50, blank=True)
+    selected_market = models.JSONField(default=dict, blank=True)
+    best_market = models.JSONField(default=dict, blank=True)
+    recommended_market = models.JSONField(default=dict, blank=True)
+    possible_matches = models.JSONField(default=list, blank=True)
+    analysis_payload = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["order", "id"]
+        indexes = [
+            models.Index(fields=["review", "order"]),
+            models.Index(fields=["match_id"]),
+            models.Index(fields=["status", "verdict"]),
+        ]
+
+    def __str__(self):
+        return f"{self.submitted_match} - {self.submitted_market}"
+
+
 class GameBack(models.Model):
     user = models.ForeignKey(
         settings.AUTH_USER_MODEL,

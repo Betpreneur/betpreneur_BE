@@ -178,6 +178,92 @@ GRIND_ALGO = {
     "ALGO_CORNER_MIN_LINE": config("ALGO_CORNER_MIN_LINE", default="7.5"),
     "ALGO_CORNER_MAX_ODDS": config("ALGO_CORNER_MAX_ODDS", default="3.5"),
     "ALGO_CORNER_MIN_PROFILE_GAMES": config("ALGO_CORNER_MIN_PROFILE_GAMES", default="6"),
+    "STATPAL_ENABLED": config("STATPAL_ENABLED", default="False"),
+    "STATPAL_ACCESS_KEY": config("STATPAL_ACCESS_KEY", default=""),
+    "STATPAL_BASE_URL": config("STATPAL_BASE_URL", default="https://statpal.io/api/v2"),
+    "STATPAL_USAGE_BASE_URL": config("STATPAL_USAGE_BASE_URL", default="https://statpal.io/api"),
+    "STATPAL_TIMEOUT": config("STATPAL_TIMEOUT", default=20, cast=int),
+    "STATPAL_ENDPOINT_SOCCER_LEAGUES": config("STATPAL_ENDPOINT_SOCCER_LEAGUES", default="soccer/leagues"),
+    "STATPAL_ENDPOINT_SOCCER_LIVE_MATCHES": config("STATPAL_ENDPOINT_SOCCER_LIVE_MATCHES", default="soccer/matches/live"),
+    "STATPAL_ENDPOINT_SOCCER_LEAGUE_SEASONS": config(
+        "STATPAL_ENDPOINT_SOCCER_LEAGUE_SEASONS",
+        default="soccer/leagues/seasons",
+    ),
+    "STATPAL_ENDPOINT_SOCCER_MATCHES_DAILY": config(
+        "STATPAL_ENDPOINT_SOCCER_MATCHES_DAILY",
+        default="soccer/matches/daily",
+    ),
+    "STATPAL_ENDPOINT_SOCCER_LEAGUE_MATCHES": config(
+        "STATPAL_ENDPOINT_SOCCER_LEAGUE_MATCHES",
+        default="soccer/leagues/{league_id}/matches",
+    ),
+    "STATPAL_ENDPOINT_SOCCER_LEAGUE_MATCH_STATS": config(
+        "STATPAL_ENDPOINT_SOCCER_LEAGUE_MATCH_STATS",
+        default="soccer/leagues/{league_id}/matches/stats",
+    ),
+    "STATPAL_ENDPOINT_SOCCER_LEAGUE_STANDINGS": config(
+        "STATPAL_ENDPOINT_SOCCER_LEAGUE_STANDINGS",
+        default="soccer/leagues/{league_id}/standings",
+    ),
+    "STATPAL_ENDPOINT_SOCCER_LEAGUE_STATS": config(
+        "STATPAL_ENDPOINT_SOCCER_LEAGUE_STATS",
+        default="soccer/leagues/{league_id}/stats",
+    ),
+    "STATPAL_ENDPOINT_SOCCER_HEAD_TO_HEAD": config(
+        "STATPAL_ENDPOINT_SOCCER_HEAD_TO_HEAD",
+        default="soccer/head-to-head",
+    ),
+    "STATPAL_ENDPOINT_SOCCER_INJURIES_SUSPENSIONS": config(
+        "STATPAL_ENDPOINT_SOCCER_INJURIES_SUSPENSIONS",
+        default="soccer/injuries-suspensions",
+    ),
+    "STATPAL_ENDPOINT_SOCCER_TEAM": config("STATPAL_ENDPOINT_SOCCER_TEAM", default="soccer/teams/{team_id}"),
+    "STATPAL_ENDPOINT_SOCCER_PLAYER": config("STATPAL_ENDPOINT_SOCCER_PLAYER", default="soccer/players/{player_id}"),
+    "STATPAL_ENDPOINT_SOCCER_COACH": config("STATPAL_ENDPOINT_SOCCER_COACH", default="soccer/coaches/{coach_id}"),
+    "STATPAL_ENDPOINT_SOCCER_IMAGES": config("STATPAL_ENDPOINT_SOCCER_IMAGES", default="soccer/images"),
+    "STATPAL_ENDPOINT_SOCCER_LIVE_STORYLINES": config(
+        "STATPAL_ENDPOINT_SOCCER_LIVE_STORYLINES",
+        default="soccer/live-storylines",
+    ),
+    "STATPAL_ENDPOINT_SOCCER_TEAM_LINEUPS": config(
+        "STATPAL_ENDPOINT_SOCCER_TEAM_LINEUPS",
+        default="soccer/team-lineups",
+    ),
+    "STATPAL_ENDPOINT_SOCCER_WEATHER_FORECAST": config(
+        "STATPAL_ENDPOINT_SOCCER_WEATHER_FORECAST",
+        default="soccer/weather-forecast",
+    ),
+    "STATPAL_ENDPOINT_SOCCER_PREDICTIONS": config("STATPAL_ENDPOINT_SOCCER_PREDICTIONS", default="soccer/predictions"),
+    "STATPAL_ENDPOINT_SOCCER_PREMATCH_ODDS": config(
+        "STATPAL_ENDPOINT_SOCCER_PREMATCH_ODDS",
+        default="soccer/leagues/{league_id}/odds/prematch",
+    ),
+    "STATPAL_ENDPOINT_SOCCER_LIVE_ODDS": config("STATPAL_ENDPOINT_SOCCER_LIVE_ODDS", default="soccer/odds/live"),
+    "STATPAL_ENDPOINT_SOCCER_LIVE_ODDS_MARKETS": config(
+        "STATPAL_ENDPOINT_SOCCER_LIVE_ODDS_MARKETS",
+        default="soccer/odds/live/markets",
+    ),
+    "STATPAL_ENDPOINT_SOCCER_LIVE_ODDS_MATCH_STATES": config(
+        "STATPAL_ENDPOINT_SOCCER_LIVE_ODDS_MATCH_STATES",
+        default="soccer/odds/live/match-states",
+    ),
+    # Backward-compatible aliases from early StatPal integration stages.
+    "STATPAL_ENDPOINT_SOCCER_PLAYER_STATS": config(
+        "STATPAL_ENDPOINT_SOCCER_PLAYER_STATS",
+        default="soccer/players/{player_id}",
+    ),
+    "STATPAL_ENDPOINT_SOCCER_TEAM_STATS": config(
+        "STATPAL_ENDPOINT_SOCCER_TEAM_STATS",
+        default="soccer/teams/{team_id}",
+    ),
+    "STATPAL_ENDPOINT_SOCCER_LINEUPS": config(
+        "STATPAL_ENDPOINT_SOCCER_LINEUPS",
+        default="soccer/team-lineups",
+    ),
+    "STATPAL_ENDPOINT_SOCCER_DETAILED_STATS": config(
+        "STATPAL_ENDPOINT_SOCCER_DETAILED_STATS",
+        default="soccer/leagues/{league_id}/matches/stats",
+    ),
 }
 
 # Auth settings

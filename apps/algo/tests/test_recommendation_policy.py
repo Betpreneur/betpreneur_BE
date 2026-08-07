@@ -8,7 +8,7 @@ from apps.algo.council import council_review
 from apps.algo.recommendation_policy import assess_recommendation
 from apps.algo.serializers import PickSerializer
 from apps.algo.services import AlgoRunnerService
-from apps.algo.views import _game_summary_from_fixture
+from apps.algo.views import _game_summary_from_fixture, _manual_verdict, _market_matches, _selection_card
 
 
 STRICT_SETTINGS = {
@@ -1152,3 +1152,70 @@ class RecommendationPolicyTests(TestCase):
 
         self.assertFalse(assessment["recommended"])
         self.assertIn("weak_confidence_band_record", assessment["recommendation_reasons"])
+
+    def test_slip_review_matches_sportybet_home_or_away_alias(self):
+        self.assertTrue(_market_matches("Home or Away", "DC: 12"))
+        self.assertTrue(_market_matches("12", "DC: 12"))
+
+    def test_slip_review_does_not_replace_with_watchlist_market(self):
+        selected_market = {
+            "market": "Over 1.5",
+            "recommendation_status": "no_edge",
+            "display_score": 68,
+        }
+        watchlist_market = {
+            "market": "Corners Under 10.75",
+            "recommendation_status": "watchlist",
+            "recommended": False,
+            "display_score": 90,
+            "odds": 1.8,
+        }
+
+        verdict = _manual_verdict(selected_market, None)
+        card = _selection_card(
+            {
+                "match": "Spain vs Belgium",
+                "submitted_market": "Over 1.5",
+                "status": "analysed",
+                **verdict,
+                "selected_market": selected_market,
+                "best_market": watchlist_market,
+                "replacement_market": None,
+            }
+        )
+
+        self.assertEqual(verdict["verdict"], "remove")
+        self.assertFalse(verdict["better_market_available"])
+        self.assertEqual(card["suggested_market"], "Over 1.5")
+        self.assertIsNone(card["suggested_odds"])
+
+    def test_slip_review_replaces_only_with_recommended_market(self):
+        selected_market = {
+            "market": "Over 1.5",
+            "recommendation_status": "no_edge",
+            "display_score": 68,
+        }
+        replacement_market = {
+            "market": "Under 3.5",
+            "recommendation_status": "recommended",
+            "recommended": True,
+            "display_score": 82,
+            "odds": 1.55,
+        }
+
+        verdict = _manual_verdict(selected_market, replacement_market)
+        card = _selection_card(
+            {
+                "match": "Spain vs Belgium",
+                "submitted_market": "Over 1.5",
+                "status": "analysed",
+                **verdict,
+                "selected_market": selected_market,
+                "replacement_market": replacement_market,
+            }
+        )
+
+        self.assertEqual(verdict["verdict"], "replace")
+        self.assertTrue(verdict["better_market_available"])
+        self.assertEqual(card["suggested_market"], "Under 3.5")
+        self.assertEqual(card["suggested_odds"], 1.55)

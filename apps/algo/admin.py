@@ -1,3 +1,5 @@
+import json
+
 from django.contrib import admin
 from django.contrib import messages
 from django.db.models import Avg, Count, Q
@@ -6,7 +8,24 @@ from django.urls import path, reverse
 from django.utils.html import format_html, format_html_join
 from django.utils import timezone
 
-from .models import AlgoFixture, AlgoRun, GameBack, MarketPrediction, Pick, PickBack, StrategyReview
+from .models import (
+    AlgoFixture,
+    AlgoRun,
+    BookmakerLeagueMap,
+    FixtureCache,
+    GameBack,
+    MarketPrediction,
+    Pick,
+    PickBack,
+    ProviderFixtureMap,
+    ProviderPlayerMap,
+    ProviderTeamMap,
+    SlipReview,
+    SlipSelection,
+    StatPalFixtureSnapshot,
+    StrategyReview,
+    TeamAliasMap,
+)
 from .council import council_review
 from .performance import performance_dashboard
 from .recommendation_policy import assess_recommendation
@@ -87,6 +106,298 @@ class AlgoFixtureInline(admin.TabularInline):
     )
     readonly_fields = fields
     show_change_link = True
+
+
+class SlipSelectionInline(admin.TabularInline):
+    model = SlipSelection
+    extra = 0
+    can_delete = False
+    fields = (
+        "order",
+        "submitted_match",
+        "submitted_market",
+        "fixture",
+        "league",
+        "status",
+        "verdict",
+        "message",
+    )
+    readonly_fields = fields
+    show_change_link = True
+
+
+@admin.register(FixtureCache)
+class FixtureCacheAdmin(admin.ModelAdmin):
+    date_hierarchy = "match_date"
+    list_display = (
+        "match_date",
+        "fixture",
+        "country",
+        "league",
+        "kickoff",
+        "match_id",
+        "updated_at",
+    )
+    list_filter = ("match_date", "country", "league")
+    search_fields = (
+        "fixture",
+        "home_team",
+        "away_team",
+        "fixture_normalized",
+        "match_id",
+        "league",
+        "country",
+    )
+    readonly_fields = ("created_at", "updated_at")
+
+
+@admin.register(BookmakerLeagueMap)
+class BookmakerLeagueMapAdmin(admin.ModelAdmin):
+    list_display = (
+        "provider",
+        "provider_competition_name",
+        "provider_competition_id",
+        "api_league_id",
+        "api_league_name",
+        "country",
+        "current_api_season",
+        "confidence",
+        "active",
+        "last_verified_at",
+    )
+    list_filter = ("provider", "active", "country", "source")
+    search_fields = (
+        "provider_competition_id",
+        "provider_competition_name",
+        "provider_competition_normalized",
+        "api_league_name",
+        "api_league_id",
+        "country",
+    )
+    readonly_fields = ("created_at", "updated_at")
+
+
+@admin.register(TeamAliasMap)
+class TeamAliasMapAdmin(admin.ModelAdmin):
+    list_display = (
+        "provider",
+        "alias",
+        "canonical_name",
+        "api_team_id",
+        "country",
+        "confidence",
+        "active",
+        "last_seen_at",
+    )
+    list_filter = ("provider", "active", "country", "source")
+    search_fields = (
+        "alias",
+        "alias_normalized",
+        "canonical_name",
+        "canonical_normalized",
+        "api_team_id",
+        "country",
+    )
+    readonly_fields = ("created_at", "updated_at")
+
+
+@admin.register(ProviderFixtureMap)
+class ProviderFixtureMapAdmin(admin.ModelAdmin):
+    list_display = (
+        "provider",
+        "provider_event_id",
+        "provider_competition_name",
+        "api_fixture_id",
+        "api_league_name",
+        "provider_home_team",
+        "provider_away_team",
+        "api_home_team",
+        "api_away_team",
+        "confidence",
+        "active",
+        "verified_at",
+    )
+    list_filter = ("provider", "active", "provider_competition_name", "api_league_name", "resolution_method")
+    search_fields = (
+        "provider_event_id",
+        "provider_competition_id",
+        "provider_competition_name",
+        "api_fixture_id",
+        "api_league_name",
+        "provider_home_team",
+        "provider_away_team",
+        "api_home_team",
+        "api_away_team",
+    )
+    readonly_fields = ("created_at", "updated_at")
+
+
+@admin.register(ProviderTeamMap)
+class ProviderTeamMapAdmin(admin.ModelAdmin):
+    list_display = (
+        "provider",
+        "provider_team_name",
+        "provider_team_id",
+        "internal_team_name",
+        "internal_team_id",
+        "api_team_id",
+        "country",
+        "confidence",
+        "active",
+        "verified_at",
+    )
+    list_filter = ("provider", "active", "country", "resolution_method")
+    search_fields = (
+        "provider_team_id",
+        "provider_team_name",
+        "provider_team_normalized",
+        "internal_team_id",
+        "internal_team_name",
+        "internal_team_normalized",
+        "api_team_id",
+        "country",
+    )
+    readonly_fields = ("created_at", "updated_at")
+
+
+@admin.register(ProviderPlayerMap)
+class ProviderPlayerMapAdmin(admin.ModelAdmin):
+    list_display = (
+        "provider",
+        "provider_player_name",
+        "provider_player_id",
+        "provider_team_name",
+        "internal_player_name",
+        "internal_player_id",
+        "position",
+        "confidence",
+        "active",
+        "verified_at",
+    )
+    list_filter = ("provider", "active", "position", "nationality", "resolution_method")
+    search_fields = (
+        "provider_player_id",
+        "provider_player_name",
+        "provider_player_normalized",
+        "internal_player_id",
+        "internal_player_name",
+        "internal_player_normalized",
+        "provider_team_id",
+        "provider_team_name",
+        "internal_team_id",
+        "internal_team_name",
+        "nationality",
+    )
+    readonly_fields = ("created_at", "updated_at")
+
+
+@admin.register(StatPalFixtureSnapshot)
+class StatPalFixtureSnapshotAdmin(admin.ModelAdmin):
+    list_display = (
+        "snapshot_type",
+        "match_id",
+        "provider_match_id",
+        "provider_competition_id",
+        "status",
+        "source_endpoint",
+        "fetched_at",
+        "expires_at",
+    )
+    list_filter = ("snapshot_type", "status", "source_endpoint")
+    search_fields = (
+        "match_id",
+        "provider_match_id",
+        "provider_competition_id",
+        "source_endpoint",
+    )
+    readonly_fields = ("created_at", "updated_at")
+
+
+@admin.register(SlipReview)
+class SlipReviewAdmin(admin.ModelAdmin):
+    date_hierarchy = "created_at"
+    list_display = (
+        "id",
+        "user",
+        "source",
+        "status",
+        "selection_count",
+        "statpal_api_calls",
+        "keep_count",
+        "replace_count",
+        "remove_count",
+        "created_at",
+    )
+    list_filter = ("source", "status", "created_at")
+    search_fields = ("user__email", "user__username", "title")
+    readonly_fields = ("created_at", "updated_at", "api_usage_summary")
+    inlines = [SlipSelectionInline]
+
+    @admin.display(description="Selections")
+    def selection_count(self, obj):
+        return (obj.summary or {}).get("count", 0)
+
+    def _api_usage(self, obj):
+        summary = obj.summary or {}
+        return summary.get("api_usage") or ((summary.get("intelligence") or {}).get("api_usage") or {})
+
+    @admin.display(description="StatPal calls")
+    def statpal_api_calls(self, obj):
+        usage = self._api_usage(obj)
+        attempted = int(usage.get("attempted_calls") or 0)
+        skipped = int(usage.get("skipped_by_cache") or 0)
+        failed = int(usage.get("failed_calls") or 0)
+        if failed:
+            return f"{attempted} calls, {failed} failed, {skipped} cache hits"
+        return f"{attempted} calls, {skipped} cache hits"
+
+    @admin.display(description="API usage")
+    def api_usage_summary(self, obj):
+        usage = self._api_usage(obj)
+        if not usage:
+            return "No API usage recorded."
+        return format_html(
+            "<pre>{}</pre>",
+            json.dumps(usage, indent=2, default=str),
+        )
+
+    @admin.display(description="Keep")
+    def keep_count(self, obj):
+        return (obj.summary or {}).get("keep_count", 0)
+
+    @admin.display(description="Replace")
+    def replace_count(self, obj):
+        return (obj.summary or {}).get("replace_count", 0)
+
+    @admin.display(description="Remove")
+    def remove_count(self, obj):
+        return (obj.summary or {}).get("remove_count", 0)
+
+
+@admin.register(SlipSelection)
+class SlipSelectionAdmin(admin.ModelAdmin):
+    list_display = (
+        "id",
+        "review",
+        "submitted_match",
+        "submitted_market",
+        "fixture",
+        "status",
+        "verdict",
+        "created_at",
+    )
+    list_filter = ("status", "verdict", "league", "country")
+    search_fields = (
+        "submitted_match",
+        "submitted_market",
+        "fixture",
+        "home_team",
+        "away_team",
+        "match_id",
+        "league",
+        "country",
+    )
+    readonly_fields = ("created_at",)
 
 
 @admin.action(description="Queue pick generation for selected run dates")
