@@ -2532,6 +2532,11 @@ def _public_selection_card(item):
     }
     if card.get("match_id"):
         technical_ref["match_id"] = card.get("match_id")
+    if item.get("status") == "matched_unscored":
+        on_demand = item.get("on_demand_analysis") or {}
+        technical_ref["analysis_status"] = on_demand.get("status") or "not_started"
+        technical_ref["analysis_error"] = on_demand.get("error") or ""
+        technical_ref["analysis_run_id"] = on_demand.get("run_id")
     return {
         "id": card.get("match_id") or item.get("match"),
         "match": card.get("fixture") or card.get("match"),
@@ -2565,6 +2570,7 @@ def _slip_intelligence(results):
     caution_items = [item for item in enriched if item.get("verdict") == "caution"]
     keep_items = [item for item in enriched if item.get("verdict") == "keep"]
     expired_items = [item for item in enriched if item.get("status") == "expired"]
+    pending_items = [item for item in enriched if item.get("status") == "matched_unscored"]
     unverified_items = [item for item in enriched if item.get("status") not in {"analysed", "expired"}]
 
     if remove_items or len(replace_items) >= 3 or overall_score < 45:
@@ -2708,7 +2714,11 @@ def _slip_intelligence(results):
             "title": "Slip Review",
             "total_legs": len(enriched),
             "analysed_legs": len(analysed),
-            "unmatched_legs": len(unverified_items),
+            "pending_analysis_legs": len(pending_items),
+            "unmatched_legs": len([
+                item for item in enriched
+                if item.get("status") in {"unmatched", "ambiguous_match", "market_not_found"}
+            ]),
             "expired_legs": len(expired_items),
         },
         "ticket_health": ticket_health,
@@ -2744,7 +2754,11 @@ def _slip_intelligence(results):
             "caution": len(caution_items),
             "replace": len(replace_items),
             "remove": len(remove_items),
-            "unmatched": len(unverified_items),
+            "pending_analysis": len(pending_items),
+            "unmatched": len([
+                item for item in enriched
+                if item.get("status") in {"unmatched", "ambiguous_match", "market_not_found"}
+            ]),
             "expired": len(expired_items),
         },
         "selections": public_selections,

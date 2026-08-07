@@ -2343,6 +2343,15 @@ class AlgoRunnerService:
         fixture.refresh_from_db()
         scored_count = 1 if result.get("status") == "scored" else 0
         market_count = int(result.get("market_count") or 0)
+        log.info(
+            "On-demand fixture scoring result match_id=%s run_id=%s fixture_id=%s status=%s market_count=%s error=%s",
+            match_id,
+            algo_run.id,
+            fixture.id,
+            result.get("status"),
+            market_count,
+            str(result.get("error") or "")[:500],
+        )
         algo_run.refresh_from_db()
         algo_run.status = AlgoRun.Status.SUCCESS if scored_count else AlgoRun.Status.NO_DATA
         algo_run.total_scored = scored_count
