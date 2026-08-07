@@ -20,6 +20,8 @@ from .views import (
     SlipReviewListView,
     SlipReviewOptionsView,
     SportyBetSlipImportView,
+    StatPalFixtureContextView,
+    StatPalFixtureRefreshView,
     TaskStatusView,
     TopPickView,
 )
@@ -41,6 +43,8 @@ urlpatterns = [
     path("slip-reviews/sportybet/", SportyBetSlipImportView.as_view(), name="algo-sportybet-slip-import"),
     path("slip-reviews/betano/", BetanoSlipImportView.as_view(), name="algo-betano-slip-import"),
     path("slip-reviews/<int:review_id>/", SlipReviewDetailView.as_view(), name="algo-slip-review-detail"),
+    path("statpal/fixtures/context/", StatPalFixtureContextView.as_view(), name="algo-statpal-fixture-context"),
+    path("statpal/fixtures/refresh/", StatPalFixtureRefreshView.as_view(), name="algo-statpal-fixture-refresh"),
     path("games/", GamesView.as_view(), name="algo-games"),
     path("games/backed/", BackedGamesView.as_view(), name="algo-backed-games"),
     path("games/<str:match_id>/backed/", BackGameView.as_view(), name="algo-game-backed"),

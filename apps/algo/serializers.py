@@ -1,6 +1,6 @@
 from rest_framework import serializers
 
-from .models import AlgoRun, GameBack, Pick
+from .models import AlgoRun, GameBack, Pick, StatPalFixtureSnapshot
 
 
 class PickSerializer(serializers.ModelSerializer):
@@ -600,6 +600,42 @@ class SlipReviewOptionsResponseSerializer(serializers.Serializer):
     verdicts = serializers.JSONField()
     sources = serializers.JSONField()
     limits = serializers.JSONField()
+
+
+class StatPalFixtureContextQuerySerializer(serializers.Serializer):
+    match_id = serializers.CharField(required=False, allow_blank=True, max_length=120)
+    provider_match_id = serializers.CharField(required=False, allow_blank=True, max_length=120)
+    refresh = serializers.BooleanField(required=False, default=False)
+
+    def validate(self, attrs):
+        if not attrs.get("match_id") and not attrs.get("provider_match_id"):
+            raise serializers.ValidationError("Provide match_id or provider_match_id.")
+        return attrs
+
+
+class StatPalFixtureRefreshRequestSerializer(serializers.Serializer):
+    match_id = serializers.CharField(required=False, allow_blank=True, max_length=120)
+    provider_match_id = serializers.CharField(required=False, allow_blank=True, max_length=120)
+    provider_competition_id = serializers.CharField(required=False, allow_blank=True, max_length=100)
+    force = serializers.BooleanField(required=False, default=False)
+    snapshot_types = serializers.ListField(
+        child=serializers.ChoiceField(choices=StatPalFixtureSnapshot.SnapshotType.choices),
+        required=False,
+        allow_empty=False,
+        help_text="Optional subset of StatPal snapshot types to refresh.",
+    )
+
+    def validate(self, attrs):
+        if not attrs.get("match_id") and not attrs.get("provider_match_id"):
+            raise serializers.ValidationError("Provide match_id or provider_match_id.")
+        return attrs
+
+
+class StatPalFixtureContextResponseSerializer(serializers.Serializer):
+    match_id = serializers.CharField(required=False, allow_blank=True)
+    provider_match_id = serializers.CharField(required=False, allow_blank=True)
+    refreshed = serializers.JSONField(required=False)
+    context = serializers.JSONField()
 
 
 class SportyBetSlipImportRequestSerializer(serializers.Serializer):

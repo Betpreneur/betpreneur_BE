@@ -20,8 +20,11 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from .models import AlgoFixture, AlgoRun, GameBack, MarketPrediction, Pick, SlipReview, SlipSelection
+from .market_taxonomy import canonical_market_name, describe_market, market_matches, market_options
 from .recommendation_policy import assess_recommendation
 from .services import BetanoBetslipImporter, FixtureSearchService, SportyBetShareImporter, algo_runner_service
+from .statpal_advisory import statpal_market_advisory
+from .statpal_snapshots import statpal_snapshot_service
 from .performance import (
     add_pick,
     confidence_band,
@@ -62,6 +65,9 @@ from .serializers import (
     SlipReviewListResponseSerializer,
     SlipReviewOptionsResponseSerializer,
     SportyBetSlipImportRequestSerializer,
+    StatPalFixtureContextQuerySerializer,
+    StatPalFixtureContextResponseSerializer,
+    StatPalFixtureRefreshRequestSerializer,
     TaskQueuedSerializer,
     TaskStatusSerializer,
     TopPickResponseSerializer,
@@ -95,27 +101,7 @@ MATCH_CHECKER_SERIOUS_FLAGS = {
     "nordic_under_volatility",
     "draw_boundary_risk",
 }
-SLIP_REVIEW_MARKET_OPTIONS = [
-    {"value": "Home Win", "label": "Home Win", "group": "Result", "meaning": "Home team to win"},
-    {"value": "Away Win", "label": "Away Win", "group": "Result", "meaning": "Away team to win"},
-    {"value": "Draw", "label": "Draw", "group": "Result", "meaning": "Match ends in a draw"},
-    {"value": "DNB Home", "label": "Draw No Bet - Home", "group": "Result", "meaning": "Home win, draw refunds"},
-    {"value": "DNB Away", "label": "Draw No Bet - Away", "group": "Result", "meaning": "Away win, draw refunds"},
-    {"value": "AH Home +0.5", "label": "Home +0.5", "group": "Asian Handicap", "meaning": "Home win or draw"},
-    {"value": "AH Away +0.5", "label": "Away +0.5", "group": "Asian Handicap", "meaning": "Away win or draw"},
-    {"value": "Over 1.5", "label": "Over 1.5 Goals", "group": "Goals", "meaning": "2 or more total goals"},
-    {"value": "Over 2.5", "label": "Over 2.5 Goals", "group": "Goals", "meaning": "3 or more total goals"},
-    {"value": "Over 3.5", "label": "Over 3.5 Goals", "group": "Goals", "meaning": "4 or more total goals"},
-    {"value": "Under 1.5", "label": "Under 1.5 Goals", "group": "Goals", "meaning": "1 or 0 total goals"},
-    {"value": "Under 2.5", "label": "Under 2.5 Goals", "group": "Goals", "meaning": "2 or fewer total goals"},
-    {"value": "Under 3.5", "label": "Under 3.5 Goals", "group": "Goals", "meaning": "3 or fewer total goals"},
-    {"value": "GG / BTTS Yes", "label": "Both Teams To Score", "group": "Goals", "meaning": "Both teams to score"},
-    {"value": "GG + Over 2.5", "label": "BTTS + Over 2.5", "group": "Goals", "meaning": "Both score and 3+ goals"},
-    {"value": "Home CS", "label": "Home Clean Sheet", "group": "Clean Sheet", "meaning": "Home team keeps clean sheet"},
-    {"value": "Away CS", "label": "Away Clean Sheet", "group": "Clean Sheet", "meaning": "Away team keeps clean sheet"},
-    {"value": "First to Score H", "label": "Home First To Score", "group": "Scoring", "meaning": "Home team scores first"},
-    {"value": "First to Score A", "label": "Away First To Score", "group": "Scoring", "meaning": "Away team scores first"},
-]
+SLIP_REVIEW_MARKET_OPTIONS = market_options()
 SLIP_REVIEW_VERDICT_OPTIONS = [
     {"value": "keep", "label": "Keep", "description": "Selection is strong enough to stay on the slip."},
     {"value": "caution", "label": "Caution", "description": "Selection has some support but carries warnings."},
@@ -1768,37 +1754,11 @@ def _normalise_market_name(value):
 
 
 def _canonical_market_name(value):
-    normalized = _normalise_market_name(value)
-    aliases = {
-        "1": "Home Win",
-        "home": "Home Win",
-        "home win": "Home Win",
-        "home team": "Home Win",
-        "2": "Away Win",
-        "away": "Away Win",
-        "away win": "Away Win",
-        "away team": "Away Win",
-        "x": "Draw",
-        "draw": "Draw",
-        "home or away": "DC: 12",
-        "home/away": "DC: 12",
-        "home away": "DC: 12",
-        "12": "DC: 12",
-        "dc 12": "DC: 12",
-        "dc: 12": "DC: 12",
-        "double chance 12": "DC: 12",
-        "both teams to score": "GG / BTTS Yes",
-        "btts yes": "GG / BTTS Yes",
-        "gg": "GG / BTTS Yes",
-        "gg / btts yes": "GG / BTTS Yes",
-    }
-    return aliases.get(normalized, value)
+    return canonical_market_name(value)
 
 
 def _market_matches(requested, actual):
-    return _normalise_market_name(_canonical_market_name(requested)) == _normalise_market_name(
-        _canonical_market_name(actual)
-    )
+    return market_matches(requested, actual)
 
 
 def _match_checker_risk_penalty(risk_flags):
@@ -1941,12 +1901,41 @@ def _with_match_checker_advisory(market):
     if not market:
         return None
     payload = dict(market)
+    payload["market_taxonomy"] = payload.get("market_taxonomy") or describe_market(payload.get("market")).to_dict()
     score = _match_checker_advisory_score(payload)
     payload["advisory_score"] = score
     payload["advisory_status"] = _match_checker_status(score)
     payload["advisory_warnings"] = _match_checker_warnings(payload)
     payload["advisory_evidence"] = _match_checker_evidence(payload)
     payload["advisory_basis"] = "match_specific_analysis"
+    return payload
+
+
+def _with_statpal_advisory(market, statpal_advisory):
+    if not market:
+        return None
+    if not statpal_advisory or not statpal_advisory.get("available"):
+        return market
+    score = _float_or_none(statpal_advisory.get("score"))
+    if score is None:
+        return market
+    payload = dict(market)
+    current_score = _float_or_none(payload.get("advisory_score")) or 0
+    adjustment = max(-6.0, min(6.0, (score - 55.0) * 0.20))
+    adjusted_score = round(max(0, min(100, current_score + adjustment)), 1)
+    payload["advisory_score"] = adjusted_score
+    payload["advisory_status"] = _match_checker_status(adjusted_score)
+    payload["statpal_advisory"] = statpal_advisory
+    payload["advisory_basis"] = f"{payload.get('advisory_basis') or 'match_specific_analysis'}+statpal_context"
+    warnings = list(payload.get("advisory_warnings") or [])
+    warnings.extend(statpal_advisory.get("warnings") or [])
+    payload["advisory_warnings"] = list(dict.fromkeys(warnings))[:8]
+    evidence = dict(payload.get("advisory_evidence") or {})
+    evidence["statpal_score"] = score
+    evidence["statpal_adjustment"] = adjustment
+    evidence["statpal_basis"] = statpal_advisory.get("basis")
+    evidence["statpal"] = statpal_advisory.get("evidence") or {}
+    payload["advisory_evidence"] = evidence
     return payload
 
 
@@ -2108,6 +2097,66 @@ def _json_safe(value):
     return json.loads(json.dumps(value, default=str))
 
 
+def _strip_api_usage(value):
+    if isinstance(value, dict):
+        return {
+            key: _strip_api_usage(child)
+            for key, child in value.items()
+            if key != "api_usage"
+        }
+    if isinstance(value, list):
+        return [_strip_api_usage(item) for item in value]
+    return value
+
+
+def _api_response_payload(value):
+    return _strip_api_usage(_json_safe(value))
+
+
+def _empty_api_usage():
+    return {
+        "provider": "statpal",
+        "attempted_calls": 0,
+        "successful_calls": 0,
+        "failed_calls": 0,
+        "skipped_by_cache": 0,
+        "skipped_without_call": 0,
+        "snapshot_types_attempted": [],
+        "snapshot_types_refreshed": [],
+        "snapshot_types_failed": [],
+    }
+
+
+def _merge_api_usage(*usages):
+    total = _empty_api_usage()
+    for usage in usages:
+        usage = usage or {}
+        total["attempted_calls"] += int(usage.get("attempted_calls") or 0)
+        total["successful_calls"] += int(usage.get("successful_calls") or 0)
+        total["failed_calls"] += int(usage.get("failed_calls") or 0)
+        total["skipped_by_cache"] += int(usage.get("skipped_by_cache") or 0)
+        total["skipped_without_call"] += int(usage.get("skipped_without_call") or 0)
+        for key in ("snapshot_types_attempted", "snapshot_types_refreshed", "snapshot_types_failed"):
+            total[key].extend(str(value) for value in usage.get(key) or [] if value)
+    for key in ("snapshot_types_attempted", "snapshot_types_refreshed", "snapshot_types_failed"):
+        total[key] = list(dict.fromkeys(total[key]))
+    return total
+
+
+def _selection_api_usage(item):
+    refresh = item.get("statpal_refresh") or {}
+    return refresh.get("api_usage") or _empty_api_usage()
+
+
+def _slip_api_usage(items):
+    usage = _merge_api_usage(*(_selection_api_usage(item) for item in items))
+    usage["call_budget_note"] = (
+        "Counts only StatPal snapshot refresh calls made during this review. "
+        "Cache hits and existing mapped fixtures do not spend StatPal calls."
+    )
+    return usage
+
+
 def _float_or_none(value):
     try:
         if value in (None, ""):
@@ -2130,12 +2179,12 @@ def _selection_original_odds(item):
 
 
 def _selection_suggested_odds(item):
+    if item.get("verdict") == "replace":
+        return _float_or_none((item.get("replacement_market") or {}).get("odds"))
     if item.get("status") != "analysed":
         return None
     if item.get("verdict") == "remove":
         return None
-    if item.get("verdict") == "replace":
-        return _float_or_none((item.get("replacement_market") or {}).get("odds"))
     return _selection_original_odds(item) or _float_or_none((item.get("selected_market") or {}).get("odds"))
 
 
@@ -2164,26 +2213,37 @@ def _combined_probability(scores):
 
 
 def _optimized_leg_score(item):
+    if item.get("verdict") == "replace":
+        return _float_or_none((item.get("replacement_market") or {}).get("advisory_score"))
     if item.get("status") != "analysed":
         return None
     if item.get("verdict") == "remove":
         return None
-    if item.get("verdict") == "replace":
-        return _float_or_none((item.get("replacement_market") or {}).get("advisory_score"))
     return _float_or_none(item.get("advisory_score") or (item.get("selected_market") or {}).get("advisory_score"))
 
 
 def _ticket_health_summary(score, risk_level, remove_count, replace_count, caution_count, unverified_count):
     weak_count = remove_count + replace_count
-    if unverified_count and not weak_count:
-        return f"{unverified_count} leg(s) still need verification before this ticket is reliable."
+    parts = []
+    if replace_count:
+        parts.append(f"{replace_count} {_plural(replace_count, 'pick')} should be replaced")
+    if remove_count:
+        parts.append(f"{remove_count} {_plural(remove_count, 'pick')} should be avoided")
+    if caution_count:
+        parts.append(f"{caution_count} {_plural(caution_count, 'pick')} need caution")
+    if unverified_count:
+        parts.append(f"{unverified_count} {_plural(unverified_count, 'pick')} need review")
+    if parts:
+        return "This ticket is risky. " + ", ".join(parts) + "."
     if risk_level == "high":
-        if weak_count:
-            return f"This ticket is risky. {weak_count} pick(s) need attention."
-        return f"This ticket is risky. {caution_count} pick(s) need caution."
+        return f"This ticket is risky. {weak_count or caution_count} pick(s) need attention."
     if risk_level == "medium":
         return f"This ticket is playable, but {replace_count + caution_count} leg(s) need attention."
     return "This ticket looks healthy from the current Match Checker analysis."
+
+
+def _plural(value, singular, plural=None):
+    return singular if int(value or 0) == 1 else (plural or f"{singular}s")
 
 
 def _ticket_health_label(score):
@@ -2197,6 +2257,19 @@ def _ticket_health_label(score):
     if score >= 20:
         return "Poor"
     return "Very Poor"
+
+
+def _ticket_issue_text(replace_count=0, remove_count=0, caution_count=0, unverified_count=0):
+    parts = []
+    if replace_count:
+        parts.append(f"{replace_count} {_plural(replace_count, 'pick')} to replace")
+    if remove_count:
+        parts.append(f"{remove_count} {_plural(remove_count, 'pick')} to avoid")
+    if caution_count:
+        parts.append(f"{caution_count} {_plural(caution_count, 'pick')} to treat carefully")
+    if unverified_count:
+        parts.append(f"{unverified_count} {_plural(unverified_count, 'pick')} needing review")
+    return ", ".join(parts)
 
 
 def _public_risk_label(value):
@@ -2244,14 +2317,27 @@ def _public_verdict_object(verdict, submitted_market=None):
     }
 
 
+def _public_market_meaning(market_name):
+    descriptor = describe_market(market_name)
+    for option in SLIP_REVIEW_MARKET_OPTIONS:
+        if _market_matches(market_name, option.get("value")):
+            return option.get("meaning") or descriptor.canonical
+    if descriptor.family == "unknown":
+        return ""
+    return descriptor.canonical
+
+
 def _public_market_pick(market, *, fallback_market="", fallback_odds=None):
     if not market and not fallback_market:
         return None
     odds_source = (market or {}).get("odds_source", "")
     odds_status = "estimated" if str(odds_source).lower() == "estimated" else "verified" if market else ""
     score = _float_or_none((market or {}).get("advisory_score"))
+    market_name = (market or {}).get("market") or fallback_market
     return {
-        "market": (market or {}).get("market") or fallback_market,
+        "market": market_name,
+        "label": market_name,
+        "meaning": (market or {}).get("meaning") or _public_market_meaning(market_name),
         "confidence": (market or {}).get("final_confidence") or (market or {}).get("confidence"),
         "odds": _float_or_none((market or {}).get("odds")) if market else fallback_odds,
         "score": score,
@@ -2303,10 +2389,28 @@ def _public_why_from_card(card):
     if alternative.get("reason"):
         why.append(alternative["reason"])
         codes.append("better_alternative")
+    statpal_message = (card.get("statpal_advisory") or {}).get("message")
+    if statpal_message:
+        why.append(statpal_message)
+        codes.append("statpal_advisory")
     if not why and card.get("message"):
         why.append(card["message"])
         codes.append("model_message")
     return why[:4], list(dict.fromkeys(codes))[:6]
+
+
+def _public_selection_risk(verdict, pick):
+    score = _float_or_none((pick or {}).get("score"))
+    status_value = str((pick or {}).get("status") or "").lower()
+    if verdict in {"replace", "remove"}:
+        return "high"
+    if verdict in {"unmatched", "unmatched_market", "pending_analysis", "expired"}:
+        return "unknown"
+    if status_value == "avoid" or (score is not None and score < 55):
+        return "high"
+    if verdict == "caution" or status_value == "caution" or (score is not None and score < 66):
+        return "medium"
+    return "low"
 
 
 def _selection_strength_score(item):
@@ -2388,6 +2492,8 @@ def _selection_card(item):
         "message": item.get("message", ""),
         "why_risky": (selected_market.get("advisory_warnings") or selected_market.get("risk_flags") or [])[:4],
         "warnings": (selected_market.get("advisory_warnings") or selected_market.get("risk_flags") or [])[:6],
+        "statpal_advisory": item.get("statpal_advisory") or selected_market.get("statpal_advisory") or {},
+        "statpal_context": item.get("statpal_context") or {},
     }
 
 
@@ -2403,29 +2509,41 @@ def _public_selection_card(item):
         ai_pick = _public_market_pick(selected_market, fallback_market=item.get("submitted_market"), fallback_odds=_selection_original_odds(item))
     if ai_pick:
         ai_pick["recommendation_strength"] = _public_recommendation_strength(ai_pick)
+    if verdict != "replace":
+        card = {**card, "alternative": None}
     why, reason_codes = _public_why_from_card(card)
+    your_pick = {
+        "market": item.get("submitted_market"),
+        "label": item.get("submitted_market"),
+        "meaning": _public_market_meaning(item.get("submitted_market")),
+        "confidence": card.get("confidence"),
+        "odds": card.get("odds"),
+        "score": card.get("advisory_score"),
+        "status": card.get("advisory_status") or _match_checker_status(card.get("advisory_score") or 0),
+    }
+    risk_level = _public_selection_risk(verdict, your_pick)
+    technical_ref = {
+        "status": item.get("status"),
+        "match_resolution_score": card.get("match_resolution_score"),
+        "market_recognized": (item.get("market_taxonomy") or {}).get("recognized"),
+        "market_core_supported": (item.get("market_taxonomy") or {}).get("core_supported"),
+        "statpal_snapshot_types": sorted(((card.get("statpal_context") or {}).get("snapshots") or {}).keys()),
+        "has_technical_details": True,
+    }
+    if card.get("match_id"):
+        technical_ref["match_id"] = card.get("match_id")
     return {
         "id": card.get("match_id") or item.get("match"),
         "match": card.get("fixture") or card.get("match"),
         "match_id": card.get("match_id", ""),
-        "your_pick": {
-            "market": item.get("submitted_market"),
-            "confidence": card.get("confidence"),
-            "odds": card.get("odds"),
-            "score": card.get("advisory_score"),
-            "status": card.get("advisory_status") or _match_checker_status(card.get("advisory_score") or 0),
-        },
+        "your_pick": your_pick,
         "verdict": _public_verdict_object(verdict, submitted_market=item.get("submitted_market")),
-        "risk_level": str(card.get("risk_level") or "unknown").lower(),
-        "risk": _public_risk_label(card.get("risk_level")),
+        "risk_level": risk_level,
+        "risk": _public_risk_label(risk_level),
         "ai_pick": ai_pick,
         "why": why,
         "reason_codes": reason_codes,
-        "technical_ref": {
-            "status": item.get("status"),
-            "match_resolution_score": card.get("match_resolution_score"),
-            "has_technical_details": True,
-        },
+        "technical_ref": technical_ref,
     }
 
 
@@ -2479,6 +2597,7 @@ def _slip_intelligence(results):
         if optimized_success is not None and original_success is not None
         else None
     )
+    api_usage = _slip_api_usage(enriched)
 
     if remove_items:
         verdict = f"Remove {len(remove_items)} leg(s) before trusting this slip."
@@ -2534,7 +2653,7 @@ def _slip_intelligence(results):
     ]
     ticket_impact = {
         "message": (
-            f"Replacing or removing {len(replace_items) + len(remove_items)} risky pick(s) improves the estimated ticket success rate."
+            f"Changing {len(replace_items) + len(remove_items)} risky {_plural(len(replace_items) + len(remove_items), 'pick')} improves the estimated ticket success rate."
             if remove_items or replace_items
             else "No major risky picks were found in the analysed selections."
         ),
@@ -2546,32 +2665,45 @@ def _slip_intelligence(results):
     verdict_code = "review"
     verdict_label = "Review ticket"
     verdict_message = verdict
+    issue_text = _ticket_issue_text(
+        replace_count=len(replace_items),
+        remove_count=len(remove_items),
+        caution_count=len(caution_items),
+        unverified_count=len(unverified_items),
+    )
     if remove_items and replace_items:
         verdict_code = "replace_or_remove"
-        verdict_label = f"Change {len(remove_items) + len(replace_items)} picks"
-        verdict_message = f"{len(remove_items) + len(replace_items)} submitted pick(s) need attention."
+        change_count = len(remove_items) + len(replace_items)
+        verdict_label = f"Change {change_count} {_plural(change_count, 'pick')}"
+        verdict_message = f"This ticket has {issue_text}."
     elif remove_items:
         verdict_code = "avoid_risky_picks"
-        verdict_label = f"Avoid {len(remove_items)} picks"
-        verdict_message = f"{len(remove_items)} submitted pick(s) are too risky."
+        verdict_label = f"Avoid {len(remove_items)} {_plural(len(remove_items), 'pick')}"
+        verdict_message = f"This ticket has {issue_text}."
     elif replace_items:
         verdict_code = "replace_picks" if len(replace_items) != len(analysed) else "replace_all"
-        verdict_label = f"Replace {len(replace_items)} picks" if len(replace_items) != len(analysed) else f"Replace all {len(replace_items)} picks"
+        verdict_label = (
+            f"Replace {len(replace_items)} {_plural(len(replace_items), 'pick')}"
+            if len(replace_items) != len(analysed)
+            else f"Replace all {len(replace_items)} {_plural(len(replace_items), 'pick')}"
+        )
         verdict_message = (
             "Every submitted pick has a safer or stronger alternative."
             if len(replace_items) == len(analysed)
-            else f"{len(replace_items)} submitted pick(s) have safer alternatives."
+            else f"This ticket has {issue_text}."
         )
     elif caution_items:
         verdict_code = "play_with_caution"
         verdict_label = "Play with caution"
-        verdict_message = f"{len(caution_items)} pick(s) need caution."
+        verdict_message = f"This ticket has {issue_text}."
     elif keep_items and len(keep_items) == len(analysed) and not unverified_items:
         verdict_code = "playable"
         verdict_label = "Playable"
         verdict_message = "This ticket looks clean from the current analysis."
 
     public_review = {
+        "contract_version": "match_checker_public_v1",
+        "response_mode": "public",
         "ticket": {
             "title": "Slip Review",
             "total_legs": len(enriched),
@@ -2636,6 +2768,7 @@ def _slip_intelligence(results):
         "improvement": improvement_text,
         "improvement_percent": improvement,
         "learning_tracking": learning_tracking,
+        "api_usage": api_usage,
         "original_combined_odds": original_combined,
         "suggested_combined_odds": suggested_combined,
         "strongest_legs": [_selection_card(item) for item in strongest],
@@ -2669,6 +2802,7 @@ def _manual_review_summary(results):
         "improvement": intelligence.get("improvement", ""),
         "improvement_percent": intelligence.get("improvement_percent"),
         "learning_tracking": intelligence.get("learning_tracking", {}),
+        "api_usage": intelligence.get("api_usage", _empty_api_usage()),
         "public": intelligence.get("public", {}),
         "intelligence": intelligence,
     }
@@ -2746,10 +2880,12 @@ def _empty_slip_summary(verdict, *, task_id="", error=""):
         "expired_count": 0,
         "unmatched_count": 0,
         "pending_analysis_count": 0,
+        "api_usage": _empty_api_usage(),
         "intelligence": {
             "overall_score": 0,
             "risk_level": "medium" if not error else "high",
             "verdict": verdict,
+            "api_usage": _empty_api_usage(),
             "original_combined_odds": None,
             "suggested_combined_odds": None,
             "strongest_legs": [],
@@ -2806,15 +2942,14 @@ def _slip_review_payload(review, *, include_selections=True, public_only=False):
     summary = review.summary or {}
     public_payload = summary.get("public") or (summary.get("intelligence") or {}).get("public", {})
     if public_only:
-        return {
+        return _api_response_payload({
             "id": review.id,
             "source": review.source,
             "status": review.status,
             "title": review.title,
-            "public": public_payload,
             "created_at": review.created_at,
             "updated_at": review.updated_at,
-        }
+        } | public_payload)
     payload = {
         "id": review.id,
         "source": review.source,
@@ -2831,7 +2966,7 @@ def _slip_review_payload(review, *, include_selections=True, public_only=False):
             _slip_selection_payload(selection)
             for selection in review.selections.all().order_by("order", "id")
         ]
-    return payload
+    return _api_response_payload(payload)
 
 
 def _provider_match_date(selection):
@@ -2915,6 +3050,11 @@ def _selection_expiry(selection):
 def _analyse_manual_selection(selection, *, days, request=None, force_fresh=False):
     match_text = selection.get("match", "")
     requested_market = selection.get("market", "")
+    market_descriptor = describe_market(
+        requested_market,
+        market_name=((selection.get("market_taxonomy") or {}).get("raw") or ""),
+    )
+    market_taxonomy = market_descriptor.to_dict()
     provider_date = _provider_match_date(selection)
     provider_kickoff = _provider_kickoff_datetime(selection)
     provider_metadata = _provider_metadata(selection)
@@ -2935,6 +3075,7 @@ def _analyse_manual_selection(selection, *, days, request=None, force_fresh=Fals
         return {
             "match": match_text,
             "submitted_market": requested_market,
+            "market_taxonomy": market_taxonomy,
             "status": "expired",
             "verdict": "expired",
             "message": expiry.get("message"),
@@ -3008,6 +3149,7 @@ def _analyse_manual_selection(selection, *, days, request=None, force_fresh=Fals
         return {
             "match": match_text,
             "submitted_market": requested_market,
+            "market_taxonomy": market_taxonomy,
             "status": "unmatched",
             "verdict": "unmatched",
             "message": "We could not find this fixture in the upcoming fixture cache or API-Football search window.",
@@ -3023,6 +3165,7 @@ def _analyse_manual_selection(selection, *, days, request=None, force_fresh=Fals
         return {
             "match": match_text,
             "submitted_market": requested_market,
+            "market_taxonomy": market_taxonomy,
             "status": "ambiguous_match",
             "verdict": "unmatched",
             "message": "We found possible fixtures, but none were clear enough to analyse automatically.",
@@ -3062,6 +3205,7 @@ def _analyse_manual_selection(selection, *, days, request=None, force_fresh=Fals
         return {
             "match": match_text,
             "submitted_market": requested_market,
+            "market_taxonomy": market_taxonomy,
             "status": "matched_unscored",
             "verdict": "pending_analysis",
             "message": "Fixture matched, but on-demand analysis could not produce market predictions yet.",
@@ -3075,31 +3219,90 @@ def _analyse_manual_selection(selection, *, days, request=None, force_fresh=Fals
         }
 
     markets = game.get("markets") or []
-    canonical_requested_market = _canonical_market_name(requested_market)
+    statpal_provider_match_id = (
+        provider_metadata.get("provider_event_id")
+        if str(provider_metadata.get("provider") or "").lower() == "statpal"
+        else ""
+    )
+    statpal_refresh = statpal_snapshot_service.refresh_fixture_snapshots(
+        match_id=candidate.get("match_id"),
+        provider_match_id=statpal_provider_match_id,
+        provider_competition_id=provider_metadata.get("provider_competition_id") or "",
+    )
+    statpal_context = statpal_snapshot_service.fixture_context(
+        match_id=candidate.get("match_id"),
+        provider_match_id=statpal_provider_match_id,
+    )
+    statpal_advisory = statpal_market_advisory.evaluate_market(
+        market_descriptor,
+        fixture={**game, "statpal_context": statpal_context},
+        provider_payload=selection.get("provider_payload") or {},
+        statpal_payload=selection.get("statpal_payload"),
+    )
+    canonical_requested_market = market_descriptor.canonical
     analysis_market = _market_for_fixture_orientation(canonical_requested_market, candidate)
     selected_market = next((market for market in markets if _market_matches(analysis_market, market.get("market"))), None)
     if not selected_market:
+        replacement_market = _replacement_market_for_slip(game)
+        advisory_score = statpal_advisory.get("score")
+        advisory_status = statpal_advisory.get("status") if advisory_score is not None else "needs_data"
+        advisory_warnings = list(statpal_advisory.get("warnings") or [])
+        if market_descriptor.recognized and advisory_score is not None:
+            advisory_basis = statpal_advisory.get("basis") or "statpal_advisory"
+        else:
+            advisory_basis = "unsupported_market"
+            advisory_warnings = advisory_warnings or ["unsupported_market"]
         return {
             "match": match_text,
             "submitted_market": requested_market,
+            "market_taxonomy": market_taxonomy,
             "analysis_market": analysis_market,
             "fixture_orientation": candidate.get("match_orientation", ""),
             "status": "market_not_found",
-            "verdict": "unmatched_market",
-            "message": "Fixture matched, but that market is not available in the scored markets for this game.",
+            "verdict": "replace" if replacement_market else "unmatched_market",
+            "message": (
+                "We recognized this market, but it is not scored directly yet, so we selected the best available alternative for this match."
+                if market_descriptor.recognized
+                else "This market is not recognized yet, so we selected the best available alternative for this match."
+            )
+            if replacement_market
+            else (
+                "We recognized this market, but it is not available in the scored markets for this game yet."
+                if market_descriptor.recognized
+                else "Fixture matched, but that market is not available in the scored markets for this game."
+            ),
             "matched_fixture": candidate,
             "available_markets": [market.get("market") for market in markets],
+            "selected_market": {
+                "market": requested_market,
+                "market_taxonomy": market_taxonomy,
+                "confidence": None,
+                "final_confidence": None,
+                "advisory_score": advisory_score,
+                "advisory_status": advisory_status,
+                "advisory_basis": advisory_basis,
+                "advisory_warnings": advisory_warnings or ["market_recognized_not_scored"],
+                "advisory_evidence": statpal_advisory.get("evidence") or {},
+                "statpal_advisory": statpal_advisory,
+            },
             "best_market": game.get("best_market"),
             "recommended_market": game.get("recommended_market"),
+            "replacement_market": replacement_market,
             "fixture_resolution": {
                 "status": "market_not_found",
                 "attempts": resolver_trace,
             },
+            "statpal_refresh": statpal_refresh,
+            "statpal_context": statpal_context,
+            "statpal_advisory": statpal_advisory,
         }
 
     best_market = game.get("best_market") or game.get("top_market")
     recommended_market = game.get("recommended_market")
     selected_market = _with_match_checker_advisory(selected_market)
+    if selected_market:
+        selected_market["market_taxonomy"] = market_taxonomy
+        selected_market = _with_statpal_advisory(selected_market, statpal_advisory)
     best_market = _with_match_checker_advisory(best_market)
     recommended_market = _with_match_checker_advisory(recommended_market)
     replacement_market = _replacement_market_for_slip(game, selected_market=selected_market)
@@ -3107,6 +3310,7 @@ def _analyse_manual_selection(selection, *, days, request=None, force_fresh=Fals
     return {
         "match": match_text,
         "submitted_market": requested_market,
+        "market_taxonomy": market_taxonomy,
         "analysis_market": analysis_market,
         "fixture_orientation": candidate.get("match_orientation", ""),
         "status": "analysed",
@@ -3127,6 +3331,9 @@ def _analyse_manual_selection(selection, *, days, request=None, force_fresh=Fals
         "best_market": best_market,
         "recommended_market": recommended_market,
         "replacement_market": replacement_market,
+        "statpal_refresh": statpal_refresh,
+        "statpal_context": statpal_context,
+        "statpal_advisory": statpal_advisory,
         "possible_matches": candidates,
         "on_demand_analysis": on_demand,
         "fixture_resolution": {
@@ -3203,7 +3410,7 @@ def process_slip_review_import(review_id):
             }
         )
         review.save(update_fields=["submitted_payload", "updated_at"])
-        return _json_safe({"review_id": review.id, "status": review.status, **summary})
+        return _api_response_payload({"review_id": review.id, "status": review.status, **summary})
     except Exception as exc:
         review.status = SlipReview.Status.FAILED
         review.summary = _empty_slip_summary("Slip import failed.", task_id=(review.summary or {}).get("task_id", ""), error=exc)
@@ -3241,14 +3448,14 @@ class ManualSlipReviewView(APIView):
             results=results,
         )
         return Response(
-            {
+            _api_response_payload({
                 "id": review.id,
                 "source": review.source,
                 "status": review.status,
                 "public": summary.get("public", {}),
                 **summary,
                 "selections": safe_results,
-            }
+            })
         )
 
 
@@ -3377,13 +3584,115 @@ class SlipReviewOptionsView(APIView):
         )
 
 
+class StatPalFixtureContextView(APIView):
+    permission_classes = [IsAuthenticated]
+    serializer_class = StatPalFixtureContextResponseSerializer
+
+    @extend_schema(
+        summary="StatPal fixture context",
+        description=(
+            "Authenticated endpoint for Match Checker screens. Returns compact StatPal snapshot summaries "
+            "for a fixture, with an optional non-forced refresh before reading the context."
+        ),
+        tags=["Slip Reviews"],
+        parameters=[StatPalFixtureContextQuerySerializer],
+        responses={200: StatPalFixtureContextResponseSerializer},
+    )
+    def get(self, request):
+        query = StatPalFixtureContextQuerySerializer(data=request.query_params)
+        query.is_valid(raise_exception=True)
+        data = query.validated_data
+        match_id = str(data.get("match_id") or "")
+        provider_match_id = str(data.get("provider_match_id") or "")
+        refreshed = None
+
+        if data.get("refresh"):
+            refreshed = statpal_snapshot_service.refresh_fixture_snapshots(
+                match_id=match_id,
+                provider_match_id=provider_match_id,
+                force=False,
+            )
+
+        context = statpal_snapshot_service.fixture_context(
+            match_id=match_id,
+            provider_match_id=provider_match_id,
+        )
+        payload = {
+            "match_id": match_id,
+            "provider_match_id": provider_match_id,
+            "context": context,
+        }
+        if refreshed is not None:
+            payload["refreshed"] = refreshed
+        return Response(_api_response_payload(payload))
+
+
+class StatPalFixtureRefreshView(APIView):
+    permission_classes = [IsAdminUser]
+    serializer_class = StatPalFixtureContextResponseSerializer
+
+    @extend_schema(
+        summary="Refresh StatPal fixture context",
+        description=(
+            "Admin-only endpoint. Refreshes selected StatPal fixture snapshots and returns the compact "
+            "context that Match Checker will use. Raw provider payloads remain internal."
+        ),
+        tags=["Slip Reviews"],
+        request=StatPalFixtureRefreshRequestSerializer,
+        responses={200: StatPalFixtureContextResponseSerializer},
+        examples=[
+            OpenApiExample(
+                "Refresh one fixture",
+                value={
+                    "match_id": "1581037",
+                    "provider_match_id": "statpal-match-1",
+                    "provider_competition_id": "3037",
+                    "snapshot_types": ["lineups", "predictions", "prematch_odds"],
+                    "force": True,
+                },
+                request_only=True,
+            )
+        ],
+    )
+    def post(self, request):
+        serializer = StatPalFixtureRefreshRequestSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+        match_id = str(data.get("match_id") or "")
+        provider_match_id = str(data.get("provider_match_id") or "")
+        refreshed = statpal_snapshot_service.refresh_fixture_snapshots(
+            match_id=match_id,
+            provider_match_id=provider_match_id,
+            provider_competition_id=str(data.get("provider_competition_id") or ""),
+            force=bool(data.get("force")),
+            snapshot_types=data.get("snapshot_types"),
+        )
+        context = statpal_snapshot_service.fixture_context(
+            match_id=match_id,
+            provider_match_id=provider_match_id,
+        )
+        return Response(
+            _api_response_payload(
+                {
+                    "match_id": match_id,
+                    "provider_match_id": provider_match_id,
+                    "refreshed": refreshed,
+                    "context": context,
+                }
+            )
+        )
+
+
 class SlipReviewDetailView(APIView):
     permission_classes = [IsAuthenticated]
     serializer_class = SlipReviewDetailResponseSerializer
 
     @extend_schema(
         summary="Slip review detail",
-        description="Authenticated user endpoint. Returns one previous slip review with all reviewed selections.",
+        description=(
+            "Authenticated user endpoint. Returns one previous slip review. Use `?view=public` for the "
+            "frontend-ready bettor response; omit it for the full technical/internal payload."
+        ),
         tags=["Slip Reviews"],
         responses={200: SlipReviewDetailResponseSerializer},
     )
@@ -4163,7 +4472,7 @@ class TaskStatusView(APIView):
             "error": "",
         }
         if task.successful():
-            payload["result"] = task.result
+            payload["result"] = _api_response_payload(task.result)
         elif task.failed():
             payload["error"] = str(task.result)
         return Response(payload, status=status.HTTP_200_OK)

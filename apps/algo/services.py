@@ -34,6 +34,7 @@ from .recommendation_policy import (
     assess_recommendation,
 )
 from .council import CAUTION, REJECT, council_review
+from .market_taxonomy import describe_market
 
 
 log = logging.getLogger(__name__)
@@ -223,7 +224,82 @@ class FixtureSearchService:
                     errors.append({"date": target_date.isoformat(), "error": str(exc)})
                     continue
                 total += self._upsert_fixtures(fixtures, target_date)
+                statpal_result = self.sync_statpal_daily(target_date=target_date)
+                total += statpal_result.get("synced", 0)
+                errors.extend(statpal_result.get("errors", []))
         return {"synced": total, "errors": errors}
+
+    def sync_statpal_daily(self, *, target_date):
+        from .statpal import StatPalConfigurationError, StatPalError
+        from .statpal_provider import StatPalDailyMatchProvider
+
+        try:
+            fixtures = StatPalDailyMatchProvider().fixtures_for_date(target_date)
+        except StatPalConfigurationError:
+            return {"synced": 0, "errors": []}
+        except StatPalError as exc:
+            return {"synced": 0, "errors": [{"date": target_date.isoformat(), "provider": "statpal", "error": str(exc)}]}
+        except Exception as exc:
+            return {"synced": 0, "errors": [{"date": target_date.isoformat(), "provider": "statpal", "error": str(exc)}]}
+        return {"synced": self._upsert_fixtures(fixtures, target_date), "errors": []}
+
+    def _attach_statpal_fixture_context(self, fixtures, target_date):
+        self.sync_statpal_daily(target_date=target_date)
+        statpal_rows = list(
+            FixtureCache.objects.filter(match_date=target_date, source="statpal")
+            .only("match_id", "home_team_normalized", "away_team_normalized", "api_payload")
+        )
+        if not statpal_rows:
+            return fixtures
+        by_pair = {
+            (row.home_team_normalized, row.away_team_normalized): row
+            for row in statpal_rows
+            if row.home_team_normalized and row.away_team_normalized
+        }
+        enriched = []
+        for fixture in fixtures:
+            item = dict(fixture)
+            key = (
+                normalize_fixture_text(item.get("hname") or item.get("home_team")),
+                normalize_fixture_text(item.get("aname") or item.get("away_team")),
+            )
+            row = by_pair.get(key)
+            if row:
+                payload = row.api_payload or {}
+                item["statpal_match_id"] = row.match_id
+                item["statpal_provider_match_id"] = payload.get("provider_match_id") or row.match_id.replace("statpal:", "", 1)
+                item["statpal_provider_competition_id"] = payload.get("provider_competition_id") or payload.get("code") or ""
+                item["statpal_payload"] = payload
+            enriched.append(item)
+        return enriched
+
+    def _hydrate_statpal_scoring_context(self, fixture):
+        provider_match_id = str(fixture.get("statpal_provider_match_id") or "").strip()
+        provider_competition_id = str(fixture.get("statpal_provider_competition_id") or fixture.get("code") or "").strip()
+        match_id = str(fixture.get("match_id") or fixture.get("aps_id") or "").strip()
+        if not provider_match_id and not match_id:
+            return fixture
+
+        from .statpal_snapshots import statpal_snapshot_service
+
+        try:
+            refresh = statpal_snapshot_service.refresh_fixture_snapshots(
+                match_id=match_id,
+                provider_match_id=provider_match_id,
+                provider_competition_id=provider_competition_id,
+            )
+            context = statpal_snapshot_service.fixture_context(
+                match_id=match_id,
+                provider_match_id=provider_match_id,
+            )
+        except Exception as exc:
+            refresh = {"errors": [{"provider": "statpal", "error": str(exc)}]}
+            context = {"available": False, "snapshots": {}}
+
+        enriched = dict(fixture)
+        enriched["statpal_refresh"] = refresh
+        enriched["statpal_context"] = context
+        return enriched
 
     def _upsert_fixtures(self, fixtures, target_date):
         count = 0
@@ -257,7 +333,8 @@ class FixtureSearchService:
                     "league_type": item.get("league_type") or "",
                     "kickoff": item.get("kickoff") or "",
                     "kickoff_utc": kickoff_utc,
-                    "api_payload": json_safe(item),
+                    "api_payload": json_safe(item.get("api_payload") or item),
+                    "source": item.get("source") or "api_football",
                 },
             )
             count += 1
@@ -1008,11 +1085,13 @@ class SportyBetShareImporter:
         market = self._market_name(item, outcome)
         if not market:
             return None
+        market_descriptor = describe_market(market)
         tournament = (((outcome.get("sport") or {}).get("category") or {}).get("tournament") or {}).get("name", "")
         return {
             "provider_event_id": item.get("eventId") or outcome.get("eventId") or "",
             "match": f"{home} vs {away}",
             "market": market,
+            "market_taxonomy": market_descriptor.to_dict(),
             "home_team": home,
             "away_team": away,
             "competition": tournament,
@@ -1028,10 +1107,12 @@ class SportyBetShareImporter:
         market = self._market_name({}, {"markets": markets})
         if not home or not away or not market:
             return None
+        market_descriptor = describe_market(market)
         return {
             "provider_event_id": outcome.get("eventId") or "",
             "match": f"{home} vs {away}",
             "market": market,
+            "market_taxonomy": market_descriptor.to_dict(),
             "home_team": home,
             "away_team": away,
             "competition": (((outcome.get("sport") or {}).get("category") or {}).get("tournament") or {}).get("name", ""),
@@ -1075,25 +1156,13 @@ class SportyBetShareImporter:
         }.get(str(outcome_id), "")
 
     def _canonical_market(self, market_name, outcome_name, specifier):
-        market_text = normalize_fixture_text(market_name)
-        outcome_text = normalize_fixture_text(outcome_name)
-        total_match = re.search(r"total=([0-9.]+)", str(specifier or ""))
-        line = total_match.group(1) if total_match else ""
-        if "over under" in market_text or "total goals" in market_text or line:
-            if "under" in outcome_text:
-                return f"Under {line}" if line else "Under"
-            if "over" in outcome_text:
-                return f"Over {line}" if line else "Over"
-        if "match result" in market_text or outcome_text in {"home", "away", "draw"}:
-            if outcome_text == "home":
-                return "Home Win"
-            if outcome_text == "away":
-                return "Away Win"
-            if outcome_text == "draw":
-                return "Draw"
-        if "both teams" in market_text and "yes" in outcome_text:
-            return "GG / BTTS Yes"
-        return outcome_name.strip()
+        descriptor = describe_market(
+            outcome_name or market_name,
+            market_name=market_name,
+            outcome_name=outcome_name,
+            specifier=specifier,
+        )
+        return descriptor.canonical if descriptor.recognized else outcome_name.strip()
 
     def _selection_odds(self, item, outcome):
         market_id = str(item.get("marketId") or "")
@@ -1238,10 +1307,12 @@ class BetanoBetslipImporter:
         market = self._canonical_market(leg)
         if not home or not away or not market:
             return None
+        market_descriptor = describe_market(market)
         return {
             "provider_event_id": str(leg.get("eventId") or ""),
             "match": f"{home} vs {away}",
             "market": market,
+            "market_taxonomy": market_descriptor.to_dict(),
             "home_team": home,
             "away_team": away,
             "competition": str(leg.get("league") or leg.get("leagueName") or ""),
@@ -1264,29 +1335,19 @@ class BetanoBetslipImporter:
         description = str(leg.get("description") or "")
         market = str(leg.get("market") or "")
         market_sort = str(leg.get("marketSort") or "")
-        text = normalize_fixture_text(f"{market} {description} {market_sort}")
-        total_match = re.search(r"(over|under)\s+([0-9]+(?:\.[0-9]+)?)", description, flags=re.IGNORECASE)
-        if total_match:
-            side = total_match.group(1).title()
-            line = total_match.group(2)
-            return f"{side} {line}"
-        if "over under" in text or "total goals" in text:
-            line_match = re.search(r"([0-9]+(?:\.[0-9]+)?)", description)
-            if "under" in text and line_match:
-                return f"Under {line_match.group(1)}"
-            if "over" in text and line_match:
-                return f"Over {line_match.group(1)}"
-        if "both teams" in text and "yes" in text:
-            return "GG / BTTS Yes"
-        if "match result" in text or market_sort in {"MRES", "MR12"}:
-            event_home, event_away = self._teams_from_event_name(leg.get("eventName"))
+        event_home, event_away = self._teams_from_event_name(leg.get("eventName"))
+        outcome = description
+        if market_sort in {"MRES", "MR12"}:
             if description == event_home:
-                return "Home Win"
-            if description == event_away:
-                return "Away Win"
-            if normalize_fixture_text(description) == "draw":
-                return "Draw"
-        return description.strip()
+                outcome = "Home"
+            elif description == event_away:
+                outcome = "Away"
+        descriptor = describe_market(
+            description,
+            market_name=f"{market} {market_sort}",
+            outcome_name=outcome,
+        )
+        return descriptor.canonical if descriptor.recognized else description.strip()
 
 
 class AlgoRunnerService:
@@ -2038,6 +2099,8 @@ class AlgoRunnerService:
                 bankroll = algo_runner.get_bankroll(None)
                 fixtures = algo_runner.fetch_aps_fixtures(algo_run.target_date.isoformat())
                 fixtures = self._limit_fixtures(fixtures)
+                fixtures = self._attach_statpal_fixture_context(fixtures, algo_run.target_date)
+                fixtures = self._attach_statpal_fixture_context(fixtures, algo_run.target_date)
 
             Pick.objects.filter(run=algo_run).delete()
             AlgoFixture.objects.filter(run=algo_run).delete()
@@ -2123,6 +2186,7 @@ class AlgoRunnerService:
 
                 algo_runner.clear_runtime_caches()
                 source_payload = dict(fixture.source_payload or {})
+                source_payload = self._hydrate_statpal_scoring_context(source_payload)
                 scored_fixture, confs, real_odds = algo_runner.score_aps_fixture_for_pipeline(source_payload)
                 summary = algo_runner.serialize_fixture_summaries(
                     [scored_fixture],
@@ -2348,6 +2412,7 @@ class AlgoRunnerService:
                 markets_65_plus = 0
                 for index, fixture in enumerate(fixtures, start=1):
                     try:
+                        fixture = self._hydrate_statpal_scoring_context(fixture)
                         scored_fixture, confs, real_odds = algo_runner.score_aps_fixture_for_pipeline(fixture)
                         summary = algo_runner.serialize_fixture_summaries(
                             [scored_fixture],

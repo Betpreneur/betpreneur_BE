@@ -269,6 +269,88 @@ class TeamAliasMap(models.Model):
         return f"{provider}{self.alias} -> {self.canonical_name}"
 
 
+class ProviderTeamMap(models.Model):
+    provider = models.CharField(max_length=30)
+    provider_team_id = models.CharField(max_length=120)
+    provider_team_name = models.CharField(max_length=255)
+    provider_team_normalized = models.CharField(max_length=255, blank=True)
+    internal_team_id = models.CharField(max_length=120, blank=True)
+    internal_team_name = models.CharField(max_length=255, blank=True)
+    internal_team_normalized = models.CharField(max_length=255, blank=True)
+    api_team_id = models.PositiveIntegerField(null=True, blank=True)
+    country = models.CharField(max_length=100, blank=True)
+    confidence = models.DecimalField(max_digits=5, decimal_places=2, default=100)
+    resolution_method = models.CharField(max_length=80, default="provider_id")
+    active = models.BooleanField(default=True)
+    payload = models.JSONField(default=dict, blank=True)
+    verified_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["provider", "provider_team_name"]
+        indexes = [
+            models.Index(fields=["provider", "provider_team_id"]),
+            models.Index(fields=["provider", "provider_team_normalized"]),
+            models.Index(fields=["internal_team_id"]),
+            models.Index(fields=["api_team_id"]),
+            models.Index(fields=["active"]),
+        ]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["provider", "provider_team_id"],
+                name="unique_provider_team_map_provider_team",
+            )
+        ]
+
+    def __str__(self):
+        target = self.internal_team_name or self.api_team_id or self.internal_team_id or "unmapped"
+        return f"{self.provider}: {self.provider_team_name} -> {target}"
+
+
+class ProviderPlayerMap(models.Model):
+    provider = models.CharField(max_length=30)
+    provider_player_id = models.CharField(max_length=120)
+    provider_player_name = models.CharField(max_length=255)
+    provider_player_normalized = models.CharField(max_length=255, blank=True)
+    internal_player_id = models.CharField(max_length=120, blank=True)
+    internal_player_name = models.CharField(max_length=255, blank=True)
+    internal_player_normalized = models.CharField(max_length=255, blank=True)
+    provider_team_id = models.CharField(max_length=120, blank=True)
+    provider_team_name = models.CharField(max_length=255, blank=True)
+    internal_team_id = models.CharField(max_length=120, blank=True)
+    internal_team_name = models.CharField(max_length=255, blank=True)
+    position = models.CharField(max_length=80, blank=True)
+    nationality = models.CharField(max_length=100, blank=True)
+    confidence = models.DecimalField(max_digits=5, decimal_places=2, default=100)
+    resolution_method = models.CharField(max_length=80, default="provider_id")
+    active = models.BooleanField(default=True)
+    payload = models.JSONField(default=dict, blank=True)
+    verified_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["provider", "provider_player_name"]
+        indexes = [
+            models.Index(fields=["provider", "provider_player_id"]),
+            models.Index(fields=["provider", "provider_player_normalized"]),
+            models.Index(fields=["internal_player_id"]),
+            models.Index(fields=["provider_team_id"]),
+            models.Index(fields=["active"]),
+        ]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["provider", "provider_player_id"],
+                name="unique_provider_player_map_provider_player",
+            )
+        ]
+
+    def __str__(self):
+        target = self.internal_player_name or self.internal_player_id or "unmapped"
+        return f"{self.provider}: {self.provider_player_name} -> {target}"
+
+
 class ProviderFixtureMap(models.Model):
     provider = models.CharField(max_length=30)
     provider_event_id = models.CharField(max_length=120)
@@ -307,6 +389,65 @@ class ProviderFixtureMap(models.Model):
 
     def __str__(self):
         return f"{self.provider}: {self.provider_event_id} -> {self.api_fixture_id}"
+
+
+class StatPalFixtureSnapshot(models.Model):
+    class SnapshotType(models.TextChoices):
+        INJURIES_SUSPENSIONS = "injuries_suspensions", "Injuries & Suspensions"
+        TEAM_STATS = "team_stats", "Team Stats"
+        PREMATCH_ODDS = "prematch_odds", "Pre-Match Odds"
+        LIVE_ODDS = "live_odds", "Live Odds"
+        LINEUPS = "lineups", "Lineups"
+        PREDICTIONS = "predictions", "Predictions"
+        DETAILED_STATS = "detailed_stats", "Detailed Stats"
+        RAW = "raw", "Raw"
+
+    provider_fixture = models.ForeignKey(
+        ProviderFixtureMap,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="statpal_snapshots",
+    )
+    fixture = models.ForeignKey(
+        FixtureCache,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="statpal_snapshots",
+    )
+    match_id = models.CharField(max_length=120, blank=True)
+    provider_match_id = models.CharField(max_length=120, blank=True)
+    provider_competition_id = models.CharField(max_length=100, blank=True)
+    snapshot_type = models.CharField(max_length=40, choices=SnapshotType.choices)
+    source_endpoint = models.CharField(max_length=160, blank=True)
+    status = models.CharField(max_length=30, default="available")
+    payload = models.JSONField(default=dict, blank=True)
+    summary = models.JSONField(default=dict, blank=True)
+    fetched_at = models.DateTimeField(null=True, blank=True)
+    expires_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-fetched_at", "-updated_at"]
+        indexes = [
+            models.Index(fields=["match_id", "snapshot_type"]),
+            models.Index(fields=["provider_match_id", "snapshot_type"]),
+            models.Index(fields=["provider_competition_id", "snapshot_type"]),
+            models.Index(fields=["snapshot_type", "status"]),
+            models.Index(fields=["expires_at"]),
+        ]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["match_id", "provider_match_id", "snapshot_type"],
+                name="unique_statpal_snapshot_fixture_type",
+            )
+        ]
+
+    def __str__(self):
+        target = self.match_id or self.provider_match_id or "unmapped"
+        return f"StatPal {self.snapshot_type} for {target}"
 
 
 class SlipReview(models.Model):

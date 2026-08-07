@@ -1027,6 +1027,43 @@ def build_corner_profile(fx):
         "expected_total": round(expected_total, 2),
     }
 
+def _num(value):
+    try:
+        if value in (None, ""):
+            return None
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+def statpal_scoring_context(statpal_context):
+    snapshots = (statpal_context or {}).get("snapshots") or {}
+    data = {"available": bool(snapshots), "flags": []}
+    for key in ("predictions", "detailed_stats", "prematch_odds", "lineups", "injuries_suspensions"):
+        summary = (snapshots.get(key) or {}).get("summary") or {}
+        if summary:
+            data[key] = summary
+
+    injuries = data.get("injuries_suspensions") or {}
+    home_absences = int(((injuries.get("home") or {}).get("to_miss_count") or 0) or 0)
+    away_absences = int(((injuries.get("away") or {}).get("to_miss_count") or 0) or 0)
+    if home_absences + away_absences >= 5:
+        data["flags"].append("statpal_heavy_absences")
+    elif home_absences + away_absences >= 2:
+        data["flags"].append("statpal_absences")
+    if home_absences >= 3:
+        data["flags"].append("statpal_home_absence_risk")
+    if away_absences >= 3:
+        data["flags"].append("statpal_away_absence_risk")
+
+    lineups = data.get("lineups") or {}
+    if lineups:
+        data["flags"].append("statpal_lineup_context")
+    if data.get("predictions"):
+        data["flags"].append("statpal_prediction_context")
+    if data.get("detailed_stats"):
+        data["flags"].append("statpal_xg_context")
+    return data
+
 # ── 19-PARAMETER CONFIDENCE SCORER ───────────────────────────────
 CONF_DEFLATOR = 0.84
 W = {"f1":8,"f2":10,"f3":12,"f4":8,"f5":6,"f6":8,"f7":12,"f8":5,"f9":8,
@@ -1147,11 +1184,33 @@ def score_fixture(hf, af, h2h, real_odds, api_preds=None, corner_profile=None, f
                 ac = round(ac*0.70 + api_ac*0.30)
         except Exception: pass
 
+    statpal = fixture_context.get("statpal") or {}
+    statpal_predictions = statpal.get("predictions") or {}
+    sp_home = _num(statpal_predictions.get("home_win_percent"))
+    sp_draw = _num(statpal_predictions.get("draw_percent"))
+    sp_away = _num(statpal_predictions.get("away_win_percent"))
+    if sp_home is not None or sp_away is not None:
+        if sp_home is not None:
+            hc = round(hc * 0.80 + max(0, min(95, sp_home)) * 0.20)
+        if sp_away is not None:
+            ac = round(ac * 0.80 + max(0, min(95, sp_away)) * 0.20)
+
     # ── GOALS MARKETS — Poisson-grounded formula ─────────────────
     # The expected total is the single most important input.
     # exp_total = home avg scored + away avg scored (the actual matchup total)
     # NOT avg_scored + avg_conceded (that double-counts defence)
     exp_total = hf["avg_scored"] + af["avg_scored"]
+    statpal_detailed = statpal.get("detailed_stats") or {}
+    statpal_expected = (
+        _num(statpal_detailed.get("expected_goals"))
+        or _num(statpal_predictions.get("expected_goals"))
+    )
+    home_xg = _num(statpal_detailed.get("home_xg")) or _num(statpal_predictions.get("home_xg"))
+    away_xg = _num(statpal_detailed.get("away_xg")) or _num(statpal_predictions.get("away_xg"))
+    if statpal_expected is None and home_xg is not None and away_xg is not None:
+        statpal_expected = home_xg + away_xg
+    if statpal_expected is not None and 0.4 <= statpal_expected <= 6.5:
+        exp_total = round(exp_total * 0.65 + statpal_expected * 0.35, 2)
 
     # Poisson P(X>=3) and P(X>=2) given expected total goals
     import math as _math
@@ -1202,6 +1261,12 @@ def score_fixture(hf, af, h2h, real_odds, api_preds=None, corner_profile=None, f
     elif hf["avg_scored"] < 1.0 or af["avg_scored"] < 1.0:
         gg_raw = min(gg_raw, 48)
     gg = min(95, max(10, round(gg_raw * CONF_DEFLATOR)))
+    sp_o25 = _num(statpal_predictions.get("over25_percent"))
+    sp_btts = _num(statpal_predictions.get("btts_percent"))
+    if sp_o25 is not None:
+        o25 = round(o25 * 0.82 + max(0, min(95, sp_o25)) * 0.18)
+    if sp_btts is not None:
+        gg = round(gg * 0.82 + max(0, min(95, sp_btts)) * 0.18)
     hcs  = min(80,round(hf["clean_sheets"]/max(hf["games"],1)*100))
     acs  = min(80,round(af["clean_sheets"]/max(af["games"],1)*100))
     h_draw_rate = hf.get("draws", 0) / max(hf.get("games", 0), 1)
@@ -1214,6 +1279,8 @@ def score_fixture(hf, af, h2h, real_odds, api_preds=None, corner_profile=None, f
         recent_draw_conf = round(recent_draw_conf * (1 - h2h_draw_weight) + (h2d * 100) * h2h_draw_weight)
     residual_draw_conf = max(5, 100 - hc - ac)
     draw_conf = max(5, min(45, round(residual_draw_conf * 0.65 + recent_draw_conf * 0.35)))
+    if sp_draw is not None:
+        draw_conf = max(5, min(55, round(draw_conf * 0.78 + max(0, min(70, sp_draw)) * 0.22)))
     if g >= 6 and h2d >= 0.35:
         draw_conf = max(draw_conf, min(45, round(h2d * 100)))
     elif g >= 6 and h2d >= 0.22 and h2h_avg_goals and h2h_avg_goals <= 2.15:
@@ -1255,6 +1322,9 @@ def score_fixture(hf, af, h2h, real_odds, api_preds=None, corner_profile=None, f
         "over15_margin": round(exp_total - 1.5, 2),
         "over25_margin": round(exp_total - 2.5, 2),
         "under35_margin": round(3.5 - exp_total, 2),
+        "statpal_expected_goals": round(statpal_expected, 2) if statpal_expected is not None else None,
+        "statpal_home_xg": round(home_xg, 2) if home_xg is not None else None,
+        "statpal_away_xg": round(away_xg, 2) if away_xg is not None else None,
     }
     if exp_total < algo_over15_min_expected_goals():
         scores["Over 1.5"] = min(scores["Over 1.5"], 59)
@@ -1880,6 +1950,22 @@ def apply_context_adjustments(scores, fixture_context=None, team_news=None):
         for market, value in list(adjusted.items()):
             if value >= 70:
                 adjusted[market] = max(1, value - 2)
+    if "statpal_absences" in flags:
+        for market, value in list(adjusted.items()):
+            if value >= 70:
+                adjusted[market] = max(1, value - 2)
+    if "statpal_heavy_absences" in flags:
+        for market, value in list(adjusted.items()):
+            if value >= 70:
+                adjusted[market] = max(1, value - 4)
+        bump(["Under 2.5", "Under 3.5"], 2)
+        bump(["Over 2.5", "GG + Over 2.5"], -3)
+    if "statpal_home_absence_risk" in flags:
+        bump(["Home Win", "DNB Home", "AH Home +0.5", "Home CS", "First to Score H"], -3)
+        bump(["Away Win", "DNB Away", "AH Away +0.5"], 2)
+    if "statpal_away_absence_risk" in flags:
+        bump(["Away Win", "DNB Away", "AH Away +0.5", "Away CS", "First to Score A"], -3)
+        bump(["Home Win", "DNB Home", "AH Home +0.5"], 2)
 
     if "home_short_rest" in flags:
         bump(["Home Win", "DNB Home", "AH Home +0.5", "Home CS", "First to Score H"], -4)
@@ -2935,8 +3021,11 @@ def score_aps_fixture_for_pipeline(fx):
     fixture_context = build_fixture_context(fx, hf, af)
     fixture_context["h2h"] = h2h
     fixture_context["scoreline_profile"] = build_matchup_scoreline_profile(hf, af, h2h)
+    statpal_context = statpal_scoring_context(fx.get("statpal_context") or {})
+    fixture_context["statpal"] = statpal_context
     context_flags = set(fixture_context.get("flags") or [])
     context_flags.add("h2h_available" if int(h2h.get("games") or 0) >= 2 else "h2h_unavailable")
+    context_flags.update(statpal_context.get("flags") or [])
     fixture_context["flags"] = sorted(context_flags)
     team_news = fetch_fixture_team_news(fx.get("aps_id"), fx.get("hid"), fx.get("aid"))
     fx["fixture_context"] = fixture_context

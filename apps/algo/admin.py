@@ -1,3 +1,5 @@
+import json
+
 from django.contrib import admin
 from django.contrib import messages
 from django.db.models import Avg, Count, Q
@@ -16,8 +18,11 @@ from .models import (
     Pick,
     PickBack,
     ProviderFixtureMap,
+    ProviderPlayerMap,
+    ProviderTeamMap,
     SlipReview,
     SlipSelection,
+    StatPalFixtureSnapshot,
     StrategyReview,
     TeamAliasMap,
 )
@@ -227,6 +232,87 @@ class ProviderFixtureMapAdmin(admin.ModelAdmin):
     readonly_fields = ("created_at", "updated_at")
 
 
+@admin.register(ProviderTeamMap)
+class ProviderTeamMapAdmin(admin.ModelAdmin):
+    list_display = (
+        "provider",
+        "provider_team_name",
+        "provider_team_id",
+        "internal_team_name",
+        "internal_team_id",
+        "api_team_id",
+        "country",
+        "confidence",
+        "active",
+        "verified_at",
+    )
+    list_filter = ("provider", "active", "country", "resolution_method")
+    search_fields = (
+        "provider_team_id",
+        "provider_team_name",
+        "provider_team_normalized",
+        "internal_team_id",
+        "internal_team_name",
+        "internal_team_normalized",
+        "api_team_id",
+        "country",
+    )
+    readonly_fields = ("created_at", "updated_at")
+
+
+@admin.register(ProviderPlayerMap)
+class ProviderPlayerMapAdmin(admin.ModelAdmin):
+    list_display = (
+        "provider",
+        "provider_player_name",
+        "provider_player_id",
+        "provider_team_name",
+        "internal_player_name",
+        "internal_player_id",
+        "position",
+        "confidence",
+        "active",
+        "verified_at",
+    )
+    list_filter = ("provider", "active", "position", "nationality", "resolution_method")
+    search_fields = (
+        "provider_player_id",
+        "provider_player_name",
+        "provider_player_normalized",
+        "internal_player_id",
+        "internal_player_name",
+        "internal_player_normalized",
+        "provider_team_id",
+        "provider_team_name",
+        "internal_team_id",
+        "internal_team_name",
+        "nationality",
+    )
+    readonly_fields = ("created_at", "updated_at")
+
+
+@admin.register(StatPalFixtureSnapshot)
+class StatPalFixtureSnapshotAdmin(admin.ModelAdmin):
+    list_display = (
+        "snapshot_type",
+        "match_id",
+        "provider_match_id",
+        "provider_competition_id",
+        "status",
+        "source_endpoint",
+        "fetched_at",
+        "expires_at",
+    )
+    list_filter = ("snapshot_type", "status", "source_endpoint")
+    search_fields = (
+        "match_id",
+        "provider_match_id",
+        "provider_competition_id",
+        "source_endpoint",
+    )
+    readonly_fields = ("created_at", "updated_at")
+
+
 @admin.register(SlipReview)
 class SlipReviewAdmin(admin.ModelAdmin):
     date_hierarchy = "created_at"
@@ -236,6 +322,7 @@ class SlipReviewAdmin(admin.ModelAdmin):
         "source",
         "status",
         "selection_count",
+        "statpal_api_calls",
         "keep_count",
         "replace_count",
         "remove_count",
@@ -243,12 +330,36 @@ class SlipReviewAdmin(admin.ModelAdmin):
     )
     list_filter = ("source", "status", "created_at")
     search_fields = ("user__email", "user__username", "title")
-    readonly_fields = ("created_at", "updated_at")
+    readonly_fields = ("created_at", "updated_at", "api_usage_summary")
     inlines = [SlipSelectionInline]
 
     @admin.display(description="Selections")
     def selection_count(self, obj):
         return (obj.summary or {}).get("count", 0)
+
+    def _api_usage(self, obj):
+        summary = obj.summary or {}
+        return summary.get("api_usage") or ((summary.get("intelligence") or {}).get("api_usage") or {})
+
+    @admin.display(description="StatPal calls")
+    def statpal_api_calls(self, obj):
+        usage = self._api_usage(obj)
+        attempted = int(usage.get("attempted_calls") or 0)
+        skipped = int(usage.get("skipped_by_cache") or 0)
+        failed = int(usage.get("failed_calls") or 0)
+        if failed:
+            return f"{attempted} calls, {failed} failed, {skipped} cache hits"
+        return f"{attempted} calls, {skipped} cache hits"
+
+    @admin.display(description="API usage")
+    def api_usage_summary(self, obj):
+        usage = self._api_usage(obj)
+        if not usage:
+            return "No API usage recorded."
+        return format_html(
+            "<pre>{}</pre>",
+            json.dumps(usage, indent=2, default=str),
+        )
 
     @admin.display(description="Keep")
     def keep_count(self, obj):
