@@ -1,9 +1,8 @@
 """
-Staff endpoint for queueing the Match Checker's data jobs.
+Public endpoint for queueing the Match Checker's data jobs.
 
 These jobs make roughly two thousand provider calls between them, so the endpoint is
-staff-only and queues rather than running inline — an open or blocking version would be
-a quota-drain vector and a request that never returns.
+queued rather than running inline.
 """
 
 from unittest import mock
@@ -49,13 +48,19 @@ class MaintenanceEndpointTests(TestCase):
     def _post(self, body=None):
         return self.client.post(self.url, body or {}, format="json")
 
-    def test_an_anonymous_request_is_rejected(self):
-        self.assertIn(self._post().status_code, (401, 403))
+    def test_an_anonymous_request_can_queue_jobs(self):
+        response = self._post({"jobs": ["score_models"]})
 
-    def test_a_normal_user_cannot_run_the_jobs(self):
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(response.json()["queued"][0]["job"], "score_models")
+
+    def test_a_normal_user_can_queue_jobs(self):
         self.client.force_authenticate(user=self.punter)
 
-        self.assertEqual(self._post().status_code, 403)
+        response = self._post({"jobs": ["score_models"]})
+
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(response.json()["queued"][0]["job"], "score_models")
 
     def test_staff_can_queue_every_job(self):
         self.client.force_authenticate(user=self.staff)

@@ -5295,8 +5295,8 @@ def _maintenance_jobs():
     Data jobs the Match Checker depends on, queued rather than run inline.
 
     Each is expensive — the fixture sweep and the model fit are roughly a thousand
-    provider calls apiece — so this is staff-only and returns task ids to poll rather
-    than holding the request open.
+    provider calls apiece — so this returns task ids to poll rather than holding the
+    request open.
     """
     from .tasks import (
         fit_score_models,
@@ -5317,18 +5317,18 @@ def _maintenance_jobs():
 
 
 class MaintenanceRunView(APIView):
-    permission_classes = [IsAdminUser]
+    permission_classes = [AllowAny]
     serializer_class = MaintenanceRunResponseSerializer
 
     @extend_schema(
         summary="Run Match Checker data jobs",
         description=(
-            "Internal staff endpoint. Queues the background jobs the Match Checker depends on "
+            "Public endpoint. Queues the background jobs the Match Checker depends on "
             "and returns their task ids. Omit `jobs` to run all of them. These make roughly two "
             "thousand provider calls in total, so they are queued rather than executed inline; "
             "poll `/api/algo/tasks/{task_id}/` for progress."
         ),
-        tags=["Admin Algo"],
+        tags=["Algo"],
         request=MaintenanceRunRequestSerializer,
         responses={202: MaintenanceRunResponseSerializer},
     )
