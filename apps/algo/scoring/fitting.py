@@ -37,6 +37,17 @@ MAX_FACTOR = 2.6
 FALLBACK_HOME_BASELINE = 1.35
 FALLBACK_AWAY_BASELINE = 1.10
 
+# Pseudo-games of prior weight on the *league* baselines. Team factors were always
+# shrunk, but the baselines they multiply were raw quotients: a league two matches into
+# its season produced things like 0.5 home and 3.0 away goals per game, and those fed
+# straight into every probability for that competition.
+BASELINE_PRIOR_GAMES = 10
+
+# Below this many completed league matches the split is noise, however many teams are
+# listed, so the fit must not claim medium-quality data.
+MIN_GAMES_FOR_SPLIT = 20
+MIN_GAMES_FOR_LIMITED = 5
+
 
 def _num(value, default=0.0) -> float:
     try:
@@ -129,14 +140,18 @@ def fit_league_from_standings(
         away_games += entry["away_games"]
 
     has_splits = home_games > 0 and away_games > 0
-    home_baseline = home_goals / home_games if home_games else FALLBACK_HOME_BASELINE
-    away_baseline = away_goals / away_games if away_games else FALLBACK_AWAY_BASELINE
 
-    # A degenerate baseline (no goals recorded yet) would collapse every rate to zero.
-    if home_baseline <= 0:
-        home_baseline = FALLBACK_HOME_BASELINE
-    if away_baseline <= 0:
-        away_baseline = FALLBACK_AWAY_BASELINE
+    def _baseline(goals: float, games: float, prior: float) -> float:
+        """Shrink the observed league rate toward the global prior by sample size."""
+        if games <= 0:
+            return prior
+        observed = goals / games
+        if observed <= 0:
+            observed = prior
+        return round((games * observed + BASELINE_PRIOR_GAMES * prior) / (games + BASELINE_PRIOR_GAMES), 4)
+
+    home_baseline = _baseline(home_goals, home_games, FALLBACK_HOME_BASELINE)
+    away_baseline = _baseline(away_goals, away_games, FALLBACK_AWAY_BASELINE)
 
     teams = []
     for entry in parsed:
@@ -161,9 +176,12 @@ def fit_league_from_standings(
     matches_observed = int(home_games)
     if not teams:
         quality = "poor"
-    elif shots_by_team:
+    elif matches_observed < MIN_GAMES_FOR_LIMITED:
+        # A couple of matches is not a league profile, whatever the table shows.
+        quality = "poor"
+    elif shots_by_team and matches_observed >= MIN_GAMES_FOR_SPLIT:
         quality = "strong"
-    elif has_splits:
+    elif has_splits and matches_observed >= MIN_GAMES_FOR_SPLIT:
         quality = "medium"
     else:
         quality = "limited"

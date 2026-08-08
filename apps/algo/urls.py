@@ -11,6 +11,7 @@ from .views import (
     FixtureSearchView,
     GameDetailView,
     GamesView,
+    MaintenanceRunView,
     ManualSlipReviewView,
     MarketHealthView,
     PickDetailView,
@@ -56,6 +57,7 @@ urlpatterns = [
     path("markets/health/", MarketHealthView.as_view(), name="algo-market-health"),
     path("top-picks/", TopPickView.as_view(), name="algo-top-picks"),
     path("top-pick/", TopPickView.as_view(), name="algo-top-pick"),
+    path("maintenance/run/", MaintenanceRunView.as_view(), name="algo-maintenance-run"),
     path("tasks/<str:task_id>/", TaskStatusView.as_view(), name="algo-task-status"),
     path("", include(router.urls)),
 ]

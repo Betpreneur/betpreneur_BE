@@ -47,11 +47,17 @@ def _balanced_league():
 
 
 class FittingTests(SimpleTestCase):
-    def test_baselines_come_from_observed_league_scoring(self):
+    def test_baselines_track_observed_scoring_but_are_shrunk_toward_the_prior(self):
+        # 30 home games is a real sample, so the fitted baseline sits close to the
+        # observed rate — but still pulled slightly toward the global prior, which is
+        # what stops a two-game league asserting 0.5 home and 3.0 away goals.
         fit = fit_league_from_standings(_balanced_league(), league_id="1")
 
-        self.assertAlmostEqual(fit.home_goal_baseline, 39 / 30, places=3)
-        self.assertAlmostEqual(fit.away_goal_baseline, 28 / 30, places=3)
+        observed_home, observed_away = 39 / 30, 28 / 30
+        self.assertAlmostEqual(fit.home_goal_baseline, observed_home, delta=0.1)
+        self.assertAlmostEqual(fit.away_goal_baseline, observed_away, delta=0.15)
+        self.assertGreater(fit.home_goal_baseline, observed_home)   # pulled up toward 1.35
+        self.assertGreater(fit.away_goal_baseline, observed_away)   # pulled up toward 1.10
 
     def test_strong_team_outranks_weak_team_on_attack(self):
         fit = fit_league_from_standings(_balanced_league(), league_id="1")
@@ -199,7 +205,9 @@ class MatrixEvaluatorTests(TestCase):
         draw = self._evaluate("Draw")["probability"]
         dc = self._evaluate("DC: 1X")["probability"]
 
-        self.assertAlmostEqual(dc, home + draw, places=6)
+        # The evaluator rounds each probability to 6dp, so a sum of two rounded
+        # values can differ from the rounded sum by 1e-6.
+        self.assertAlmostEqual(dc, home + draw, places=5)
 
     def test_totals_are_modelled(self):
         over = self._evaluate("Over 2.5")
@@ -238,3 +246,69 @@ class RegistrySwapTests(SimpleTestCase):
     def test_specialised_families_still_use_the_statpal_engine(self):
         for family in ["corners_total", "cards_total", "player_goal"]:
             self.assertNotEqual(evaluator_for(family).engine, SCORE_MATRIX_ENGINE, family)
+
+
+class EarlySeasonFittingTests(SimpleTestCase):
+    """
+    A league two matches into its season is not a league profile.
+
+    Production fitted Eredivisie from 2 completed matches and produced baselines of
+    0.50 home / 3.00 away goals per game, labelled `medium` quality — so every
+    probability for that competition would have been published from noise. Team factors
+    were always shrunk; the baselines they multiply were not.
+    """
+
+    def _league(self, teams):
+        return _standings(teams)
+
+    def test_a_two_game_league_baseline_stays_near_the_prior(self):
+        fit = fit_league_from_standings(
+            self._league([
+                _team("A", hs=1, ha=3, hg=1, aws=0, awa=0, ag=0),
+                _team("B", hs=0, ha=0, hg=0, aws=3, awa=1, ag=1),
+            ]),
+            league_id="3155",
+        )
+
+        self.assertGreater(fit.home_goal_baseline, 1.0)
+        self.assertLess(fit.home_goal_baseline, 1.7)
+        self.assertGreater(fit.away_goal_baseline, 0.8)
+        self.assertLess(fit.away_goal_baseline, 1.6)
+
+    def test_a_tiny_sample_is_not_reported_as_medium_quality(self):
+        fit = fit_league_from_standings(
+            self._league([
+                _team("A", hs=1, ha=3, hg=1, aws=0, awa=0, ag=0),
+                _team("B", hs=0, ha=0, hg=0, aws=3, awa=1, ag=1),
+            ]),
+            league_id="3155",
+        )
+
+        self.assertEqual(fit.data_quality, "poor")
+
+    def test_a_full_season_still_reflects_its_own_scoring_rate(self):
+        fit = fit_league_from_standings(
+            self._league([_team(f"T{i}", hs=30, ha=20, hg=19, aws=22, awa=28, ag=19) for i in range(20)]),
+            league_id="x",
+        )
+
+        self.assertEqual(fit.data_quality, "medium")
+        self.assertGreater(fit.home_goal_baseline, fit.away_goal_baseline)
+
+    def test_home_advantage_survives_shrinkage_on_a_real_sample(self):
+        fit = fit_league_from_standings(
+            self._league([_team(f"T{i}", hs=34, ha=18, hg=19, aws=20, awa=32, ag=19) for i in range(20)]),
+            league_id="x",
+        )
+
+        self.assertGreater(fit.home_goal_baseline, 1.4)
+        self.assertLess(fit.away_goal_baseline, 1.3)
+
+    def test_a_goalless_early_league_never_produces_a_zero_baseline(self):
+        fit = fit_league_from_standings(
+            self._league([_team("A", hs=0, ha=0, hg=1, aws=0, awa=0, ag=1)]),
+            league_id="x",
+        )
+
+        self.assertGreater(fit.home_goal_baseline, 0)
+        self.assertGreater(fit.away_goal_baseline, 0)

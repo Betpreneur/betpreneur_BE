@@ -146,6 +146,20 @@ def settle_daily_results(self, target_date=None):
     return algo_runner_service.update_results(target_date=target_date)
 
 
+@shared_task(bind=True, ignore_result=False, soft_time_limit=1500, time_limit=1800)
+def sync_fixture_horizon(self, days=3, league_ids=None):
+    """
+    Cache every fixture across the Match Checker's 3-day window.
+
+    One request per league, roughly a thousand in total — about 2% of the daily quota.
+    Doing it on a schedule keeps fixture resolution to a cache lookup, instead of the
+    per-leg provider sync that used to dominate a slip review.
+    """
+    from .services import FixtureSearchService
+
+    return FixtureSearchService().sync_statpal_horizon(days=days, league_ids=league_ids)
+
+
 @shared_task(bind=True, ignore_result=False)
 def refresh_imminent_lineups(self, match_ids=None):
     """

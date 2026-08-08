@@ -94,6 +94,8 @@ from .serializers import (
     SlipReviewDetailResponseSerializer,
     SlipReviewListResponseSerializer,
     SlipReviewOptionsResponseSerializer,
+    MaintenanceRunRequestSerializer,
+    MaintenanceRunResponseSerializer,
     SlipRepairRequestSerializer,
     SlipRepairResponseSerializer,
     SlipReviewRecapQuerySerializer,
@@ -5285,6 +5287,75 @@ class PublicRecordView(APIView):
                 "records": [_public_record_pick_payload(pick) for pick in picks],
             },
             request=request,
+        )
+
+
+def _maintenance_jobs():
+    """
+    Data jobs the Match Checker depends on, queued rather than run inline.
+
+    Each is expensive — the fixture sweep and the model fit are roughly a thousand
+    provider calls apiece — so this is staff-only and returns task ids to poll rather
+    than holding the request open.
+    """
+    from .tasks import (
+        fit_score_models,
+        refresh_imminent_lineups,
+        refresh_player_availability,
+        settle_slip_selections,
+        sync_fixture_horizon,
+    )
+
+    return {
+        # Ordered so a full run populates fixtures before anything that reads them.
+        "fixture_horizon": (sync_fixture_horizon, "Cache every fixture in the 3-day window"),
+        "score_models": (fit_score_models, "Refit per-league goal models"),
+        "player_availability": (refresh_player_availability, "Reload injuries and suspensions"),
+        "lineups": (refresh_imminent_lineups, "Pull team sheets for imminent fixtures"),
+        "settle_slips": (settle_slip_selections, "Settle yesterday's slip selections"),
+    }
+
+
+class MaintenanceRunView(APIView):
+    permission_classes = [IsAdminUser]
+    serializer_class = MaintenanceRunResponseSerializer
+
+    @extend_schema(
+        summary="Run Match Checker data jobs",
+        description=(
+            "Internal staff endpoint. Queues the background jobs the Match Checker depends on "
+            "and returns their task ids. Omit `jobs` to run all of them. These make roughly two "
+            "thousand provider calls in total, so they are queued rather than executed inline; "
+            "poll `/api/algo/tasks/{task_id}/` for progress."
+        ),
+        tags=["Admin Algo"],
+        request=MaintenanceRunRequestSerializer,
+        responses={202: MaintenanceRunResponseSerializer},
+    )
+    def post(self, request):
+        serializer = MaintenanceRunRequestSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        available = _maintenance_jobs()
+        requested = serializer.validated_data.get("jobs") or list(available)
+
+        unknown = [name for name in requested if name not in available]
+        if unknown:
+            return Response(
+                {"detail": f"Unknown jobs: {', '.join(unknown)}", "available": sorted(available)},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        days = serializer.validated_data.get("days", 3)
+        queued = []
+        for name in requested:
+            task, description = available[name]
+            async_result = task.delay(days=days) if name == "fixture_horizon" else task.delay()
+            queued.append({"job": name, "task_id": async_result.id, "description": description})
+            log.info("Maintenance job queued by %s: %s -> %s", request.user, name, async_result.id)
+
+        return Response(
+            {"queued": queued, "poll": "/api/algo/tasks/{task_id}/"},
+            status=status.HTTP_202_ACCEPTED,
         )
 
 

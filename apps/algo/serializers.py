@@ -582,6 +582,45 @@ class SlipReviewListResponseSerializer(serializers.Serializer):
     reviews = serializers.JSONField()
 
 
+class MaintenanceRunRequestSerializer(serializers.Serializer):
+    jobs = serializers.ListField(
+        child=serializers.CharField(),
+        required=False,
+        help_text=(
+            "Jobs to queue. Omit to run every job. Valid names: fixture_horizon, "
+            "score_models, player_availability, lineups, settle_slips."
+        ),
+    )
+    days = serializers.IntegerField(
+        required=False, min_value=0, max_value=7, default=3,
+        help_text="Fixture horizon in days. Only used by fixture_horizon.",
+    )
+
+    def validate(self, attrs):
+        """
+        Reject unrecognised fields.
+
+        Omitting `jobs` means "run everything", so a mistyped key would otherwise be
+        ignored and quietly launch every job — roughly two thousand provider calls
+        instead of the one that was asked for. A typo should fail, not escalate.
+        """
+        unknown = sorted(set(self.initial_data) - set(self.fields))
+        if unknown:
+            raise serializers.ValidationError({
+                "unknown_fields": unknown,
+                "detail": (
+                    f"Unrecognised field(s): {', '.join(unknown)}. "
+                    f"Expected 'jobs' (list) and optionally 'days'."
+                ),
+            })
+        return attrs
+
+
+class MaintenanceRunResponseSerializer(serializers.Serializer):
+    queued = serializers.JSONField()
+    poll = serializers.CharField()
+
+
 class SlipRepairDecisionSerializer(serializers.Serializer):
     index = serializers.IntegerField(min_value=0)
     action = serializers.ChoiceField(choices=["keep", "replace", "drop"])

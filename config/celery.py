@@ -28,6 +28,16 @@ app.conf.beat_schedule = {
         ),
         "options": {"expires": timedelta(hours=6).total_seconds()},
     },
+    # Four times a day: ~1,000 calls a sweep against a 50k daily quota, keeping the
+    # Match Checker's 3-day fixture window warm so resolution never hits the provider.
+    "sync-fixture-horizon": {
+        "task": "apps.algo.tasks.sync_fixture_horizon",
+        "schedule": crontab(
+            hour=os.environ.get("ALGO_HORIZON_HOURS", "1,7,13,19"),
+            minute=os.environ.get("ALGO_HORIZON_MINUTE", "20"),
+        ),
+        "options": {"expires": timedelta(hours=5).total_seconds()},
+    },
     # Every 15 minutes: team sheets only firm up in the hour before kickoff, and a
     # confirmed omission is what turns a priced player prop into a dead bet.
     "refresh-imminent-lineups": {

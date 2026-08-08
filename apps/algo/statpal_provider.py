@@ -93,19 +93,51 @@ def _unwrap_container(root: dict[str, Any]) -> dict[str, Any]:
     return root
 
 
+def _looks_like_match(node: dict[str, Any]) -> bool:
+    return bool(node.get("date")) and ("home" in node or "away" in node)
+
+
+def _looks_like_competition(node: dict[str, Any]) -> bool:
+    return bool(node.get("id")) and bool(node.get("name") or node.get("league"))
+
+
+def _iter_matches(node, league=None):
+    """
+    Yield every match in a StatPal payload, whatever the nesting.
+
+    The daily feed nests as `league[].match[]` while a league's own fixture list nests as
+    `tournament.stage[].week[].match[]`. Walking for match-shaped nodes, and carrying the
+    nearest enclosing competition as context, handles both without hard-coding either
+    path — and survives the next endpoint that nests differently again.
+    """
+    if isinstance(node, dict):
+        if _looks_like_match(node):
+            yield node, league
+            return
+        if _looks_like_competition(node):
+            league = {
+                "id": node.get("id"),
+                "name": node.get("name") or node.get("league"),
+                "country": node.get("country") or (league or {}).get("country") or "",
+            }
+        for value in node.values():
+            yield from _iter_matches(value, league)
+    elif isinstance(node, list):
+        for item in node:
+            yield from _iter_matches(item, league)
+
+
 def _match_items(payload: dict[str, Any]):
     root = _unwrap_container(payload or {})
-    for key in ("matches", "match", "data", "response", "results"):
-        value = root.get(key) if isinstance(root, dict) else None
-        if isinstance(value, list):
-            return value
-    leagues = _as_list(root.get("league") if isinstance(root, dict) else None)
+    country = root.get("country") if isinstance(root, dict) else ""
     items = []
-    for league in leagues:
-        for match in _as_list(league.get("match") or league.get("matches")):
-            item = dict(match or {})
-            item.setdefault("_league", league)
-            items.append(item)
+    for match, league in _iter_matches(root):
+        item = dict(match or {})
+        if league:
+            context = dict(league)
+            context.setdefault("country", country or "")
+            item.setdefault("_league", context)
+        items.append(item)
     return items
 
 

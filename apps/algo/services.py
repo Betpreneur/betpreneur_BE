@@ -244,6 +244,62 @@ class FixtureSearchService:
             "dates": sorted(item.isoformat() for item in grouped),
         }
 
+    def sync_statpal_horizon(self, *, start_date=None, days=3, league_ids=None):
+        """
+        Cache every fixture in every league across the Match Checker's horizon.
+
+        The daily endpoint only really covers today, so a slip booked for the weekend
+        would find no fixture to resolve against. A league's own match list runs months
+        ahead, so one call per league covers the whole window.
+
+        Cost is one request per league — around a thousand — which is a couple of
+        percent of the daily quota, so this runs on a schedule rather than per review.
+        """
+        from .statpal import StatPalClient, StatPalConfigurationError, StatPalError
+        from .statpal_provider import normalize_daily_matches
+
+        start_date = start_date or timezone.localdate()
+        horizon = start_date + timedelta(days=max(0, int(days)))
+        client = StatPalClient()
+
+        if league_ids is None:
+            try:
+                payload = client.soccer_leagues()
+            except (StatPalConfigurationError, StatPalError) as exc:
+                return {"synced": 0, "leagues": 0, "errors": [{"provider": "statpal", "error": str(exc)}]}
+            leagues = ((payload or {}).get("leagues") or {}).get("league") or []
+            leagues = leagues if isinstance(leagues, list) else [leagues]
+            league_ids = [str(item.get("id")) for item in leagues if item.get("id")]
+
+        grouped = defaultdict(list)
+        calls = failures = 0
+        errors = []
+        for league_id in league_ids:
+            try:
+                payload = client.soccer_league_matches(league_id)
+                calls += 1
+            except Exception as exc:
+                failures += 1
+                if len(errors) < 20:
+                    errors.append({"league_id": league_id, "error": str(exc)[:200]})
+                continue
+            for fixture in normalize_daily_matches(payload, target_date=start_date):
+                match_date = fixture.get("date")
+                if match_date and start_date <= match_date <= horizon:
+                    grouped[match_date].append(fixture)
+
+        synced = 0
+        for match_date, group in grouped.items():
+            synced += self._upsert_fixtures(group, match_date)
+        return {
+            "synced": synced,
+            "leagues": len(league_ids),
+            "api_calls": calls,
+            "failed_leagues": failures,
+            "dates": sorted(item.isoformat() for item in grouped),
+            "errors": errors,
+        }
+
     def sync_upcoming(self, *, start_date=None, days=None, unrestricted=False):
         """
         Refresh the fixture universe, preferring StatPal's single-call window.
