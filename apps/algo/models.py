@@ -462,6 +462,7 @@ class SlipReview(models.Model):
         ANALYSING = "analysing", "Analysing"
         COMPLETED = "completed", "Completed"
         PARTIAL = "partial", "Partial"
+        UNANALYSED = "unanalysed", "Unanalysed"
         FAILED = "failed", "Failed"
 
     user = models.ForeignKey(
@@ -489,6 +490,13 @@ class SlipReview(models.Model):
 
 
 class SlipSelection(models.Model):
+    class Outcome(models.TextChoices):
+        PENDING = "pending", "Pending"
+        WIN = "win", "Win"
+        LOSS = "loss", "Loss"
+        VOID = "void", "Void"
+        UNSETTLEABLE = "unsettleable", "Unsettleable"
+
     review = models.ForeignKey(SlipReview, on_delete=models.CASCADE, related_name="selections")
     order = models.PositiveIntegerField(default=0)
     submitted_match = models.CharField(max_length=255)
@@ -509,6 +517,16 @@ class SlipSelection(models.Model):
     recommended_market = models.JSONField(default=dict, blank=True)
     possible_matches = models.JSONField(default=list, blank=True)
     analysis_payload = models.JSONField(default=dict, blank=True)
+    settlement_market = models.CharField(max_length=120, blank=True)
+    odds = models.DecimalField(max_digits=8, decimal_places=2, null=True, blank=True)
+    # Pre-kickoff advisory score, denormalised so calibration is an aggregate query
+    # rather than a scan over analysis_payload JSON.
+    advisory_score = models.FloatField(null=True, blank=True)
+    flagged_risky = models.BooleanField(default=False)
+    outcome = models.CharField(max_length=20, choices=Outcome.choices, default=Outcome.PENDING)
+    score = models.CharField(max_length=20, blank=True)
+    result = models.CharField(max_length=120, blank=True)
+    settled_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
@@ -517,10 +535,17 @@ class SlipSelection(models.Model):
             models.Index(fields=["review", "order"]),
             models.Index(fields=["match_id"]),
             models.Index(fields=["status", "verdict"]),
+            models.Index(fields=["outcome", "match_date"]),
+            models.Index(fields=["review", "outcome"]),
         ]
 
     def __str__(self):
         return f"{self.submitted_match} - {self.submitted_market}"
+
+    @property
+    def market(self):
+        """Canonical market name, so settlement can reuse ``AlgoRunnerService._check_market``."""
+        return self.settlement_market
 
 
 class GameBack(models.Model):

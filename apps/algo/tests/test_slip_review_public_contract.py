@@ -99,6 +99,26 @@ def _sample_market_not_found_with_replacement():
     return result
 
 
+def _sample_market_not_found_without_replacement_but_scored():
+    result = _sample_replace_result()
+    result["submitted_market"] = "Cards Over 3.5"
+    result["status"] = "market_not_found"
+    result["verdict"] = "remove"
+    result["message"] = "Cards Over 3.5 does not show enough edge."
+    result["replacement_market"] = None
+    result["selected_market"] = {
+        "market": "Cards Over 3.5",
+        "advisory_score": 44,
+        "advisory_status": "avoid",
+        "advisory_evidence": {},
+    }
+    result["market_taxonomy"] = {
+        "recognized": True,
+        "core_supported": False,
+    }
+    return result
+
+
 class SlipReviewPublicContractTests(TestCase):
     def test_public_review_contract_is_frontend_friendly(self):
         summary = _manual_review_summary([_sample_replace_result()])
@@ -109,7 +129,7 @@ class SlipReviewPublicContractTests(TestCase):
         self.assertEqual(summary["api_usage"]["successful_calls"], 1)
         self.assertEqual(summary["api_usage"]["failed_calls"], 1)
         self.assertEqual(summary["api_usage"]["skipped_by_cache"], 3)
-        self.assertEqual(public["contract_version"], "match_checker_public_v1")
+        self.assertEqual(public["contract_version"], "match_checker_public_v2")
         self.assertEqual(public["response_mode"], "public")
         self.assertIn("ticket_health", public)
         self.assertIn("comparison", public)
@@ -150,6 +170,19 @@ class SlipReviewPublicContractTests(TestCase):
         self.assertEqual(public["counts"]["unmatched"], 0)
         self.assertEqual(public["selections"][0]["verdict"]["code"], "replace")
 
+    def test_market_not_found_without_replacement_but_scored_counts_as_analysed(self):
+        summary = _manual_review_summary([_sample_market_not_found_without_replacement_but_scored()])
+        public = summary["public"]
+
+        self.assertEqual(summary["analysed_count"], 1)
+        self.assertEqual(summary["remove_count"], 1)
+        self.assertEqual(summary["unmatched_count"], 0)
+        self.assertEqual(public["ticket"]["analysed_legs"], 1)
+        self.assertEqual(public["ticket"]["unmatched_legs"], 0)
+        self.assertEqual(public["counts"]["remove"], 1)
+        self.assertEqual(public["counts"]["unmatched"], 0)
+        self.assertEqual(public["selections"][0]["verdict"]["code"], "remove")
+
     def test_public_only_review_payload_hides_internal_summary(self):
         user = get_user_model().objects.create_user(username="tester")
         summary = _manual_review_summary([_sample_replace_result()])
@@ -164,7 +197,7 @@ class SlipReviewPublicContractTests(TestCase):
         payload = _slip_review_payload(review, public_only=True)
 
         self.assertEqual(payload["id"], review.id)
-        self.assertEqual(payload["contract_version"], "match_checker_public_v1")
+        self.assertEqual(payload["contract_version"], "match_checker_public_v2")
         self.assertIn("selections", payload)
         self.assertNotIn("summary", payload)
         self.assertNotIn("intelligence", payload)

@@ -26,6 +26,7 @@ from .recommendation_policy import assess_recommendation
 from .services import BetanoBetslipImporter, FixtureSearchService, SportyBetShareImporter, algo_runner_service
 from .statpal_advisory import statpal_market_advisory
 from .statpal_snapshots import statpal_snapshot_service
+from .ticket_risk import risk_level_for, ticket_risk_service
 from .performance import (
     add_pick,
     confidence_band,
@@ -65,6 +66,8 @@ from .serializers import (
     SlipReviewDetailResponseSerializer,
     SlipReviewListResponseSerializer,
     SlipReviewOptionsResponseSerializer,
+    SlipReviewRecapQuerySerializer,
+    SlipReviewRecapResponseSerializer,
     SportyBetSlipImportRequestSerializer,
     StatPalFixtureContextQuerySerializer,
     StatPalFixtureContextResponseSerializer,
@@ -1823,6 +1826,8 @@ def _match_checker_advisory_score(market):
 
 
 def _match_checker_status(score):
+    if score is None:
+        return "unknown"
     if score >= 78:
         return "strong"
     if score >= 66:
@@ -2128,15 +2133,7 @@ def _replacement_scope(selected_market, candidate):
 
 def _allows_broad_replacement(selected_market):
     group = _market_family_group(selected_market)
-    score = _float_or_none((selected_market or {}).get("advisory_score"))
-    status = str((selected_market or {}).get("advisory_status") or "").lower()
-    capability = (selected_market or {}).get("market_capability") or {}
-    data_quality = str(capability.get("data_quality") or "").lower()
-    if group in {"cards", "corners", "player"}:
-        if score is None:
-            return data_quality in {"poor", "unsupported", ""}
-        return score < 45 or status in {"avoid", "needs_data"}
-    return True
+    return group in {"goals", "result"}
 
 
 def _rank_replacement_candidates(candidates):
@@ -2192,6 +2189,8 @@ def _market_is_better_for_slip(selected_market, replacement_market):
     replacement_score = _float_or_none(replacement_market.get("advisory_score")) or float(replacement_market.get("display_score") or 0)
     scope = replacement_market.get("replacement_scope") or _replacement_scope(selected_market, replacement_market)
     if scope == "broad_fallback":
+        if not _allows_broad_replacement(selected_market):
+            return False
         return replacement_score >= selected_score + 14 and replacement_score >= 66
     return replacement_score >= selected_score + 6 and replacement_score >= 58
 
@@ -2447,6 +2446,11 @@ def _optimized_leg_score(item):
 
 def _ticket_health_summary(score, risk_level, remove_count, replace_count, caution_count, unverified_count):
     weak_count = remove_count + replace_count
+    if risk_level == "unknown":
+        return (
+            f"None of these {unverified_count} {_plural(unverified_count, 'pick')} could be analysed yet, "
+            "so this ticket has not been assessed."
+        )
     parts = []
     if replace_count:
         parts.append(f"{replace_count} {_plural(replace_count, 'pick')} should be replaced")
@@ -2470,7 +2474,9 @@ def _plural(value, singular, plural=None):
 
 
 def _ticket_health_label(score):
-    score = _float_or_none(score) or 0
+    score = _float_or_none(score)
+    if score is None:
+        return "Unknown"
     if score >= 80:
         return "Excellent"
     if score >= 65:
@@ -2564,7 +2570,7 @@ def _public_market_pick(market, *, fallback_market="", fallback_odds=None):
         "confidence": (market or {}).get("final_confidence") or (market or {}).get("confidence"),
         "odds": _float_or_none((market or {}).get("odds")) if market else fallback_odds,
         "score": score,
-        "status": _match_checker_status(score or 0) if score is not None else "",
+        "status": _match_checker_status(score),
         "odds_status": odds_status,
     }
 
@@ -2639,13 +2645,19 @@ def _public_selection_risk(verdict, pick):
 def _selection_has_analysis(item):
     if item.get("status") == "analysed":
         return True
-    return item.get("status") == "market_not_found" and bool(item.get("replacement_market"))
+    if item.get("status") == "market_not_found":
+        selected_market = item.get("selected_market") or {}
+        return bool(item.get("replacement_market")) or _float_or_none(selected_market.get("advisory_score")) is not None
+    return False
 
 
 def _selection_is_unmatched(item):
     if item.get("status") in {"unmatched", "ambiguous_match"}:
         return True
-    return item.get("status") == "market_not_found" and not item.get("replacement_market")
+    if item.get("status") == "market_not_found":
+        selected_market = item.get("selected_market") or {}
+        return not item.get("replacement_market") and _float_or_none(selected_market.get("advisory_score")) is None
+    return False
 
 
 def _selection_strength_score(item):
@@ -2757,7 +2769,7 @@ def _public_selection_card(item):
         "confidence": card.get("confidence"),
         "odds": card.get("odds"),
         "score": card.get("advisory_score"),
-        "status": card.get("advisory_status") or _match_checker_status(card.get("advisory_score") or 0),
+        "status": card.get("advisory_status") or _match_checker_status(_float_or_none(card.get("advisory_score"))),
     }
     capability = item.get("market_capability") or selected_market.get("market_capability") or {}
     if capability:
@@ -2799,6 +2811,42 @@ def _public_selection_card(item):
     }
 
 
+def _with_leg_risk(card, leg):
+    """Attach the calibrated risk view of a leg to its public card."""
+    card["risk_tier"] = {
+        "code": leg.tier,
+        "label": leg.tier_label,
+        "estimated_success_percent": round(leg.probability * 100, 1) if leg.probability is not None else None,
+        "risk_share_percent": leg.risk_share_percent,
+        "capped_by_data_quality": leg.capped_by_data_quality,
+    }
+    card["repair"] = {
+        "available": leg.repair_probability is not None,
+        "estimated_success_percent": round(leg.repair_probability * 100, 1) if leg.repair_probability else None,
+        "ticket_lift_points": leg.repair_lift_points,
+        "drop_lift_points": leg.drop_lift_points,
+    }
+    return card
+
+
+def _ticket_killers_message(ticket_risk):
+    killers = ticket_risk.killers
+    if not killers:
+        if not ticket_risk.assessed_legs:
+            return "No selection could be assessed, so no risk ranking is available."
+        return "No single selection dominates this ticket's risk."
+    share = round(sum(killer["risk_share_percent"] for killer in killers), 1)
+    count = len(killers)
+    lift = sum(killer["drop_lift_points"] or 0 for killer in killers)
+    message = (
+        f"{count} {_plural(count, 'selection')} {'carries' if count == 1 else 'carry'} "
+        f"{share}% of this ticket's risk."
+    )
+    if lift > 0:
+        message += f" Removing {'it' if count == 1 else 'them'} would raise the estimated success rate by about {round(lift, 2)} percentage points."
+    return message
+
+
 def _slip_intelligence(results):
     enriched = []
     for item in results:
@@ -2807,10 +2855,10 @@ def _slip_intelligence(results):
         enriched.append(copy)
 
     analysed = [item for item in enriched if _selection_has_analysis(item)]
-    if analysed:
-        overall_score = round(sum(item["selection_score"] for item in analysed) / len(analysed), 1)
-    else:
-        overall_score = 0.0
+    # Ticket health is the geometric mean of the calibrated leg probabilities, so it
+    # measures leg quality independently of leg count. See apps.algo.ticket_risk.
+    ticket_risk = ticket_risk_service.assess(enriched)
+    overall_score = ticket_risk.health_percent
 
     remove_items = [item for item in enriched if item.get("verdict") == "remove"]
     replace_items = [item for item in enriched if item.get("verdict") == "replace"]
@@ -2823,12 +2871,7 @@ def _slip_intelligence(results):
         if not _selection_has_analysis(item) and item.get("status") != "expired"
     ]
 
-    if remove_items or len(replace_items) >= 3 or overall_score < 45:
-        risk_level = "high"
-    elif replace_items or len(caution_items) >= 2 or overall_score < 65:
-        risk_level = "medium"
-    else:
-        risk_level = "low"
+    risk_level = risk_level_for(ticket_risk)
 
     strongest = sorted(
         [item for item in analysed if item.get("verdict") in {"keep", "caution"}],
@@ -2841,15 +2884,11 @@ def _slip_intelligence(results):
     )[:3]
     original_combined = _combined_odds(_selection_original_odds(item) for item in enriched)
     suggested_combined = _combined_odds(_selection_suggested_odds(item) for item in enriched)
-    original_success = _combined_probability(
-        (item.get("advisory_score") or (item.get("selected_market") or {}).get("advisory_score"))
-        for item in analysed
-    )
-    optimized_scores = [_optimized_leg_score(item) for item in analysed]
-    optimized_success = _combined_probability(optimized_scores)
-    optimized_leg_count = sum(1 for score in optimized_scores if score is not None)
+    original_success = ticket_risk.success_percent
+    optimized_success = ticket_risk.repaired_success_percent
+    optimized_leg_count = ticket_risk.assessed_legs
     improvement = (
-        round(optimized_success - original_success, 1)
+        round(optimized_success - original_success, 2)
         if optimized_success is not None and original_success is not None
         else None
     )
@@ -2893,15 +2932,31 @@ def _slip_intelligence(results):
     improvement_text = f"+{improvement} percentage points" if improvement is not None and improvement > 0 else (
         f"{improvement} percentage points" if improvement is not None else ""
     )
+    # A leg is only genuinely tracked when the settler can find it after kickoff: it
+    # needs a resolved fixture date and a market this engine can settle. Anything else
+    # must not be reported as tracked.
+    trackable_items = [
+        item for item in enriched
+        if _settlement_market_for(item) and (item.get("matched_fixture") or {}).get("match_date")
+    ]
+    flagged_risky_items = [item for item in enriched if _selection_flagged_risky(item)]
     learning_tracking = {
-        "status": "captured",
-        "tracked_items": len(analysed),
-        "tracks_submitted_market": True,
-        "tracks_suggested_alternative": True,
-        "outcome_tracking": "pending_settlement",
+        "status": "tracking" if trackable_items else "not_tracked",
+        "tracked_selections": len(trackable_items),
+        "untracked_selections": len(enriched) - len(trackable_items),
+        "flagged_risky_selections": len(flagged_risky_items),
+        "outcome_tracking": "pending_settlement" if trackable_items else "unavailable",
+        "reason": (
+            ""
+            if trackable_items
+            else "No leg has both a resolved fixture date and a market the settlement engine supports."
+        ),
     }
 
-    public_selections = [_public_selection_card(item) for item in enriched]
+    public_selections = [
+        _with_leg_risk(_public_selection_card(item), leg)
+        for item, leg in zip(enriched, ticket_risk.legs)
+    ]
     recommended_change_ids = [
         selection.get("id")
         for selection in public_selections
@@ -2911,6 +2966,8 @@ def _slip_intelligence(results):
         "message": (
             f"Changing {len(replace_items) + len(remove_items)} risky {_plural(len(replace_items) + len(remove_items), 'pick')} improves the estimated ticket success rate."
             if remove_items or replace_items
+            else f"None of these {len(enriched)} {_plural(len(enriched), 'selection')} could be analysed, so no risk assessment was possible."
+            if not analysed
             else "No major risky picks were found in the analysed selections."
         ),
         "picks_changed": len(replace_items) + len(remove_items),
@@ -2958,7 +3015,7 @@ def _slip_intelligence(results):
         verdict_message = "This ticket looks clean from the current analysis."
 
     public_review = {
-        "contract_version": "match_checker_public_v1",
+        "contract_version": "match_checker_public_v2",
         "response_mode": "public",
         "ticket": {
             "title": "Slip Review",
@@ -2967,8 +3024,29 @@ def _slip_intelligence(results):
             "pending_analysis_legs": len(pending_items),
             "unmatched_legs": len([item for item in enriched if _selection_is_unmatched(item)]),
             "expired_legs": len(expired_items),
+            "estimated_success_percent": ticket_risk.success_percent,
+            "risk_tiers": ticket_risk.tier_counts,
         },
         "ticket_health": ticket_health,
+        "ticket_killers": {
+            "selections": ticket_risk.killers,
+            "message": _ticket_killers_message(ticket_risk),
+            "combined_risk_share_percent": round(
+                sum(killer["risk_share_percent"] for killer in ticket_risk.killers), 1
+            ) if ticket_risk.killers else None,
+        },
+        "calibration": {
+            **ticket_risk.calibration.to_dict(),
+            "disclaimer": (
+                "Estimated success rates are model estimates, not guarantees. "
+                + (
+                    "They are calibrated against selections that have already settled."
+                    if ticket_risk.calibration.basis != "prior"
+                    else "Not enough selections have settled yet to validate these estimates, "
+                         "so a deliberately conservative prior is used."
+                )
+            ),
+        },
         "verdict": {
             "code": verdict_code,
             "label": verdict_label,
@@ -3007,9 +3085,10 @@ def _slip_intelligence(results):
         },
         "selections": public_selections,
         "tracking": {
-            "enabled": True,
-            "status": "pending_settlement",
-            "tracked_selections": len(analysed),
+            "enabled": bool(trackable_items),
+            "status": learning_tracking["outcome_tracking"],
+            "tracked_selections": len(trackable_items),
+            "flagged_risky_selections": len(flagged_risky_items),
         },
     }
 
@@ -3067,12 +3146,38 @@ def _manual_review_summary(results):
 
 
 def _review_status_from_summary(summary):
-    reviewable_count = max(0, int(summary.get("count") or 0) - int(summary.get("expired_count") or 0))
-    if summary.get("count") and summary.get("analysed_count") == reviewable_count:
+    count = int(summary.get("count") or 0)
+    analysed_count = int(summary.get("analysed_count") or 0)
+    pending_count = int(summary.get("pending_analysis_count") or 0)
+    reviewable_count = max(0, count - int(summary.get("expired_count") or 0))
+    if count and analysed_count == reviewable_count:
         return SlipReview.Status.COMPLETED
-    if summary.get("analysed_count") or summary.get("pending_analysis_count"):
+    if analysed_count:
         return SlipReview.Status.PARTIAL
+    if pending_count:
+        return SlipReview.Status.UNANALYSED
     return SlipReview.Status.FAILED
+
+
+def _settlement_market_for(item):
+    """
+    Canonical, orientation-corrected market used to settle this leg after kickoff.
+
+    Returns "" when the market cannot be resolved from a finished fixture, which the
+    settler records as ``unsettleable`` rather than a void.
+    """
+    market = item.get("analysis_market")
+    if not market:
+        canonical = (item.get("market_taxonomy") or {}).get("canonical") or ""
+        if canonical:
+            market = _market_for_fixture_orientation(canonical, item.get("matched_fixture") or {})
+    market = str(market or "").strip()
+    return market if algo_runner_service.can_settle_market(market) else ""
+
+
+def _selection_flagged_risky(item):
+    """Whether this leg was called out pre-kickoff, frozen at analysis time."""
+    return item.get("verdict") in {"remove", "replace", "caution"}
 
 
 def _populate_slip_review(review, results):
@@ -3108,6 +3213,12 @@ def _populate_slip_review(review, results):
                 recommended_market=item.get("recommended_market") or {},
                 possible_matches=item.get("possible_matches") or [],
                 analysis_payload=item,
+                settlement_market=_settlement_market_for(item),
+                odds=_decimal_or_none(_selection_original_odds(item)),
+                flagged_risky=_selection_flagged_risky(item),
+                advisory_score=_float_or_none(
+                    item.get("advisory_score") or (item.get("selected_market") or {}).get("advisory_score")
+                ),
             )
         )
     SlipSelection.objects.bulk_create(rows, batch_size=100)
@@ -3778,6 +3889,94 @@ class BetanoSlipImportView(APIView):
         review.summary = _empty_slip_summary("Slip import queued.", task_id=task.id)
         review.save(update_fields=["summary", "updated_at"])
         return Response(_slip_review_payload(review, include_selections=True), status=status.HTTP_202_ACCEPTED)
+
+
+def _hit_rate(wins, losses):
+    settled = wins + losses
+    return round((wins / settled) * 100, 1) if settled else None
+
+
+def _slip_recap_payload(user, *, days):
+    since = timezone.localdate() - timedelta(days=days)
+    selections = list(
+        SlipSelection.objects.filter(
+            review__user=user,
+            match_date__gte=since,
+        ).only("outcome", "flagged_risky", "review_id")
+    )
+
+    wins = [item for item in selections if item.outcome == SlipSelection.Outcome.WIN]
+    losses = [item for item in selections if item.outcome == SlipSelection.Outcome.LOSS]
+    void = [item for item in selections if item.outcome == SlipSelection.Outcome.VOID]
+    unsettleable = [item for item in selections if item.outcome == SlipSelection.Outcome.UNSETTLEABLE]
+    pending = [item for item in selections if item.outcome == SlipSelection.Outcome.PENDING]
+
+    flagged_wins = [item for item in wins if item.flagged_risky]
+    flagged_losses = [item for item in losses if item.flagged_risky]
+    unflagged_wins = [item for item in wins if not item.flagged_risky]
+    unflagged_losses = [item for item in losses if not item.flagged_risky]
+
+    ticket_count = len({item.review_id for item in selections})
+    settled_count = len(wins) + len(losses)
+
+    if not settled_count:
+        message = "None of your selections in this window have been settled yet."
+    else:
+        message = (
+            f"You submitted {ticket_count} {_plural(ticket_count, 'ticket')}. "
+            f"{len(wins)} of {settled_count} settled {_plural(settled_count, 'selection')} were correct."
+        )
+        if losses:
+            message += (
+                f" {len(flagged_losses)} of the {len(losses)} that failed "
+                f"{'was' if len(flagged_losses) == 1 else 'were'} flagged as risky before kickoff."
+            )
+
+    return {
+        "contract_version": "match_checker_public_v2",
+        "window": {"days": days, "from": since.isoformat(), "to": timezone.localdate().isoformat()},
+        "tickets": ticket_count,
+        "selections": {
+            "total": len(selections),
+            "settled": settled_count,
+            "correct": len(wins),
+            "failed": len(losses),
+            "void": len(void),
+            "unsettleable": len(unsettleable),
+            "awaiting_result": len(pending),
+        },
+        "flagged": {
+            "flagged_before_kickoff": len(flagged_wins) + len(flagged_losses),
+            "failed_and_flagged": len(flagged_losses),
+            "failed_and_not_flagged": len(unflagged_losses),
+            "flagged_hit_rate_percent": _hit_rate(len(flagged_wins), len(flagged_losses)),
+            "unflagged_hit_rate_percent": _hit_rate(len(unflagged_wins), len(unflagged_losses)),
+        },
+        "message": message,
+    }
+
+
+class SlipReviewRecapView(APIView):
+    permission_classes = [IsAuthenticated]
+    serializer_class = SlipReviewRecapResponseSerializer
+
+    @extend_schema(
+        summary="Slip review recap",
+        description=(
+            "Authenticated user endpoint. Returns settled outcomes for the current user's slip selections over a "
+            "recent window, including how many failed selections had been flagged as risky before kickoff. "
+            "Selections whose market the settlement engine cannot resolve are reported separately as "
+            "`unsettleable` and are excluded from hit rates."
+        ),
+        tags=["Slip Reviews"],
+        parameters=[SlipReviewRecapQuerySerializer],
+        responses={200: SlipReviewRecapResponseSerializer},
+    )
+    def get(self, request):
+        query = SlipReviewRecapQuerySerializer(data=request.query_params)
+        query.is_valid(raise_exception=True)
+        days = query.validated_data.get("days") or 1
+        return Response(_slip_recap_payload(request.user, days=days))
 
 
 class SlipReviewListView(APIView):

@@ -25,6 +25,7 @@ from .models import (
     MarketPrediction,
     Pick,
     ProviderFixtureMap,
+    SlipSelection,
     StrategyReview,
     TeamAliasMap,
 )
@@ -1128,6 +1129,16 @@ class SportyBetShareImporter:
         }.get(str(outcome_id), "")
 
     def _canonical_market(self, market_name, outcome_name, specifier):
+        market_text = str(market_name or "").strip().lower()
+        outcome_text = str(outcome_name or "").strip()
+        if outcome_text and any(token in market_text for token in ("goalscorer", "goal scorer", "player to score")):
+            return f"{outcome_text} To Score"
+        if outcome_text and any(token in market_text for token in ("player shots", "shots on target", "player shot")):
+            if "target" in market_text:
+                return f"{outcome_text} Shots On Target {specifier or ''}".strip()
+            return f"{outcome_text} Shots {specifier or ''}".strip()
+        if outcome_text and any(token in market_text for token in ("player to be booked", "player card", "to be booked")):
+            return f"{outcome_text} To Be Booked"
         descriptor = describe_market(
             outcome_name or market_name,
             market_name=market_name,
@@ -2987,6 +2998,47 @@ class AlgoRunnerService:
         self._corner_total_cache[fixture_id] = value
         return value
 
+    # Markets that _check_market can resolve from a finished fixture. Kept next to the
+    # resolver so the two stay in step; anything outside this set is reported as
+    # unsettleable rather than silently treated as a void (push).
+    SETTLEABLE_MARKETS = frozenset({
+        "Home Win",
+        "Away Win",
+        "Draw",
+        "Over 1.5",
+        "Over 2.5",
+        "Over 3.5",
+        "Under 1.5",
+        "Under 2.5",
+        "Under 3.5",
+        "GG / BTTS Yes",
+        "GG + Over 2.5",
+        "DC: 1X",
+        "DC: X2",
+        "DC: 12",
+        "Home CS",
+        "Away CS",
+        "AH Home +0.5",
+        "AH Away +0.5",
+        "DNB Home",
+        "DNB Away",
+        "First to Score H",
+        "First to Score A",
+    })
+
+    @classmethod
+    def can_settle_market(cls, market):
+        market = str(market or "").strip()
+        if not market:
+            return False
+        if market.startswith("Corners Over ") or market.startswith("Corners Under "):
+            try:
+                float(market.rsplit(" ", 1)[-1])
+            except (TypeError, ValueError):
+                return False
+            return True
+        return market in cls.SETTLEABLE_MARKETS
+
     def _check_market(self, pick, home_goals, away_goals, home_team=None, away_team=None, first_scorer=None):
         market = pick.market
         if market.startswith("Corners Over ") or market.startswith("Corners Under "):
@@ -3051,16 +3103,29 @@ class AlgoRunnerService:
         }
         return checks.get(market)
 
-    def _settle_database_picks(self, target_date):
+    def _finished_fixture_map(self, target_date):
         fixtures = self._api_football_get(
             "/fixtures",
             {"date": target_date.isoformat(), "timezone": "Africa/Lagos"},
         )
-        fixture_map = {
+        return {
             str((fixture.get("fixture") or {}).get("id")): fixture
             for fixture in fixtures
             if ((fixture.get("fixture") or {}).get("status") or {}).get("short") in {"FT", "AET", "PEN"}
         }
+
+    @staticmethod
+    def _fixture_goals(fixture):
+        goals = fixture.get("goals") or {}
+        return goals.get("home"), goals.get("away")
+
+    @staticmethod
+    def _fixture_team_names(fixture):
+        teams = fixture.get("teams") or {}
+        return (teams.get("home") or {}).get("name"), (teams.get("away") or {}).get("name")
+
+    def _settle_database_picks(self, target_date):
+        fixture_map = self._finished_fixture_map(target_date)
 
         picks = Pick.objects.filter(
             Q(match_date=target_date)
@@ -3244,6 +3309,108 @@ class AlgoRunnerService:
         else:
             settle_date = timezone.localdate() - timedelta(days=1)
         return self._settle_database_picks(settle_date)
+
+    def settle_slip_selections(self, *, target_date=None):
+        """
+        Resolve user slip legs against finished fixtures.
+
+        Unlike Pick settlement, users submit arbitrary bookmaker markets, so a market
+        this engine cannot resolve is recorded as ``unsettleable`` instead of being
+        silently counted as a void. Only settled legs feed the accuracy stats.
+        """
+        settle_date = target_date or (timezone.localdate() - timedelta(days=1))
+        selections = list(
+            SlipSelection.objects.filter(
+                match_date=settle_date,
+                outcome=SlipSelection.Outcome.PENDING,
+            )
+        )
+        if not selections:
+            return {
+                "target_date": settle_date.isoformat(),
+                "considered": 0,
+                "settled": 0,
+                "wins": 0,
+                "losses": 0,
+                "void": 0,
+                "unsettleable": 0,
+                "awaiting_result": 0,
+                "flagged_risky_losses": 0,
+            }
+
+        fixture_map = self._finished_fixture_map(settle_date)
+        first_scorer_cache = {}
+        counts = {"win": 0, "loss": 0, "void": 0, "unsettleable": 0}
+        awaiting = 0
+        flagged_risky_losses = 0
+        settled_rows = []
+
+        for selection in selections:
+            if not self.can_settle_market(selection.market):
+                selection.outcome = SlipSelection.Outcome.UNSETTLEABLE
+                selection.result = "Market not supported by the settlement engine."
+                selection.settled_at = timezone.now()
+                settled_rows.append(selection)
+                counts["unsettleable"] += 1
+                continue
+
+            fixture = fixture_map.get(str(selection.match_id))
+            if not fixture:
+                awaiting += 1
+                continue
+
+            home_goals, away_goals = self._fixture_goals(fixture)
+            if home_goals is None or away_goals is None:
+                awaiting += 1
+                continue
+
+            home_team, away_team = self._fixture_team_names(fixture)
+            first_scorer = None
+            if "First to Score" in selection.market:
+                if selection.match_id not in first_scorer_cache:
+                    first_scorer_cache[selection.match_id] = self._first_scorer(selection.match_id)
+                first_scorer = first_scorer_cache[selection.match_id]
+
+            won = self._check_market(selection, home_goals, away_goals, home_team, away_team, first_scorer)
+            if won is None:
+                selection.outcome = SlipSelection.Outcome.VOID
+                counts["void"] += 1
+            elif won:
+                selection.outcome = SlipSelection.Outcome.WIN
+                counts["win"] += 1
+            else:
+                selection.outcome = SlipSelection.Outcome.LOSS
+                counts["loss"] += 1
+                if selection.flagged_risky:
+                    flagged_risky_losses += 1
+
+            selection.score = f"{home_goals}-{away_goals}"
+            if selection.market.startswith("Corners "):
+                corner_total = self._fixture_corner_total(selection.match_id)
+                selection.result = f"{corner_total} corners" if corner_total is not None else selection.score
+            else:
+                selection.result = selection.score
+            selection.settled_at = timezone.now()
+            settled_rows.append(selection)
+
+        if settled_rows:
+            SlipSelection.objects.bulk_update(
+                settled_rows,
+                ["outcome", "score", "result", "settled_at"],
+                batch_size=200,
+            )
+
+        return {
+            "target_date": settle_date.isoformat(),
+            "considered": len(selections),
+            "settled": len(settled_rows),
+            "wins": counts["win"],
+            "losses": counts["loss"],
+            "void": counts["void"],
+            "unsettleable": counts["unsettleable"],
+            "awaiting_result": awaiting,
+            "flagged_risky_losses": flagged_risky_losses,
+        }
 
     def run_auditor(self, *, from_date=None, to_date=None):
         env = self._runner_env()

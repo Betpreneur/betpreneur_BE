@@ -57,11 +57,13 @@ class UserPickAdvisoryTests(SimpleTestCase):
             "market": "Cards Over 3.5",
             "advisory_score": 50,
             "advisory_status": "avoid",
+            "market_taxonomy": {"family": "cards_total"},
         }
         replacement = {
-            "market": "Over 1.5",
+            "market": "Cards Under 5.5",
             "advisory_score": 68,
             "advisory_status": "playable",
+            "market_taxonomy": {"family": "cards_total"},
         }
 
         verdict = _manual_verdict(selected, replacement)
@@ -144,7 +146,25 @@ class UserPickAdvisoryTests(SimpleTestCase):
         strong_verdict = _manual_verdict(selected, strong_upgrade)
 
         self.assertEqual(weak_verdict["verdict"], "remove")
-        self.assertEqual(strong_verdict["verdict"], "replace")
+        self.assertEqual(strong_verdict["verdict"], "remove")
+
+    def test_specialist_pick_does_not_use_broad_fallback_even_when_weak(self):
+        selected = {
+            "market": "Cards Over 3.5",
+            "advisory_score": 44,
+            "advisory_status": "avoid",
+            "market_taxonomy": {"family": "cards_total"},
+            "market_capability": {"data_quality": "poor"},
+        }
+        game = {
+            "markets": [
+                {"market": "Over 1.5", "final_confidence": 90, "confidence": 90, "council_review": {"decision": "approve"}},
+            ]
+        }
+
+        replacement = _replacement_market_for_slip(game, selected_market=selected)
+
+        self.assertIsNone(replacement)
 
     def test_generated_cards_markets_provide_same_family_replacement(self):
         selected = {

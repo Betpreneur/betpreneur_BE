@@ -100,6 +100,12 @@ class BookmakerMarketParsingTests(SimpleTestCase):
 
         self.assertEqual(market, "Cards Over 3.5")
 
+    def test_sportybet_recognizes_goalscorer_outcome_as_player_score_market(self):
+        importer = SportyBetShareImporter()
+        market = importer._canonical_market("Anytime Goalscorer", "Haller, Sebastian (Sanfrecce Hiroshima)", "")
+
+        self.assertEqual(market, "Haller, Sebastian (Sanfrecce Hiroshima) To Score")
+
     def test_betano_parses_match_result_using_event_sides(self):
         importer = BetanoBetslipImporter()
         market = importer._canonical_market(

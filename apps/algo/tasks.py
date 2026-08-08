@@ -137,6 +137,14 @@ def settle_daily_results(self, target_date=None):
     return algo_runner_service.update_results(target_date=target_date)
 
 
+@shared_task(bind=True, ignore_result=False, max_retries=2, default_retry_delay=300)
+def settle_slip_selections(self, target_date=None):
+    if target_date is not None:
+        target_date = date.fromisoformat(target_date)
+
+    return algo_runner_service.settle_slip_selections(target_date=target_date)
+
+
 @shared_task(bind=True, ignore_result=False)
 def run_monthly_auditor(self, from_date=None, to_date=None):
     if from_date is not None:

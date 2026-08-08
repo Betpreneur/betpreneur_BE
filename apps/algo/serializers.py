@@ -564,7 +564,7 @@ class ManualSlipReviewResponseSerializer(serializers.Serializer):
     remove_count = serializers.IntegerField()
     unmatched_count = serializers.IntegerField()
     pending_analysis_count = serializers.IntegerField()
-    health_score = serializers.FloatField(required=False)
+    health_score = serializers.FloatField(required=False, allow_null=True)
     risk_level = serializers.CharField(required=False)
     ticket_health = serializers.JSONField(required=False)
     original_ticket = serializers.JSONField(required=False)
@@ -580,6 +580,19 @@ class ManualSlipReviewResponseSerializer(serializers.Serializer):
 class SlipReviewListResponseSerializer(serializers.Serializer):
     count = serializers.IntegerField()
     reviews = serializers.JSONField()
+
+
+class SlipReviewRecapQuerySerializer(serializers.Serializer):
+    days = serializers.IntegerField(required=False, min_value=1, max_value=90, default=1)
+
+
+class SlipReviewRecapResponseSerializer(serializers.Serializer):
+    contract_version = serializers.CharField()
+    window = serializers.JSONField()
+    tickets = serializers.IntegerField()
+    selections = serializers.JSONField()
+    flagged = serializers.JSONField()
+    message = serializers.CharField()
 
 
 class SlipReviewDetailResponseSerializer(serializers.Serializer):

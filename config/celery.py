@@ -28,6 +28,14 @@ app.conf.beat_schedule = {
         ),
         "options": {"expires": timedelta(hours=6).total_seconds()},
     },
+    "settle-slip-selections": {
+        "task": "apps.algo.tasks.settle_slip_selections",
+        "schedule": crontab(
+            hour=os.environ.get("ALGO_SLIP_SETTLE_HOUR", "7"),
+            minute=os.environ.get("ALGO_SLIP_SETTLE_MINUTE", "0"),
+        ),
+        "options": {"expires": timedelta(hours=6).total_seconds()},
+    },
     "run-monthly-auditor": {
         "task": "apps.algo.tasks.run_monthly_auditor",
         "schedule": crontab(
