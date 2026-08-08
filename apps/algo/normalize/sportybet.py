@@ -128,6 +128,8 @@ SPORTYBET_MARKETS: dict[str, MarketSpec] = {
     # --- shots on target: TEAM markets, not player props ---
     "900546": MarketSpec("team_shots_on_target", _FULL, _HOME, OU),
     "900547": MarketSpec("team_shots_on_target", _FULL, _AWAY, OU),
+    # Match total shots on target, as opposed to the per-team markets above.
+    "900393": MarketSpec("shots_on_target_total", _FULL, _MATCH, OU),
 
     # --- vendor extensions: team scores N+ in a row / leads by N ---
     "60000": MarketSpec("btts_n_plus", _FULL, _MATCH, YES_NO, Settlement.WIN_LOSE),

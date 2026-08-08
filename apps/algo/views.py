@@ -2366,6 +2366,22 @@ def _resolved_taxonomy(selection):
     return {}
 
 
+def _resolved_canonical_market(selection):
+    """
+    The market identity the importer resolved, carried into the analysis result.
+
+    Without this the public payload reports `resolution: "unresolved"` on every leg,
+    because the result is a fresh dict that never inherits what the importer worked out.
+    """
+    for candidate in (
+        selection.get("canonical_market"),
+        (selection.get("provider_payload") or {}).get("canonical_market"),
+    ):
+        if isinstance(candidate, dict) and candidate:
+            return candidate
+    return {}
+
+
 def _descriptor_from_taxonomy(taxonomy):
     """Rebuild a MarketDescriptor from its stored form, tolerating JSON round-tripping."""
     fields = {field.name for field in dataclasses.fields(MarketDescriptor)}
@@ -3388,12 +3404,17 @@ def _review_status_from_summary(summary):
     count = int(summary.get("count") or 0)
     analysed_count = int(summary.get("analysed_count") or 0)
     pending_count = int(summary.get("pending_analysis_count") or 0)
+    not_assessed_count = int(summary.get("not_assessed_count") or 0)
     reviewable_count = max(0, count - int(summary.get("expired_count") or 0))
     if count and analysed_count == reviewable_count:
         return SlipReview.Status.COMPLETED
     if analysed_count:
         return SlipReview.Status.PARTIAL
     if pending_count:
+        return SlipReview.Status.UNANALYSED
+    if not_assessed_count:
+        # The review ran to completion and concluded it could not assess anything.
+        # That is a finding, not a crash, and must not be reported as a failure.
         return SlipReview.Status.UNANALYSED
     return SlipReview.Status.FAILED
 
@@ -3892,13 +3913,21 @@ def _analyse_manual_selection(
             generated_markets=generated_markets,
         )
         verdict = _manual_verdict(submitted_market, replacement_market)
+        # A market priced by a fitted model is not "not found" merely because the core
+        # algo did not enumerate it. Since most families are now served by the score
+        # matrix or the count models, that list is often empty by design — reporting
+        # those legs as unmatched hid perfectly good assessments.
+        model_served = _market_was_assessed(submitted_market)
+        resolution_status = "analysed" if model_served else "market_not_found"
         return {
             "match": match_text,
             "submitted_market": requested_market,
+            "provider_market_text": selection.get("provider_market_text") or requested_market,
+            "canonical_market": _resolved_canonical_market(selection),
             "market_taxonomy": market_taxonomy,
             "analysis_market": analysis_market,
             "fixture_orientation": candidate.get("match_orientation", ""),
-            "status": "market_not_found",
+            "status": resolution_status,
             **verdict,
             "matched_fixture": candidate,
             "available_markets": [market.get("market") for market in markets],
@@ -3908,7 +3937,7 @@ def _analyse_manual_selection(
             "replacement_market": replacement_market,
             "generated_markets": generated_markets,
             "fixture_resolution": {
-                "status": "market_not_found",
+                "status": resolution_status,
                 "attempts": resolver_trace,
             },
             "statpal_refresh": statpal_refresh,
@@ -3935,6 +3964,8 @@ def _analyse_manual_selection(
     return {
         "match": match_text,
         "submitted_market": requested_market,
+        "provider_market_text": selection.get("provider_market_text") or requested_market,
+        "canonical_market": _resolved_canonical_market(selection),
         "market_taxonomy": market_taxonomy,
         "analysis_market": analysis_market,
         "fixture_orientation": candidate.get("match_orientation", ""),

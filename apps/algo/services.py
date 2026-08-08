@@ -396,6 +396,25 @@ class FixtureSearchService:
             kickoff_utc = parse_datetime(str(item.get("kickoff_utc") or "")) if item.get("kickoff_utc") else None
             home_norm = normalize_fixture_text(home_team)
             away_norm = normalize_fixture_text(away_team)
+            # Keep the provider's own identifiers on the cached row. They are the join
+            # key for the fitted goal models and the team rate profiles, and storing only
+            # the raw provider payload loses them — leaving a fixture that resolves
+            # perfectly but cannot be priced.
+            payload = json_safe(item.get("api_payload") or item)
+            if isinstance(payload, dict):
+                league_id = (
+                    item.get("provider_competition_id")
+                    or item.get("code")
+                    or ((payload.get("_league") or {}).get("id") if isinstance(payload.get("_league"), dict) else "")
+                )
+                home_id = item.get("hid") or (payload.get("home") or {}).get("id")
+                away_id = item.get("aid") or (payload.get("away") or {}).get("id")
+                payload["provider_competition_id"] = str(league_id or "")
+                payload["provider_match_id"] = str(
+                    item.get("provider_match_id") or payload.get("main_id") or ""
+                )
+                payload["provider_home_team_id"] = str(home_id or "")
+                payload["provider_away_team_id"] = str(away_id or "")
             FixtureCache.objects.update_or_create(
                 match_id=match_id,
                 defaults={
@@ -416,7 +435,7 @@ class FixtureSearchService:
                     "league_type": item.get("league_type") or "",
                     "kickoff": item.get("kickoff") or "",
                     "kickoff_utc": kickoff_utc,
-                    "api_payload": json_safe(item.get("api_payload") or item),
+                    "api_payload": payload,
                     "source": item.get("source") or "api_football",
                 },
             )
@@ -854,18 +873,31 @@ class FixtureSearchService:
 
     def _serialize_fixture(self, fixture, score, orientation="unknown"):
         payload = fixture.api_payload or {}
+        # The provider's own ids are how a resolved fixture reaches its fitted goal model
+        # and its team rate profiles. API-Football rows carry `hid`/`code`; StatPal rows
+        # carry the normalised `provider_*` keys, so read both.
+        home_team_id = payload.get("provider_home_team_id") or payload.get("hid") or payload.get("home_team_id")
+        away_team_id = payload.get("provider_away_team_id") or payload.get("aid") or payload.get("away_team_id")
+        league_id = payload.get("provider_competition_id") or payload.get("code") or payload.get("league_id")
         return {
             "match_id": fixture.match_id,
             "match_date": fixture.match_date,
             "fixture": fixture.fixture,
             "home_team": fixture.home_team,
             "away_team": fixture.away_team,
-            "home_team_id": payload.get("hid") or payload.get("home_team_id"),
-            "away_team_id": payload.get("aid") or payload.get("away_team_id"),
+            "home_team_id": home_team_id,
+            "away_team_id": away_team_id,
+            "statpal_home_team_id": home_team_id if fixture.source == "statpal" else "",
+            "statpal_away_team_id": away_team_id if fixture.source == "statpal" else "",
+            "provider_match_id": payload.get("provider_match_id") or payload.get("main_id") or "",
+            "hid": home_team_id,
+            "aid": away_team_id,
+            "code": league_id,
+            "source": fixture.source,
             "home_logo": fixture.home_logo,
             "away_logo": fixture.away_logo,
             "league": fixture.league,
-            "league_id": payload.get("code") or payload.get("league_id"),
+            "league_id": league_id,
             "season": payload.get("season"),
             "league_logo": fixture.league_logo,
             "country": fixture.country,
@@ -1335,8 +1367,9 @@ class SportyBetShareImporter:
             return f"{outcome_text} To Score"
         if outcome_text and any(token in market_text for token in ("player shots", "shots on target", "player shot")):
             if "target" in market_text:
-                return f"{outcome_text} Shots On Target {specifier or ''}".strip()
-            return f"{outcome_text} Shots {specifier or ''}".strip()
+                # The specifier is machine syntax (`total=7.5`); it must not reach a label.
+                return f"{outcome_text} Shots On Target".strip()
+            return f"{outcome_text} Shots".strip()
         if outcome_text and any(token in market_text for token in ("player to be booked", "player card", "to be booked")):
             return f"{outcome_text} To Be Booked"
         descriptor = describe_market(

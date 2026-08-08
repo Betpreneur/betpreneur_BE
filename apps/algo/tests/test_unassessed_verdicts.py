@@ -12,6 +12,7 @@ safe, so the risk band is `unknown` rather than `low`.
 
 from django.test import SimpleTestCase
 
+from apps.algo.models import SlipReview
 from apps.algo.views import (
     _manual_verdict,
     _market_was_assessed,
@@ -116,3 +117,34 @@ class PublicVocabularyTests(SimpleTestCase):
 
     def test_a_scored_weak_leg_is_still_high_risk(self):
         self.assertEqual(_public_selection_risk("remove", {"score": 40, "status": "avoid"}), "high")
+
+
+class ReviewStatusTests(SimpleTestCase):
+    """
+    A review that ran to completion and found nothing assessable is not a failure.
+
+    Production reported `status: "failed"` for a review that analysed six legs
+    correctly and concluded it could not price any of them — a finding, not a crash.
+    """
+
+    def _status(self, **counts):
+        from apps.algo.views import _review_status_from_summary
+
+        base = {"count": 6, "analysed_count": 0, "pending_analysis_count": 0,
+                "not_assessed_count": 0, "expired_count": 0}
+        base.update(counts)
+        return _review_status_from_summary(base)
+
+    def test_a_review_that_assessed_nothing_is_unanalysed_not_failed(self):
+        self.assertEqual(self._status(not_assessed_count=6), SlipReview.Status.UNANALYSED)
+
+    def test_a_partially_assessed_review_is_partial(self):
+        self.assertEqual(
+            self._status(analysed_count=3, not_assessed_count=3), SlipReview.Status.PARTIAL
+        )
+
+    def test_a_fully_assessed_review_is_completed(self):
+        self.assertEqual(self._status(analysed_count=6), SlipReview.Status.COMPLETED)
+
+    def test_a_review_with_nothing_at_all_is_still_failed(self):
+        self.assertEqual(self._status(count=0), SlipReview.Status.FAILED)

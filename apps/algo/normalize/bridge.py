@@ -108,6 +108,7 @@ def canonical_text(market: CanonicalMarket) -> str:
         "team_cards": "Team Cards",
         "booking_points": "Booking Points",
         "team_shots_on_target": "Team Shots On Target",
+        "shots_on_target_total": "Shots On Target",
         "asian_handicap": "AH",
         "handicap": "EH",
         "nth_goal": "Nth Goal",
