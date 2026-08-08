@@ -28,6 +28,14 @@ app.conf.beat_schedule = {
         ),
         "options": {"expires": timedelta(hours=6).total_seconds()},
     },
+    "fit-score-models": {
+        "task": "apps.algo.tasks.fit_score_models",
+        "schedule": crontab(
+            hour=os.environ.get("ALGO_FIT_MODELS_HOUR", "4"),
+            minute=os.environ.get("ALGO_FIT_MODELS_MINUTE", "30"),
+        ),
+        "options": {"expires": timedelta(hours=8).total_seconds()},
+    },
     "settle-slip-selections": {
         "task": "apps.algo.tasks.settle_slip_selections",
         "schedule": crontab(

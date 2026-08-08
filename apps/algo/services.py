@@ -36,6 +36,9 @@ from .recommendation_policy import (
 )
 from .council import CAUTION, REJECT, council_review
 from .market_taxonomy import describe_market
+from .normalize.bridge import descriptor_from_canonical
+from .normalize.canonical import Resolution as MarketResolution
+from .normalize.sportybet import resolve as resolve_sportybet_market
 
 
 log = logging.getLogger(__name__)
@@ -995,11 +998,7 @@ class SportyBetShareImporter:
             len(outcomes),
             sorted(data.keys()),
         )
-        outcomes_by_event = {
-            str(item.get("eventId") or ""): item
-            for item in outcomes
-            if item.get("eventId")
-        }
+        outcomes_by_event = self._merge_outcomes_by_event(outcomes)
         selections = []
         for item in ticket.get("selections") or []:
             event_id = str(item.get("eventId") or "")
@@ -1058,12 +1057,14 @@ class SportyBetShareImporter:
         market = self._market_name(item, outcome)
         if not market:
             return None
-        market_descriptor = describe_market(market)
+        canonical, market_descriptor = self._resolve_market_identity(item, outcome, fallback_text=market)
         tournament = (((outcome.get("sport") or {}).get("category") or {}).get("tournament") or {}).get("name", "")
         return {
             "provider_event_id": item.get("eventId") or outcome.get("eventId") or "",
             "match": f"{home} vs {away}",
-            "market": market,
+            "market": market_descriptor.canonical or market,
+            "provider_market_text": market,
+            "canonical_market": canonical.to_dict(),
             "market_taxonomy": market_descriptor.to_dict(),
             "home_team": home,
             "away_team": away,
@@ -1080,11 +1081,13 @@ class SportyBetShareImporter:
         market = self._market_name({}, {"markets": markets})
         if not home or not away or not market:
             return None
-        market_descriptor = describe_market(market)
+        canonical, market_descriptor = self._resolve_market_identity({}, outcome, fallback_text=market)
         return {
             "provider_event_id": outcome.get("eventId") or "",
             "match": f"{home} vs {away}",
-            "market": market,
+            "market": market_descriptor.canonical or market,
+            "provider_market_text": market,
+            "canonical_market": canonical.to_dict(),
             "market_taxonomy": market_descriptor.to_dict(),
             "home_team": home,
             "away_team": away,
@@ -1093,6 +1096,96 @@ class SportyBetShareImporter:
             "odds": None,
             "provider_payload": {"outcome": outcome},
         }
+
+    @staticmethod
+    def _merge_outcomes_by_event(outcomes):
+        """
+        Merge SportyBet's per-selection outcome entries into one entry per fixture.
+
+        SportyBet emits a separate `outcomes` element for every selection, each carrying
+        only that selection's market and only the chosen outcome within it. Indexing them
+        into a plain dict keyed on eventId therefore keeps just the last one, and every
+        other leg on the same fixture loses its market. Merging markets by
+        (id, specifier) — and outcomes within them by id — keeps all legs resolvable,
+        which matters for same-match multis and bet builders.
+        """
+        merged = {}
+        market_index = {}
+        for item in outcomes:
+            event_id = str(item.get("eventId") or "")
+            if not event_id:
+                continue
+            base = merged.get(event_id)
+            if base is None:
+                base = {key: value for key, value in item.items() if key != "markets"}
+                base["markets"] = []
+                merged[event_id] = base
+                market_index[event_id] = {}
+            for market in item.get("markets") or []:
+                key = (str(market.get("id") or ""), str(market.get("specifier") or ""))
+                existing = market_index[event_id].get(key)
+                if existing is None:
+                    existing = dict(market)
+                    existing["outcomes"] = list(market.get("outcomes") or [])
+                    base["markets"].append(existing)
+                    market_index[event_id][key] = existing
+                    continue
+                seen = {str(entry.get("id") or "") for entry in existing["outcomes"]}
+                for entry in market.get("outcomes") or []:
+                    if str(entry.get("id") or "") not in seen:
+                        existing["outcomes"].append(entry)
+                        seen.add(str(entry.get("id") or ""))
+        return merged
+
+    def _resolve_market_identity(self, item, outcome, *, fallback_text=""):
+        """
+        Resolve the market from the bookmaker's ids, falling back to text only when the
+        market id is unknown to us.
+
+        `Over 2.5` has been observed meaning match goals, home-team goals, bookings and
+        shots on target on the same feed, so the display string is not an identity. The
+        fallback is flagged via the canonical market's `resolution`, never silently
+        presented as if it were a confident identification.
+        """
+        market_id = str(item.get("marketId") or "")
+        specifier = str(item.get("specifier") or "")
+        market = next(
+            (
+                candidate
+                for candidate in outcome.get("markets") or []
+                if str(candidate.get("id") or "") == market_id
+                and (not specifier or str(candidate.get("specifier") or "") == specifier)
+            ),
+            None,
+        ) or (outcome.get("markets") or [{}])[0]
+        outcome_id = str(item.get("outcomeId") or "")
+        selected = next(
+            (
+                candidate
+                for candidate in market.get("outcomes") or []
+                if str(candidate.get("id") or "") == outcome_id
+            ),
+            None,
+        ) or (market.get("outcomes") or [{}])[0]
+
+        canonical = resolve_sportybet_market(
+            market_id=market_id or market.get("id"),
+            outcome_id=outcome_id or selected.get("id"),
+            specifier=specifier or market.get("specifier") or "",
+            market_label=market.get("name") or market.get("desc") or "",
+            outcome_label=selected.get("desc") or "",
+        )
+        if canonical.resolution == MarketResolution.MAPPED:
+            return canonical, descriptor_from_canonical(canonical, raw=fallback_text)
+
+        log.info(
+            "SportyBet unmapped market id=%s specifier=%s outcome=%s label=%r",
+            market_id,
+            specifier,
+            outcome_id,
+            market.get("desc") or market.get("name") or "",
+        )
+        return canonical, describe_market(fallback_text)
 
     def _market_name(self, item, outcome):
         market_id = str(item.get("marketId") or "")

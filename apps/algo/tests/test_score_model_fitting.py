@@ -1,0 +1,240 @@
+"""
+Fitting team strengths, looking them up, and evaluating markets from the fit.
+
+Shrinkage is the load-bearing behaviour: slips are full of small-sample leagues, and an
+unshrunk ratio from three games would assert things the data cannot support.
+"""
+
+from django.test import SimpleTestCase, TestCase
+
+from apps.algo.evaluators import score_matrix_evaluator
+from apps.algo.evaluators.registry import (
+    QUANTITATIVE,
+    SCORE_MATRIX_ENGINE,
+    assessment_type_for,
+    evaluator_for,
+)
+from apps.algo.market_taxonomy import describe_market
+from apps.algo.models import LeagueScoreModel
+from apps.algo.scoring.fitting import (
+    MAX_FACTOR,
+    MIN_FACTOR,
+    expected_goals,
+    fit_league_from_standings,
+)
+from apps.algo.scoring.service import score_model_service
+
+
+def _standings(teams):
+    return {"standings": {"tournament": [{"team": teams}]}}
+
+
+def _team(name, *, hs, ha, hg, aws, awa, ag, team_id=""):
+    return {
+        "id": team_id or name.lower().replace(" ", ""),
+        "name": name,
+        "home": {"goals_scored": str(hs), "goals_allowed": str(ha), "games_played": str(hg)},
+        "away": {"goals_scored": str(aws), "goals_allowed": str(awa), "games_played": str(ag)},
+    }
+
+
+def _balanced_league():
+    return _standings([
+        _team("Strong FC", hs=20, ha=6, hg=10, aws=14, awa=10, ag=10),
+        _team("Average FC", hs=13, ha=12, hg=10, aws=10, awa=14, ag=10),
+        _team("Weak FC", hs=6, ha=21, hg=10, aws=4, awa=24, ag=10),
+    ])
+
+
+class FittingTests(SimpleTestCase):
+    def test_baselines_come_from_observed_league_scoring(self):
+        fit = fit_league_from_standings(_balanced_league(), league_id="1")
+
+        self.assertAlmostEqual(fit.home_goal_baseline, 39 / 30, places=3)
+        self.assertAlmostEqual(fit.away_goal_baseline, 28 / 30, places=3)
+
+    def test_strong_team_outranks_weak_team_on_attack(self):
+        fit = fit_league_from_standings(_balanced_league(), league_id="1")
+        by_name = {team.team_name: team for team in fit.teams}
+
+        self.assertGreater(by_name["Strong FC"].home_attack, by_name["Weak FC"].home_attack)
+        self.assertLess(by_name["Strong FC"].home_defence, by_name["Weak FC"].home_defence)
+
+    def test_small_samples_are_shrunk_toward_the_league_average(self):
+        big = fit_league_from_standings(
+            _standings([_team("A", hs=20, ha=2, hg=10, aws=10, awa=5, ag=10),
+                        _team("B", hs=10, ha=10, hg=10, aws=5, awa=10, ag=10)]),
+            league_id="1",
+        )
+        small = fit_league_from_standings(
+            _standings([_team("A", hs=6, ha=0, hg=3, aws=3, awa=1, ag=3),
+                        _team("B", hs=3, ha=3, hg=3, aws=1, awa=3, ag=3)]),
+            league_id="1",
+        )
+        big_a = next(t for t in big.teams if t.team_name == "A")
+        small_a = next(t for t in small.teams if t.team_name == "A")
+
+        # Same shape of record, far fewer games: the estimate must be pulled toward 1.0.
+        self.assertLess(abs(small_a.home_attack - 1.0), abs(big_a.home_attack - 1.0))
+
+    def test_a_goalless_team_is_never_assigned_zero_attack(self):
+        fit = fit_league_from_standings(
+            _standings([_team("Silent FC", hs=0, ha=9, hg=3, aws=0, awa=9, ag=3),
+                        _team("Loud FC", hs=9, ha=0, hg=3, aws=9, awa=0, ag=3)]),
+            league_id="1",
+        )
+        silent = next(t for t in fit.teams if t.team_name == "Silent FC")
+
+        self.assertGreaterEqual(silent.home_attack, MIN_FACTOR)
+        self.assertGreater(silent.home_attack, 0)
+
+    def test_factors_are_bounded(self):
+        fit = fit_league_from_standings(
+            _standings([_team("Machine", hs=90, ha=0, hg=10, aws=90, awa=0, ag=10),
+                        _team("Sieve", hs=0, ha=90, hg=10, aws=0, awa=90, ag=10)]),
+            league_id="1",
+        )
+        for team in fit.teams:
+            for factor in (team.home_attack, team.home_defence, team.away_attack, team.away_defence):
+                self.assertGreaterEqual(factor, MIN_FACTOR)
+                self.assertLessEqual(factor, MAX_FACTOR)
+
+    def test_empty_standings_are_reported_as_poor_rather_than_guessed(self):
+        fit = fit_league_from_standings(_standings([]), league_id="1")
+
+        self.assertEqual(fit.data_quality, "poor")
+        self.assertEqual(fit.teams, ())
+
+    def test_fit_records_that_no_time_decay_was_applied(self):
+        fit = fit_league_from_standings(_balanced_league(), league_id="1")
+
+        self.assertFalse(fit.diagnostics["time_decay_applied"])
+
+    def test_expected_goals_reward_strong_attack_against_weak_defence(self):
+        strong = expected_goals(
+            home_attack=1.5, home_defence=0.7, away_attack=0.7, away_defence=1.4,
+            home_baseline=1.4, away_baseline=1.1,
+        )
+        even = expected_goals(
+            home_attack=1.0, home_defence=1.0, away_attack=1.0, away_defence=1.0,
+            home_baseline=1.4, away_baseline=1.1,
+        )
+
+        self.assertGreater(strong[0], even[0])
+        self.assertLess(strong[1], even[1])
+
+
+class ServiceTests(TestCase):
+    def setUp(self):
+        self.model = score_model_service.fit_league(
+            league_id="2914", league_name="Primera", standings_payload=_balanced_league()
+        )
+
+    def test_fit_is_persisted_with_its_teams(self):
+        self.assertEqual(LeagueScoreModel.objects.count(), 1)
+        self.assertEqual(self.model.teams.count(), 3)
+        self.assertEqual(self.model.data_quality, "medium")
+
+    def test_refitting_replaces_rather_than_duplicates(self):
+        score_model_service.fit_league(
+            league_id="2914", league_name="Primera", standings_payload=_balanced_league()
+        )
+
+        self.assertEqual(LeagueScoreModel.objects.count(), 1)
+        self.assertEqual(self.model.teams.count(), 3)
+
+    def test_rates_reflect_the_relative_strengths(self):
+        strong_home = score_model_service.rates_for_fixture(
+            league_id="2914", home_team_name="Strong FC", away_team_name="Weak FC"
+        )
+        weak_home = score_model_service.rates_for_fixture(
+            league_id="2914", home_team_name="Weak FC", away_team_name="Strong FC"
+        )
+
+        self.assertTrue(strong_home.usable)
+        self.assertGreater(strong_home.home_rate, weak_home.home_rate)
+
+    def test_team_names_match_loosely(self):
+        rates = score_model_service.rates_for_fixture(
+            league_id="2914", home_team_name="CA Strong FC", away_team_name="Weak FC"
+        )
+
+        self.assertTrue(rates.matched_home)
+
+    def test_unknown_league_is_not_usable(self):
+        rates = score_model_service.rates_for_fixture(
+            league_id="does-not-exist", home_team_name="A", away_team_name="B"
+        )
+
+        self.assertFalse(rates.usable)
+        self.assertEqual(rates.data_quality, "poor")
+
+    def test_one_unmatched_team_makes_the_fixture_unusable(self):
+        rates = score_model_service.rates_for_fixture(
+            league_id="2914", home_team_name="Strong FC", away_team_name="Nonexistent United"
+        )
+
+        self.assertFalse(rates.usable)
+
+
+class MatrixEvaluatorTests(TestCase):
+    def setUp(self):
+        score_model_service.fit_league(
+            league_id="2914", league_name="Primera", standings_payload=_balanced_league()
+        )
+        self.fixture = {"code": "2914", "hname": "Strong FC", "aname": "Weak FC"}
+
+    def _evaluate(self, market):
+        return score_matrix_evaluator.evaluate(describe_market(market), fixture=self.fixture)
+
+    def test_result_market_is_modelled(self):
+        result = self._evaluate("Home Win")
+
+        self.assertTrue(result["available"])
+        self.assertEqual(result["basis"], "score_matrix")
+        self.assertGreater(result["probability"], 0.5)
+
+    def test_double_chance_is_consistent_with_its_parts(self):
+        home = self._evaluate("Home Win")["probability"]
+        draw = self._evaluate("Draw")["probability"]
+        dc = self._evaluate("DC: 1X")["probability"]
+
+        self.assertAlmostEqual(dc, home + draw, places=6)
+
+    def test_totals_are_modelled(self):
+        over = self._evaluate("Over 2.5")
+        under = self._evaluate("Under 2.5")
+
+        self.assertAlmostEqual(over["probability"] + under["probability"], 1.0, places=6)
+
+    def test_btts_is_modelled(self):
+        self.assertTrue(self._evaluate("GG / BTTS Yes")["available"])
+
+    def test_missing_fit_declines_rather_than_defaulting(self):
+        result = score_matrix_evaluator.evaluate(
+            describe_market("Home Win"), fixture={"code": "9999", "hname": "X", "aname": "Y"}
+        )
+
+        self.assertFalse(result["available"])
+        self.assertEqual(result["basis"], "score_matrix_no_fit")
+        self.assertIn("no_fitted_score_model", result["warnings"])
+
+    def test_evidence_reports_expected_goals_and_model_version(self):
+        evidence = self._evaluate("Over 2.5")["evidence"]
+
+        self.assertIn("expected_goals_home", evidence)
+        self.assertIn("model_version", evidence)
+
+
+class RegistrySwapTests(SimpleTestCase):
+    def test_result_families_now_publish_probabilities(self):
+        for family in [
+            "match_result", "double_chance", "draw_no_bet", "btts",
+            "clean_sheet", "total_goals", "team_total_goals", "asian_handicap",
+        ]:
+            self.assertEqual(assessment_type_for(family), QUANTITATIVE, family)
+            self.assertEqual(evaluator_for(family).engine, SCORE_MATRIX_ENGINE, family)
+
+    def test_specialised_families_still_use_the_statpal_engine(self):
+        for family in ["corners_total", "cards_total", "player_goal"]:
+            self.assertNotEqual(evaluator_for(family).engine, SCORE_MATRIX_ENGINE, family)

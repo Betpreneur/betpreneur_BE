@@ -137,6 +137,46 @@ def settle_daily_results(self, target_date=None):
     return algo_runner_service.update_results(target_date=target_date)
 
 
+@shared_task(bind=True, ignore_result=False)
+def fit_score_models(self, league_ids=None):
+    """
+    Refit the per-league goal models.
+
+    Nightly, so a slip review only ever reads a cached fit. A league that fails is
+    logged and skipped rather than aborting the run — one bad league must not leave
+    every other league stale.
+    """
+    from .scoring.service import score_model_service
+    from .statpal import StatPalClient
+
+    if league_ids:
+        targets = [{"id": str(item)} for item in league_ids]
+    else:
+        payload = StatPalClient().soccer_endpoint("SOCCER_LEAGUES")
+        leagues = ((payload or {}).get("leagues") or {}).get("league") or []
+        targets = leagues if isinstance(leagues, list) else [leagues]
+
+    fitted = failed = 0
+    errors = []
+    for league in targets:
+        league_id = str((league or {}).get("id") or "")
+        if not league_id:
+            continue
+        try:
+            score_model_service.fit_league(
+                league_id=league_id,
+                league_name=(league or {}).get("name") or "",
+                season=(league or {}).get("season") or "",
+            )
+            fitted += 1
+        except Exception as exc:
+            failed += 1
+            if len(errors) < 20:
+                errors.append({"league_id": league_id, "error": str(exc)[:200]})
+
+    return {"considered": len(targets), "fitted": fitted, "failed": failed, "errors": errors}
+
+
 @shared_task(bind=True, ignore_result=False, max_retries=2, default_retry_delay=300)
 def settle_slip_selections(self, target_date=None):
     if target_date is not None:

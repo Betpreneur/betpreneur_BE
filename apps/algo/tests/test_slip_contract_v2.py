@@ -3,11 +3,21 @@ from django.test import TestCase
 from apps.algo.views import _slip_intelligence
 
 
-def _analysed_leg(score, *, match, replacement=None, data_quality="strong", cap=88):
+def _analysed_leg(
+    score, *, match, replacement=None, data_quality="strong", cap=88,
+    family="total_goals", assessment="quantitative_model",
+):
     item = {
         "match": match,
         "submitted_market": "Home Win",
-        "market_taxonomy": {"canonical": "Home Win", "recognized": True, "core_supported": True},
+        "provider_market_text": "Home Win",
+        "market_taxonomy": {
+            "canonical": "Home Win",
+            "family": family,
+            "recognized": True,
+            "core_supported": True,
+        },
+        "canonical_market": {"resolution": "mapped", "period": "full_match", "subject": "match"},
         "status": "analysed",
         "verdict": "keep",
         "message": "",
@@ -21,6 +31,7 @@ def _analysed_leg(score, *, match, replacement=None, data_quality="strong", cap=
             "final_confidence": score,
             "odds": 1.9,
             "market_capability": {"confidence_cap": cap, "data_quality": data_quality},
+            "statpal_advisory": {"assessment_type": assessment},
         },
     }
     if replacement is not None:

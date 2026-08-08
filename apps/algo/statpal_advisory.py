@@ -4,6 +4,7 @@ import math
 from dataclasses import asdict, dataclass
 from typing import Any
 
+from .evaluators.registry import HEURISTIC, NONE, SCORE_MATRIX_ENGINE, evaluator_for
 from .market_taxonomy import MarketDescriptor, describe_market, normalize_market_text
 from .models import ProviderPlayerMap
 
@@ -66,34 +67,48 @@ class StatPalMarketAdvisoryService:
         statpal_payload: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         descriptor = market if isinstance(market, MarketDescriptor) else describe_market(market)
-        if descriptor.requires_player_stats:
-            return self._evaluate_player_market(descriptor, fixture=fixture, statpal_payload=statpal_payload).to_dict()
-        if descriptor.requires_card_stats:
-            return self._evaluate_cards_market(descriptor, fixture=fixture, provider_payload=provider_payload).to_dict()
-        if descriptor.requires_corner_stats:
-            return self._evaluate_corners_market(descriptor, fixture=fixture, provider_payload=provider_payload).to_dict()
-        if descriptor.requires_team_goal_stats or descriptor.family == "team_total_goals":
-            return self._evaluate_team_goal_market(descriptor, fixture=fixture).to_dict()
-        if descriptor.family == "total_goals":
-            return self._evaluate_total_goal_market(descriptor, fixture=fixture).to_dict()
-        if descriptor.family in {
-            "btts",
-            "match_result",
-            "draw_no_bet",
-            "double_chance",
-            "clean_sheet",
-            "first_to_score",
-        }:
-            return self._evaluate_fixture_context_market(descriptor, fixture=fixture).to_dict()
-        return StatPalAdvisory(
-            available=False,
-            score=None,
-            status="unsupported",
-            basis="not_statpal_market",
-            evidence={},
-            warnings=["not_statpal_market"],
-            message="This market does not need the StatPal advisory path.",
-        ).to_dict()
+        spec = evaluator_for(descriptor.family)
+        if spec is None:
+            return {
+                **StatPalAdvisory(
+                    available=False,
+                    score=None,
+                    status="unsupported",
+                    basis="no_model_for_family",
+                    evidence={"market_family": descriptor.family},
+                    warnings=["no_model_for_family"],
+                    message="This market family is recognised but not modelled yet.",
+                ).to_dict(),
+                "assessment_type": NONE,
+                "market_family": descriptor.family,
+            }
+
+        if spec.engine == SCORE_MATRIX_ENGINE:
+            from .evaluators import score_matrix_evaluator
+
+            payload = score_matrix_evaluator.evaluate(descriptor, fixture=fixture)
+            payload["assessment_type"] = spec.assessment_type
+            payload["market_family"] = descriptor.family
+            return payload
+
+        # The family alone decides the handler. A data-requirement flag must never
+        # hijack dispatch -- that is what routed team markets into the player model.
+        handler = getattr(self, spec.handler)
+        if spec.handler == "_evaluate_player_market":
+            advisory = handler(descriptor, fixture=fixture, statpal_payload=statpal_payload)
+        elif spec.handler in {"_evaluate_cards_market", "_evaluate_corners_market"}:
+            advisory = handler(descriptor, fixture=fixture, provider_payload=provider_payload)
+        else:
+            advisory = handler(descriptor, fixture=fixture)
+
+        payload = advisory.to_dict()
+        payload["assessment_type"] = spec.assessment_type
+        payload["market_family"] = descriptor.family
+        if spec.assessment_type == HEURISTIC:
+            # A constant-plus-nudges score is not a probability and must not be shown
+            # as one. Consumers key off assessment_type to decide what they may claim.
+            payload.setdefault("warnings", []).append("heuristic_assessment")
+        return payload
 
     def _evaluate_player_market(self, descriptor: MarketDescriptor, *, fixture=None, statpal_payload=None) -> StatPalAdvisory:
         payload = statpal_payload or self._player_payload_from_mapping(descriptor.subject or descriptor.raw)
@@ -307,26 +322,11 @@ class StatPalMarketAdvisoryService:
             message=self._team_goal_message(descriptor, expected_team, line, probability, team_side),
         )
 
-    def _evaluate_fixture_context_market(self, descriptor: MarketDescriptor, *, fixture=None) -> StatPalAdvisory:
-        score = 58.0
-        evidence = {
-            "market_family": descriptor.family,
-            "recognized": True,
-        }
-        warnings = []
-        score, snapshot_evidence, snapshot_warnings = self._apply_snapshot_context(score, descriptor=descriptor, fixture=fixture)
-        evidence.update(snapshot_evidence)
-        warnings.extend(snapshot_warnings)
-        score = round(max(0, min(100, score)), 1)
-        return StatPalAdvisory(
-            available=True,
-            score=score,
-            status=_status(score),
-            basis="statpal_fixture_context",
-            evidence=evidence,
-            warnings=warnings,
-            message="Fixture-level StatPal snapshots were used as supporting context for this market.",
-        )
+    # `_evaluate_fixture_context_market` was removed here. It returned a hardcoded 58
+    # plus snapshot nudges for 1X2, Double Chance, DNB, BTTS and clean sheets -- the
+    # highest-volume markets on the site -- and that score was rendered to users as
+    # though it were modelled. Those families are now derived from the fitted score
+    # distribution (apps.algo.evaluators.score_matrix_evaluator, ADR-001).
 
     def _expected_total_goals(self, fixture=None) -> tuple[float, dict[str, Any], list[str]]:
         fixture = fixture or {}

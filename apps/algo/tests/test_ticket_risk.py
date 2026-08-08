@@ -15,15 +15,29 @@ from apps.algo.ticket_risk import (
 PRIOR = Calibration(basis="prior", sample_size=0, bands={})
 
 
-def _leg(score, *, replacement=None, data_quality="strong", confidence_cap=88, match="Chelsea vs Brentford"):
+def _leg(
+    score,
+    *,
+    replacement=None,
+    data_quality="strong",
+    confidence_cap=88,
+    match="Chelsea vs Brentford",
+    family="total_goals",
+    assessment="quantitative_model",
+):
+    # Only a quantitative assessment may enter the ticket probability, so these fixtures
+    # must declare their family and assessment type the way real legs do.
     item = {
         "match": match,
         "submitted_market": "Home Win",
         "status": "analysed",
         "verdict": "keep",
+        "market_taxonomy": {"family": family, "recognized": True},
+        "canonical_market": {"resolution": "mapped", "period": "full_match", "subject": "match"},
         "selected_market": {
             "advisory_score": score,
             "market_capability": {"confidence_cap": confidence_cap, "data_quality": data_quality},
+            "statpal_advisory": {"assessment_type": assessment},
         },
     }
     if replacement is not None:

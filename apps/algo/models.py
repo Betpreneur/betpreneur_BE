@@ -658,6 +658,72 @@ class MarketPrediction(models.Model):
         return f"{self.fixture} - {self.market} ({label})"
 
 
+class LeagueScoreModel(models.Model):
+    """
+    Fitted goal-scoring parameters for one league, refreshed nightly.
+
+    Request-time work is a lookup plus a matrix summation, so fitting happens here and
+    never on the critical path of a slip review.
+    """
+
+    class DataQuality(models.TextChoices):
+        STRONG = "strong", "Strong"        # goal splits plus shot volume
+        MEDIUM = "medium", "Medium"        # home/away goal splits only
+        LIMITED = "limited", "Limited"     # overall goals only
+        POOR = "poor", "Poor"              # league baseline only
+
+    provider = models.CharField(max_length=30, default="statpal")
+    league_id = models.CharField(max_length=64)
+    league_name = models.CharField(max_length=255, blank=True)
+    season = models.CharField(max_length=32, blank=True)
+    model_version = models.CharField(max_length=32)
+    home_goal_baseline = models.FloatField(default=1.35)
+    away_goal_baseline = models.FloatField(default=1.10)
+    rho = models.FloatField(default=-0.13)
+    data_quality = models.CharField(max_length=20, choices=DataQuality.choices, default=DataQuality.POOR)
+    teams_fitted = models.PositiveIntegerField(default=0)
+    matches_observed = models.PositiveIntegerField(default=0)
+    diagnostics = models.JSONField(default=dict, blank=True)
+    fitted_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-fitted_at"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["provider", "league_id", "model_version"],
+                name="unique_league_score_model",
+            )
+        ]
+        indexes = [models.Index(fields=["provider", "league_id"])]
+
+    def __str__(self):
+        return f"{self.league_name or self.league_id} ({self.model_version})"
+
+
+class TeamStrength(models.Model):
+    """Multiplicative attack/defence strengths, split home and away."""
+
+    model = models.ForeignKey(LeagueScoreModel, on_delete=models.CASCADE, related_name="teams")
+    team_id = models.CharField(max_length=64, blank=True)
+    team_name = models.CharField(max_length=255)
+    team_name_normalized = models.CharField(max_length=255, db_index=True)
+    home_attack = models.FloatField(default=1.0)
+    home_defence = models.FloatField(default=1.0)
+    away_attack = models.FloatField(default=1.0)
+    away_defence = models.FloatField(default=1.0)
+    matches = models.PositiveIntegerField(default=0)
+    shots_per_game = models.FloatField(null=True, blank=True)
+
+    class Meta:
+        indexes = [
+            models.Index(fields=["model", "team_name_normalized"]),
+            models.Index(fields=["model", "team_id"]),
+        ]
+
+    def __str__(self):
+        return f"{self.team_name} ({self.model_id})"
+
+
 class StrategyReview(models.Model):
     target_date = models.DateField(unique=True)
     profile = models.JSONField(default=dict, blank=True)

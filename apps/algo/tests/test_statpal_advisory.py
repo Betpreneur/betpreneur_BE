@@ -199,7 +199,7 @@ class StatPalAdvisoryUnitTests(SimpleTestCase):
             },
         }
 
-        result = statpal_market_advisory.evaluate_market(descriptor, fixture=fixture)
+        result = statpal_market_advisory._evaluate_team_goal_market(descriptor, fixture=fixture).to_dict()
 
         self.assertTrue(result["available"])
         self.assertEqual(result["evidence"]["statpal_snapshots_available"], True)
@@ -268,7 +268,7 @@ class StatPalAdvisoryUnitTests(SimpleTestCase):
             }
         }
 
-        result = statpal_market_advisory.evaluate_market(descriptor, fixture=fixture)
+        result = statpal_market_advisory._evaluate_total_goal_market(descriptor, fixture=fixture).to_dict()
 
         self.assertEqual(result["basis"], "statpal_goal_market_model")
         self.assertGreater(result["evidence"]["injury_adjustment"], 0)
@@ -301,7 +301,7 @@ class StatPalAdvisoryUnitTests(SimpleTestCase):
             },
         }
 
-        result = statpal_market_advisory.evaluate_market(descriptor, fixture=fixture)
+        result = statpal_market_advisory._evaluate_total_goal_market(descriptor, fixture=fixture).to_dict()
 
         self.assertTrue(result["available"])
         self.assertEqual(result["basis"], "statpal_goal_market_model")
@@ -327,7 +327,7 @@ class StatPalAdvisoryUnitTests(SimpleTestCase):
             },
         }
 
-        result = statpal_market_advisory.evaluate_market(descriptor, fixture=fixture)
+        result = statpal_market_advisory._evaluate_team_goal_market(descriptor, fixture=fixture).to_dict()
 
         self.assertEqual(descriptor.family, "team_total_goals")
         self.assertEqual(descriptor.team, "home")

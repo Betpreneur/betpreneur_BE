@@ -24,6 +24,7 @@ from .market_taxonomy import canonical_market_name, describe_market, market_matc
 from .market_capabilities import market_capability_service
 from .recommendation_policy import assess_recommendation
 from .services import BetanoBetslipImporter, FixtureSearchService, SportyBetShareImporter, algo_runner_service
+from .leg_state import assess_leg
 from .statpal_advisory import statpal_market_advisory
 from .statpal_snapshots import statpal_snapshot_service
 from .ticket_risk import risk_level_for, ticket_risk_service
@@ -2789,6 +2790,8 @@ def _public_selection_card(item):
         "statpal_snapshot_types": sorted(((card.get("statpal_context") or {}).get("snapshots") or {}).keys()),
         "has_technical_details": True,
     }
+    leg_assessment = assess_leg(item)
+    canonical_market = item.get("canonical_market") or {}
     if card.get("match_id"):
         technical_ref["match_id"] = card.get("match_id")
     if item.get("status") == "matched_unscored":
@@ -2807,8 +2810,38 @@ def _public_selection_card(item):
         "ai_pick": ai_pick,
         "why": why,
         "reason_codes": reason_codes,
+        "state": str(leg_assessment.state),
+        "assessment": {
+            "type": leg_assessment.assessment_type,
+            "may_publish_probability": leg_assessment.may_publish_probability,
+            "market_family": leg_assessment.family,
+            "message": leg_assessment.message,
+        },
+        "market_identity": {
+            "resolution": canonical_market.get("resolution") or "unresolved",
+            "provider_market_text": item.get("provider_market_text") or item.get("submitted_market") or "",
+            "period": canonical_market.get("period") or "",
+            "subject": canonical_market.get("subject") or "",
+        },
         "technical_ref": technical_ref,
     }
+
+
+def _leg_state_counts(items):
+    """
+    Where every leg stopped, and how it was assessed.
+
+    `heuristic` legs are deliberately excluded from the ticket probability: their score
+    is a constant plus context nudges, not a modelled probability. Reporting the split
+    is what stops that exclusion looking like a silent gap.
+    """
+    states = {}
+    assessments = {}
+    for item in items:
+        assessment = assess_leg(item)
+        states[str(assessment.state)] = states.get(str(assessment.state), 0) + 1
+        assessments[assessment.assessment_type] = assessments.get(assessment.assessment_type, 0) + 1
+    return {"by_state": states, "by_assessment_type": assessments}
 
 
 def _with_leg_risk(card, leg):
@@ -3026,7 +3059,10 @@ def _slip_intelligence(results):
             "expired_legs": len(expired_items),
             "estimated_success_percent": ticket_risk.success_percent,
             "risk_tiers": ticket_risk.tier_counts,
+            "assessed_legs_in_estimate": ticket_risk.assessed_legs,
+            "legs_excluded_from_estimate": ticket_risk.unassessed_legs,
         },
+        "leg_states": _leg_state_counts(enriched),
         "ticket_health": ticket_health,
         "ticket_killers": {
             "selections": ticket_risk.killers,

@@ -1,0 +1,172 @@
+"""
+Market evaluator registry.
+
+**The family selects the evaluator. Nothing else.** Data requirements say what to
+*fetch*, never what to *run*. The previous cascade checked `descriptor.requires_player_stats`
+first, so `First to Score H` — a team market — was routed into the player-props model
+with a nonsense subject, and the `first_to_score` branch below it was unreachable.
+
+Each entry also declares its `assessment_type`, which carries the honesty invariant:
+
+* ``quantitative_model`` — a probability was computed from data, and may be published.
+* ``heuristic`` — a score derived from a constant plus context nudges. Useful as a
+  signal, but it must never be rendered as a probability.
+* absent from the registry — the family is recognised but unmodelled, and is reported
+  as such rather than mapped to a nearby model.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+
+from ..data.capability import DataCapability as Cap
+
+
+QUANTITATIVE = "quantitative_model"
+HEURISTIC = "heuristic"
+NONE = "none"
+
+
+STATPAL_ENGINE = "statpal_advisory"
+SCORE_MATRIX_ENGINE = "score_matrix"
+
+
+@dataclass(frozen=True)
+class EvaluatorSpec:
+    family: str
+    handler: str          # method name on StatPalMarketAdvisoryService, or "" for other engines
+    assessment_type: str
+    required: tuple[Cap, ...] = ()
+    optional: tuple[Cap, ...] = ()
+    notes: str = ""
+    engine: str = STATPAL_ENGINE
+
+    @property
+    def publishes_probability(self) -> bool:
+        return self.assessment_type == QUANTITATIVE
+
+
+_GOAL_CORE = (Cap.TEAM_GOALS_FOR, Cap.TEAM_GOALS_AGAINST)
+_GOAL_RICH = (Cap.TEAM_SHOTS, Cap.TEAM_POSSESSION, Cap.MARKET_ODDS, Cap.INJURIES)
+_CARD_CORE = (Cap.TEAM_CARDS, Cap.TEAM_FOULS)
+_PLAYER_CORE = (Cap.PLAYER_SEASON_STATS,)
+
+
+MARKET_EVALUATORS: dict[str, EvaluatorSpec] = {
+    # --- quantitative: expected value -> line probability -> score ---
+    "total_goals": EvaluatorSpec(
+        "total_goals", "_evaluate_total_goal_market", QUANTITATIVE, _GOAL_CORE, _GOAL_RICH
+    ),
+    "team_total_goals": EvaluatorSpec(
+        "team_total_goals", "_evaluate_team_goal_market", QUANTITATIVE, _GOAL_CORE, _GOAL_RICH
+    ),
+    "corners_total": EvaluatorSpec(
+        "corners_total", "_evaluate_corners_market", QUANTITATIVE,
+        (Cap.TEAM_CORNERS,), (Cap.MARKET_ODDS, Cap.TEAM_POSSESSION),
+    ),
+    "team_corners": EvaluatorSpec(
+        "team_corners", "_evaluate_corners_market", QUANTITATIVE,
+        (Cap.TEAM_CORNERS,), (Cap.MARKET_ODDS, Cap.TEAM_POSSESSION),
+    ),
+    "cards_total": EvaluatorSpec(
+        "cards_total", "_evaluate_cards_market", QUANTITATIVE, _CARD_CORE,
+        (Cap.REFEREE, Cap.LINEUP_PROJECTED, Cap.MARKET_ODDS),
+    ),
+    "team_cards": EvaluatorSpec(
+        "team_cards", "_evaluate_cards_market", QUANTITATIVE, _CARD_CORE,
+        (Cap.REFEREE, Cap.LINEUP_PROJECTED, Cap.MARKET_ODDS),
+    ),
+    "booking_points": EvaluatorSpec(
+        "booking_points", "_evaluate_cards_market", QUANTITATIVE, _CARD_CORE,
+        (Cap.REFEREE, Cap.LINEUP_PROJECTED, Cap.MARKET_ODDS),
+    ),
+    "player_goal": EvaluatorSpec(
+        "player_goal", "_evaluate_player_market", QUANTITATIVE, _PLAYER_CORE,
+        (Cap.LINEUP_CONFIRMED, Cap.LINEUP_PROJECTED, Cap.INJURIES, Cap.MARKET_ODDS),
+    ),
+    "player_card": EvaluatorSpec(
+        "player_card", "_evaluate_player_market", QUANTITATIVE, _PLAYER_CORE,
+        (Cap.LINEUP_CONFIRMED, Cap.LINEUP_PROJECTED, Cap.REFEREE, Cap.INJURIES),
+    ),
+    "player_shots": EvaluatorSpec(
+        "player_shots", "_evaluate_player_market", QUANTITATIVE, _PLAYER_CORE,
+        (Cap.LINEUP_CONFIRMED, Cap.LINEUP_PROJECTED, Cap.INJURIES),
+    ),
+    "player_shots_on_target": EvaluatorSpec(
+        "player_shots_on_target", "_evaluate_player_market", QUANTITATIVE, _PLAYER_CORE,
+        (Cap.LINEUP_CONFIRMED, Cap.LINEUP_PROJECTED, Cap.INJURIES),
+    ),
+    "player_assist": EvaluatorSpec(
+        "player_assist", "_evaluate_player_market", QUANTITATIVE, _PLAYER_CORE,
+        (Cap.LINEUP_CONFIRMED, Cap.LINEUP_PROJECTED, Cap.INJURIES),
+    ),
+    "player_saves": EvaluatorSpec(
+        "player_saves", "_evaluate_player_market", QUANTITATIVE, _PLAYER_CORE,
+        (Cap.LINEUP_CONFIRMED, Cap.LINEUP_PROJECTED, Cap.INJURIES),
+    ),
+    # Generic cards fallback emitted by the taxonomy when no line is present.
+    "cards": EvaluatorSpec(
+        "cards", "_evaluate_cards_market", QUANTITATIVE, _CARD_CORE,
+        (Cap.REFEREE, Cap.LINEUP_PROJECTED, Cap.MARKET_ODDS),
+    ),
+
+    # --- derived from the shared score distribution (ADR-001) ---
+    # One fitted model per fixture, so these cannot contradict one another:
+    # P(1X) is exactly P(home) + P(draw).
+    **{
+        family: EvaluatorSpec(
+            family, "", QUANTITATIVE, _GOAL_CORE, _GOAL_RICH, engine=SCORE_MATRIX_ENGINE
+        )
+        for family in (
+            "match_result",
+            "double_chance",
+            "draw_no_bet",
+            "btts",
+            "clean_sheet",
+            "odd_even",
+            "asian_handicap",
+            "handicap",
+        )
+    },
+    "first_to_score": EvaluatorSpec(
+        "first_to_score", "", QUANTITATIVE, _GOAL_CORE, _GOAL_CORE + (Cap.GOAL_MINUTE_DIST,),
+        engine=SCORE_MATRIX_ENGINE,
+        notes="approximated from scoring rates; not a goal-timing model",
+    ),
+}
+
+# Goal-volume families also come from the matrix, overriding the StatPal advisory path.
+for _family in ("total_goals", "team_total_goals"):
+    MARKET_EVALUATORS[_family] = EvaluatorSpec(
+        _family, "", QUANTITATIVE, _GOAL_CORE, _GOAL_RICH, engine=SCORE_MATRIX_ENGINE
+    )
+
+
+def evaluator_for(family: str) -> EvaluatorSpec | None:
+    return MARKET_EVALUATORS.get(str(family or ""))
+
+
+def assessment_type_for(family: str) -> str:
+    spec = evaluator_for(family)
+    return spec.assessment_type if spec else NONE
+
+
+def required_capabilities(families) -> set[Cap]:
+    """
+    Union of what every leg on a fixture needs.
+
+    One planner, shared by the Match Checker, core scoring and alternative generation,
+    so the same fixture cannot end up with different analytical quality depending on
+    which route hydrated it.
+    """
+    needed: set[Cap] = set()
+    for family in families or ():
+        spec = evaluator_for(family)
+        if spec:
+            needed.update(spec.required)
+            needed.update(spec.optional)
+    return needed
+
+
+def modelled_families() -> set[str]:
+    return {family for family, spec in MARKET_EVALUATORS.items() if spec.publishes_probability}

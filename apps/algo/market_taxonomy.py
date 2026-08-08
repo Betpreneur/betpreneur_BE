@@ -76,6 +76,20 @@ def _line_from_text(*values):
     return ""
 
 
+def _side_from_suffix(value):
+    """
+    Read the trailing `H`/`A` marker used by canonical team markets.
+
+    `First to Score H` is a team market, but without this the side is unreadable, the
+    branch falls through, and a later catch-all matches the words "to score" and routes
+    it into the player-props model.
+    """
+    match = re.search(r"\b([ha])\s*$", normalize_market_text(value))
+    if not match:
+        return ""
+    return "home" if match.group(1) == "h" else "away"
+
+
 def _side_from_text(value):
     normalized = normalize_market_text(value)
     if normalized in {"1", "home", "home win", "home team", "home wins"}:
@@ -247,6 +261,22 @@ def describe_market(value, *, market_name="", outcome_name="", specifier=""):
         "dc 12": "DC: 12",
         "dc: 12": "DC: 12",
         "double chance 12": "DC: 12",
+        # 1X and X2 are the sides the repair engine most often suggests, so they must
+        # round-trip through the taxonomy as cleanly as 12 does.
+        "1x": "DC: 1X",
+        "home or draw": "DC: 1X",
+        "home draw": "DC: 1X",
+        "home/draw": "DC: 1X",
+        "dc 1x": "DC: 1X",
+        "dc: 1x": "DC: 1X",
+        "double chance 1x": "DC: 1X",
+        "x2": "DC: X2",
+        "draw or away": "DC: X2",
+        "draw away": "DC: X2",
+        "draw/away": "DC: X2",
+        "dc x2": "DC: X2",
+        "dc: x2": "DC: X2",
+        "double chance x2": "DC: X2",
         "both teams to score": "GG / BTTS Yes",
         "btts": "GG / BTTS Yes",
         "btts yes": "GG / BTTS Yes",
@@ -262,8 +292,9 @@ def describe_market(value, *, market_name="", outcome_name="", specifier=""):
             return _mk(raw=raw or canonical, canonical=canonical, code="result_away", family="match_result", category="Result", side="away", selection="away", period=period)
         if canonical == "Draw":
             return _mk(raw=raw or canonical, canonical=canonical, code="result_draw", family="match_result", category="Result", side="draw", selection="draw", period=period)
-        if canonical == "DC: 12":
-            return _mk(raw=raw or canonical, canonical=canonical, code="double_chance_12", family="double_chance", category="Result", side="12", selection="12", period=period)
+        if canonical in {"DC: 12", "DC: 1X", "DC: X2"}:
+            side = {"DC: 12": "home_or_away", "DC: 1X": "home_or_draw", "DC: X2": "draw_or_away"}[canonical]
+            return _mk(raw=raw or canonical, canonical=canonical, code=f"double_chance_{canonical[-2:].lower()}", family="double_chance", category="Result", side=side, selection=side, period=period)
         if canonical == "GG / BTTS Yes":
             return _mk(raw=raw or canonical, canonical=canonical, code="btts_yes", family="btts", category="Goals", side="yes", selection="yes", period=period)
 
@@ -301,13 +332,13 @@ def describe_market(value, *, market_name="", outcome_name="", specifier=""):
             return _mk(raw=raw or canonical, canonical=canonical, code=f"clean_sheet_{side}", family="clean_sheet", category="Clean Sheet", side=side, team=side, selection="yes", period=period)
 
     if "first to score" in text or "first team to score" in text:
-        side = _side_from_text(outcome or raw)
+        side = _side_from_text(outcome or raw) or _side_from_suffix(outcome or raw or text)
         if side in {"home", "away"}:
             canonical = "First to Score H" if side == "home" else "First to Score A"
             return _mk(raw=raw or canonical, canonical=canonical, code=f"first_score_{side}", family="first_to_score", category="Scoring", side=side, selection=side, period=period)
 
     if "last goal" in text or "last to score" in text:
-        side = _side_from_text(outcome or raw)
+        side = _side_from_text(outcome or raw) or _side_from_suffix(outcome or raw or text)
         if side in {"home", "away"}:
             canonical = "Last to Score H" if side == "home" else "Last to Score A"
             return _mk(raw=raw or canonical, canonical=canonical, code=f"last_score_{side}", family="last_to_score", category="Scoring", side=side, selection=side, period=period)

@@ -24,6 +24,8 @@ import math
 from dataclasses import asdict, dataclass, field
 from typing import Any, Iterable
 
+from .leg_state import may_publish_probability
+
 
 # Band edges align with the status thresholds users already see (avoid / caution /
 # playable / strong), so a calibration table can be read against the same labels.
@@ -86,6 +88,7 @@ TIER_ORDER = [AVOID, RISKY, BORDERLINE, STRONG, VERY_STRONG]
 
 NO_SCORE = "no_advisory_score"
 INSUFFICIENT_DATA = "insufficient_market_data"
+HEURISTIC_ONLY = "heuristic_assessment_only"
 
 
 def _float_or_none(value):
@@ -218,6 +221,10 @@ class TicketRiskService:
             elif _data_quality(item) in UNASSESSABLE_QUALITY:
                 # We can see this market too poorly to claim anything either way.
                 reason = INSUFFICIENT_DATA
+            elif not may_publish_probability(item):
+                # A heuristic score is a constant plus context nudges. Multiplying it
+                # into a ticket probability would dress a guess up as arithmetic.
+                reason = HEURISTIC_ONLY
             if reason:
                 legs.append(
                     LegRisk(
