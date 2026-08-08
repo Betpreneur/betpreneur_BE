@@ -72,8 +72,29 @@ def _kickoff_label(match: dict[str, Any]):
     return str(raw or "")
 
 
+def _unwrap_container(root: dict[str, Any]) -> dict[str, Any]:
+    """
+    Descend through StatPal's single top-level container.
+
+    The daily feed nests everything under a wrapper whose name varies by endpoint
+    (`live_matches` for daily matches). Looking for `league` at the root therefore found
+    nothing and the sync silently returned zero fixtures.
+    """
+    if not isinstance(root, dict):
+        return {}
+    for key in ("live_matches", "daily_matches", "matches_daily", "fixtures", "results"):
+        nested = root.get(key)
+        if isinstance(nested, dict) and ("league" in nested or "match" in nested):
+            return nested
+    if len(root) == 1:
+        only = next(iter(root.values()))
+        if isinstance(only, dict) and ("league" in only or "match" in only):
+            return only
+    return root
+
+
 def _match_items(payload: dict[str, Any]):
-    root = payload or {}
+    root = _unwrap_container(payload or {})
     for key in ("matches", "match", "data", "response", "results"):
         value = root.get(key) if isinstance(root, dict) else None
         if isinstance(value, list):

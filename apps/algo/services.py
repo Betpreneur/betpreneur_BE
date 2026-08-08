@@ -205,11 +205,62 @@ class FixtureSearchService:
     def __init__(self, runner_service=None):
         self.runner_service = runner_service or AlgoRunnerService()
 
-    def sync_upcoming(self, *, start_date=None, days=None, unrestricted=False):
+    def sync_statpal_universe(self, *, start_date=None, days=None):
+        """
+        Refresh the whole fixture universe in one call.
+
+        StatPal's daily endpoint ignores a date parameter and always returns the same
+        rolling window — roughly 1,200 fixtures across 260+ competitions. Asking it once
+        therefore covers every date we care about, and carries StatPal's own team ids,
+        which are what the corner and card rate profiles need to resolve.
+        """
+        from .statpal import StatPalConfigurationError, StatPalError
+        from .statpal_provider import StatPalDailyMatchProvider, normalize_daily_matches
+
         start_date = start_date or timezone.localdate()
         days = min(int(days or self.DEFAULT_DAYS), self.MAX_DAYS)
+        horizon = start_date + timedelta(days=days)
+
+        try:
+            payload = StatPalDailyMatchProvider().client.soccer_daily_matches()
+        except (StatPalConfigurationError, StatPalError) as exc:
+            return {"synced": 0, "errors": [{"provider": "statpal", "error": str(exc)}]}
+        except Exception as exc:
+            return {"synced": 0, "errors": [{"provider": "statpal", "error": str(exc)}]}
+
+        grouped = defaultdict(list)
+        for fixture in normalize_daily_matches(payload, target_date=start_date):
+            match_date = fixture.get("date") or start_date
+            if start_date <= match_date <= horizon:
+                grouped[match_date].append(fixture)
+
+        synced = 0
+        for match_date, group in grouped.items():
+            synced += self._upsert_fixtures(group, match_date)
+        return {
+            "synced": synced,
+            "errors": [],
+            "source": "statpal",
+            "dates": sorted(item.isoformat() for item in grouped),
+        }
+
+    def sync_upcoming(self, *, start_date=None, days=None, unrestricted=False):
+        """
+        Refresh the fixture universe, preferring StatPal's single-call window.
+
+        The previous behaviour looped one API-Football request per date and ran on every
+        leg of a slip, costing roughly 85 seconds per pass. API-Football is now the
+        fallback for when StatPal returns nothing.
+        """
+        start_date = start_date or timezone.localdate()
+        days = min(int(days or self.DEFAULT_DAYS), self.MAX_DAYS)
+
+        statpal_result = self.sync_statpal_universe(start_date=start_date, days=days)
+        if statpal_result.get("synced"):
+            return statpal_result
+
         total = 0
-        errors = []
+        errors = list(statpal_result.get("errors") or [])
 
         from .grindalgo import algo_runner
 

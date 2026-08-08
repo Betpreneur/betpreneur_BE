@@ -2,6 +2,7 @@ from datetime import datetime, timedelta
 import csv
 import hashlib
 import json
+import dataclasses
 import logging
 from decimal import Decimal, InvalidOperation
 
@@ -29,7 +30,14 @@ from .models import (
     SlipReview,
     SlipSelection,
 )
-from .market_taxonomy import canonical_market_name, describe_market, market_matches, market_options, normalize_market_text
+from .market_taxonomy import (
+    MarketDescriptor,
+    canonical_market_name,
+    describe_market,
+    market_matches,
+    market_options,
+    normalize_market_text,
+)
 from .market_capabilities import market_capability_service
 from .recommendation_policy import assess_recommendation
 from .services import BetanoBetslipImporter, FixtureSearchService, SportyBetShareImporter, algo_runner_service
@@ -2340,6 +2348,54 @@ def _minimal_game_from_candidate(candidate):
     }
 
 
+def _resolved_taxonomy(selection):
+    """
+    The descriptor the importer already resolved from the bookmaker's market ids.
+
+    Bookmaker imports nest the analysed item under `provider_payload`; the manual path
+    puts it at the top level.
+    """
+    for candidate in (
+        selection.get("market_taxonomy"),
+        (selection.get("provider_payload") or {}).get("market_taxonomy"),
+    ):
+        if isinstance(candidate, dict) and candidate.get("family") and candidate.get("recognized"):
+            return candidate
+    return {}
+
+
+def _descriptor_from_taxonomy(taxonomy):
+    """Rebuild a MarketDescriptor from its stored form, tolerating JSON round-tripping."""
+    fields = {field.name for field in dataclasses.fields(MarketDescriptor)}
+    payload = {key: value for key, value in taxonomy.items() if key in fields}
+    payload["data_requirements"] = tuple(payload.get("data_requirements") or ())
+    for key in ("raw", "canonical", "code", "family", "category"):
+        payload.setdefault(key, "")
+    return MarketDescriptor(**payload)
+
+
+def _selection_market_descriptor(selection, requested_market):
+    """
+    Use the identity resolved at import time; only parse text when there is none.
+
+    Re-deriving the descriptor from the canonical string is how period markets were
+    being lost: the importer resolves market 60 to `match_result / first_half` and
+    writes `1H Home Win`, which text parsing then cannot read back. Trusting the stored
+    identity removes the re-derivation rather than teaching the parser one more string
+    form.
+    """
+    taxonomy = _resolved_taxonomy(selection)
+    if taxonomy:
+        try:
+            return _descriptor_from_taxonomy(taxonomy)
+        except (TypeError, ValueError) as exc:
+            log.info("Falling back to text parsing for %r: %s", requested_market, str(exc)[:200])
+    return describe_market(
+        requested_market,
+        market_name=(taxonomy.get("raw") or (selection.get("market_taxonomy") or {}).get("raw") or ""),
+    )
+
+
 def _market_can_skip_core_on_demand(descriptor):
     if descriptor.family in {"team_shots_on_target"}:
         return True
@@ -2358,11 +2414,40 @@ def _consume_review_force_fresh(review_scoring_context):
     return True
 
 
+# A market can be scored by either path: the StatPal/model advisory writes
+# `advisory_score`, while the core algo writes `display_score` / confidence. Checking
+# only one of them would report every leg from the other path as unassessed.
+_ASSESSMENT_SCORE_KEYS = ("advisory_score", "display_score", "final_confidence", "confidence")
+
+
+def _market_was_assessed(selected_market) -> bool:
+    """
+    Whether we actually produced a judgement about this market.
+
+    Matters because the verdict branches below default to `no_edge -> remove`, so a
+    market nobody evaluated would come out as "avoid" — a judgement we never made.
+    """
+    market = selected_market or {}
+    return any(_float_or_none(market.get(key)) is not None for key in _ASSESSMENT_SCORE_KEYS)
+
+
 def _manual_verdict(selected_market, replacement_market):
     status_value = selected_market.get("recommendation_status") or "no_edge"
     has_better_market = _market_is_better_for_slip(selected_market, replacement_market)
     advisory_score = _float_or_none(selected_market.get("advisory_score")) or 0
     advisory_status = selected_market.get("advisory_status") or _match_checker_status(advisory_score)
+
+    if not _market_was_assessed(selected_market):
+        # Absence of evidence is not evidence of a bad pick. Saying "avoid" here is the
+        # same failure as scoring an un-analysed leg zero: it reads as a judgement the
+        # user could disagree with, when in fact we simply did not evaluate it.
+        return {
+            "verdict": "not_assessed",
+            "message": "We could not assess this selection, so it has not been judged either way.",
+            "better_market_available": False,
+            "advisory_score": None,
+            "advisory_status": "unknown",
+        }
 
     if (selected_market.get("recommended") or selected_market.get("selected")) and not has_better_market:
         verdict = "keep"
@@ -2613,6 +2698,7 @@ def _public_action_label(verdict):
         "unmatched": "Needs review",
         "unmatched_market": "Needs review",
         "pending_analysis": "Analysing",
+        "not_assessed": "Not assessed",
     }.get(str(verdict or "").lower(), "Review")
 
 
@@ -2627,6 +2713,7 @@ def _public_verdict_message(verdict, submitted_market=None):
         "unmatched": "We could not confidently match this fixture.",
         "unmatched_market": "We matched the fixture, but not this market.",
         "pending_analysis": "This fixture is still being analysed.",
+        "not_assessed": f"We could not assess {market}, so it has not been judged either way.",
     }.get(str(verdict or "").lower(), "This pick needs review.")
 
 
@@ -2726,12 +2813,16 @@ def _public_selection_risk(verdict, pick):
     status_value = str((pick or {}).get("status") or "").lower()
     if verdict in {"replace", "remove"}:
         return "high"
-    if verdict in {"unmatched", "unmatched_market", "pending_analysis", "expired"}:
+    if verdict in {"unmatched", "unmatched_market", "pending_analysis", "expired", "not_assessed"}:
         return "unknown"
     if status_value == "avoid" or (score is not None and score < 55):
         return "high"
     if verdict == "caution" or status_value == "caution" or (score is not None and score < 66):
         return "medium"
+    if score is None:
+        # No score means no opinion. Reporting "low" here would imply safety we never
+        # established, which is a worse error than implying danger.
+        return "unknown"
     return "low"
 
 
@@ -2997,9 +3088,11 @@ def _slip_intelligence(results):
     keep_items = [item for item in enriched if item.get("verdict") == "keep"]
     expired_items = [item for item in enriched if item.get("status") == "expired"]
     pending_items = [item for item in enriched if item.get("status") == "matched_unscored"]
+    not_assessed_items = [item for item in enriched if item.get("verdict") == "not_assessed"]
     unverified_items = [
         item for item in enriched
-        if not _selection_has_analysis(item) and item.get("status") != "expired"
+        if (not _selection_has_analysis(item) or item.get("verdict") == "not_assessed")
+        and item.get("status") != "expired"
     ]
 
     risk_level = risk_level_for(ticket_risk)
@@ -3095,7 +3188,11 @@ def _slip_intelligence(results):
     ]
     ticket_impact = {
         "message": (
+            # Only claim an improvement when one was actually measured; a null
+            # increase alongside "improves the success rate" is not a claim we can make.
             f"Changing {len(replace_items) + len(remove_items)} risky {_plural(len(replace_items) + len(remove_items), 'pick')} improves the estimated ticket success rate."
+            if (remove_items or replace_items) and improvement is not None
+            else f"{len(replace_items) + len(remove_items)} {_plural(len(replace_items) + len(remove_items), 'pick')} could be changed, but the effect on this ticket could not be estimated."
             if remove_items or replace_items
             else f"None of these {len(enriched)} {_plural(len(enriched), 'selection')} could be analysed, so no risk assessment was possible."
             if not analysed
@@ -3216,6 +3313,7 @@ def _slip_intelligence(results):
             "replace": len(replace_items),
             "remove": len(remove_items),
             "pending_analysis": len(pending_items),
+            "not_assessed": len(not_assessed_items),
             "unmatched": len([item for item in enriched if _selection_is_unmatched(item)]),
             "expired": len(expired_items),
         },
@@ -3269,6 +3367,7 @@ def _manual_review_summary(results):
         "expired_count": sum(1 for item in enriched if item.get("status") == "expired"),
         "unmatched_count": sum(1 for item in enriched if _selection_is_unmatched(item)),
         "pending_analysis_count": sum(1 for item in enriched if item.get("status") == "matched_unscored"),
+        "not_assessed_count": sum(1 for item in enriched if item.get("verdict") == "not_assessed"),
         "health_score": intelligence.get("health_score", 0),
         "risk_level": intelligence.get("risk_level", ""),
         "ticket_health": intelligence.get("ticket_health", {}),
@@ -3565,10 +3664,7 @@ def _analyse_manual_selection(
 ):
     match_text = selection.get("match", "")
     requested_market = selection.get("market", "")
-    market_descriptor = describe_market(
-        requested_market,
-        market_name=((selection.get("market_taxonomy") or {}).get("raw") or ""),
-    )
+    market_descriptor = _selection_market_descriptor(selection, requested_market)
     market_taxonomy = market_descriptor.to_dict()
     provider_date = _provider_match_date(selection)
     provider_kickoff = _provider_kickoff_datetime(selection)
