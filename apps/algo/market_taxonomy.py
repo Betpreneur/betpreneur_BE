@@ -34,10 +34,16 @@ class MarketDescriptor:
     code: str
     family: str
     category: str
+    market_type: str = ""
+    selection: str = ""
     side: str = ""
     line: str = ""
+    team: str = ""
+    player: str = ""
     subject: str = ""
     period: str = "match"
+    support_level: str = "unsupported"
+    data_requirements: tuple = ()
     recognized: bool = True
     core_supported: bool = False
     requires_player_stats: bool = False
@@ -96,6 +102,75 @@ def _over_under_side(value):
     return ""
 
 
+def _period_from_text(value):
+    normalized = normalize_market_text(value)
+    window = re.search(r"\bfirst\s+(5|10|15|20|25|30|35|40|50|55|60|65|70|75|80|85)\s+minutes?\b", normalized)
+    if window:
+        return f"first_{window.group(1)}m"
+    if re.search(r"\b(first|1st|1 h|1h|half time|halftime)\b", normalized):
+        return "first_half"
+    if re.search(r"\b(second|2nd|2 h|2h)\b", normalized):
+        return "second_half"
+    return "match"
+
+
+def _support_level(family, *, period="match"):
+    if family in {
+        "match_result",
+        "double_chance",
+        "draw_no_bet",
+        "asian_handicap",
+        "total_goals",
+        "team_total_goals",
+        "btts",
+        "clean_sheet",
+    }:
+        return "full" if period == "match" else "medium"
+    if family in {
+        "corners_total",
+        "team_corners",
+        "cards_total",
+        "booking_points",
+        "team_cards",
+        "first_to_score",
+        "last_to_score",
+        "goal_range",
+        "exact_goals",
+        "multigoals",
+        "odd_even",
+        "winning_margin",
+        "half_market",
+    }:
+        return "medium"
+    if family.startswith("player_") or family in {"correct_score", "time_window", "score_combo"}:
+        return "weak"
+    return "unsupported"
+
+
+def _data_requirements(family):
+    requirements = {
+        "match_result": ("team_stats", "league_stats", "odds"),
+        "double_chance": ("team_stats", "league_stats", "odds"),
+        "draw_no_bet": ("team_stats", "league_stats", "odds"),
+        "asian_handicap": ("team_stats", "league_stats", "odds"),
+        "total_goals": ("team_stats", "league_stats", "h2h", "odds"),
+        "team_total_goals": ("team_stats", "league_stats", "odds"),
+        "btts": ("team_stats", "league_stats", "h2h", "odds"),
+        "clean_sheet": ("team_stats", "league_stats", "odds"),
+        "corners_total": ("corner_stats", "league_stats", "odds"),
+        "team_corners": ("corner_stats", "team_stats", "odds"),
+        "cards_total": ("card_stats", "league_stats", "referee_stats", "odds"),
+        "team_cards": ("card_stats", "team_stats", "referee_stats", "odds"),
+        "booking_points": ("card_stats", "league_stats", "referee_stats", "odds"),
+        "player_goal": ("player_stats", "lineups", "team_stats", "odds"),
+        "player_shots": ("player_stats", "lineups", "team_stats", "odds"),
+        "player_shots_on_target": ("player_stats", "lineups", "team_stats", "odds"),
+        "player_card": ("player_stats", "card_stats", "lineups", "referee_stats", "odds"),
+        "player_assist": ("player_stats", "lineups", "team_stats", "odds"),
+    }
+    return requirements.get(family, ("team_stats", "league_stats", "odds"))
+
+
 def _mk(
     *,
     raw,
@@ -103,10 +178,16 @@ def _mk(
     code,
     family,
     category,
+    market_type="",
+    selection="",
     side="",
     line="",
+    team="",
+    player="",
     subject="",
     period="match",
+    support_level="",
+    data_requirements=(),
     requires_player_stats=False,
     requires_card_stats=False,
     requires_corner_stats=False,
@@ -118,10 +199,16 @@ def _mk(
         code=code,
         family=family,
         category=category,
+        market_type=market_type or family,
+        selection=selection or side,
         side=side,
         line=str(line or ""),
+        team=team,
+        player=player,
         subject=subject,
         period=period,
+        support_level=support_level or _support_level(family, period=period),
+        data_requirements=tuple(data_requirements or _data_requirements(family)),
         core_supported=canonical in CORE_MARKETS,
         requires_player_stats=requires_player_stats,
         requires_card_stats=requires_card_stats,
@@ -140,6 +227,7 @@ def describe_market(value, *, market_name="", outcome_name="", specifier=""):
     market_text = normalize_market_text(market)
     outcome_text = normalize_market_text(outcome or raw)
     line = _line_from_text(spec, outcome, market, raw)
+    period = _period_from_text(combined)
 
     aliases = {
         "1": "Home Win",
@@ -169,54 +257,60 @@ def describe_market(value, *, market_name="", outcome_name="", specifier=""):
     if normalized_raw in aliases:
         canonical = aliases[normalized_raw]
         if canonical == "Home Win":
-            return _mk(raw=raw or canonical, canonical=canonical, code="result_home", family="match_result", category="Result", side="home")
+            return _mk(raw=raw or canonical, canonical=canonical, code="result_home", family="match_result", category="Result", side="home", selection="home", period=period)
         if canonical == "Away Win":
-            return _mk(raw=raw or canonical, canonical=canonical, code="result_away", family="match_result", category="Result", side="away")
+            return _mk(raw=raw or canonical, canonical=canonical, code="result_away", family="match_result", category="Result", side="away", selection="away", period=period)
         if canonical == "Draw":
-            return _mk(raw=raw or canonical, canonical=canonical, code="result_draw", family="match_result", category="Result", side="draw")
+            return _mk(raw=raw or canonical, canonical=canonical, code="result_draw", family="match_result", category="Result", side="draw", selection="draw", period=period)
         if canonical == "DC: 12":
-            return _mk(raw=raw or canonical, canonical=canonical, code="double_chance_12", family="double_chance", category="Result", side="12")
+            return _mk(raw=raw or canonical, canonical=canonical, code="double_chance_12", family="double_chance", category="Result", side="12", selection="12", period=period)
         if canonical == "GG / BTTS Yes":
-            return _mk(raw=raw or canonical, canonical=canonical, code="btts_yes", family="btts", category="Goals", side="yes")
+            return _mk(raw=raw or canonical, canonical=canonical, code="btts_yes", family="btts", category="Goals", side="yes", selection="yes", period=period)
 
     if re.fullmatch(r"(home win|away win|draw)", text):
         side = _side_from_text(text)
         canonical = {"home": "Home Win", "away": "Away Win", "draw": "Draw"}[side]
-        return _mk(raw=raw or canonical, canonical=canonical, code=f"result_{side}", family="match_result", category="Result", side=side)
+        return _mk(raw=raw or canonical, canonical=canonical, code=f"result_{side}", family="match_result", category="Result", side=side, selection=side, period=period)
 
     if "match result" in text or "1x2" in text or market_text in {"match result superodds"}:
         side = _side_from_text(outcome or raw)
         if side:
             canonical = {"home": "Home Win", "away": "Away Win", "draw": "Draw"}[side]
-            return _mk(raw=raw or canonical, canonical=canonical, code=f"result_{side}", family="match_result", category="Result", side=side)
+            return _mk(raw=raw or canonical, canonical=canonical, code=f"result_{side}", family="match_result", category="Result", side=side, selection=side, period=period)
 
     if "double chance" in text or outcome_text in {"1x", "x2", "12"}:
         side = outcome_text.replace(" ", "") or text.replace("double chance", "").strip()
         label = {"1x": "DC: 1X", "x2": "DC: X2", "12": "DC: 12"}.get(side, f"Double Chance {side.upper()}")
-        return _mk(raw=raw or label, canonical=label, code=f"double_chance_{side}", family="double_chance", category="Result", side=side)
+        return _mk(raw=raw or label, canonical=label, code=f"double_chance_{side}", family="double_chance", category="Result", side=side, selection=side, period=period)
 
     if "draw no bet" in text or "dnb" in text:
         side = _side_from_text(outcome or raw)
         if side in {"home", "away"}:
             canonical = "DNB Home" if side == "home" else "DNB Away"
-            return _mk(raw=raw or canonical, canonical=canonical, code=f"dnb_{side}", family="draw_no_bet", category="Result", side=side)
+            return _mk(raw=raw or canonical, canonical=canonical, code=f"dnb_{side}", family="draw_no_bet", category="Result", side=side, selection=side, period=period)
 
     if "both teams" in text or "btts" in text:
         yes_no = "no" if re.search(r"\b(no)\b", outcome_text or text) else "yes"
         canonical = "GG / BTTS Yes" if yes_no == "yes" else "BTTS No"
-        return _mk(raw=raw or canonical, canonical=canonical, code=f"btts_{yes_no}", family="btts", category="Goals", side=yes_no)
+        return _mk(raw=raw or canonical, canonical=canonical, code=f"btts_{yes_no}", family="btts", category="Goals", side=yes_no, selection=yes_no, period=period)
 
     if "clean sheet" in text:
         side = _side_from_text(text)
         if side in {"home", "away"}:
             canonical = "Home CS" if side == "home" else "Away CS"
-            return _mk(raw=raw or canonical, canonical=canonical, code=f"clean_sheet_{side}", family="clean_sheet", category="Clean Sheet", side=side)
+            return _mk(raw=raw or canonical, canonical=canonical, code=f"clean_sheet_{side}", family="clean_sheet", category="Clean Sheet", side=side, team=side, selection="yes", period=period)
 
     if "first to score" in text or "first team to score" in text:
         side = _side_from_text(outcome or raw)
         if side in {"home", "away"}:
             canonical = "First to Score H" if side == "home" else "First to Score A"
-            return _mk(raw=raw or canonical, canonical=canonical, code=f"first_score_{side}", family="first_to_score", category="Scoring", side=side)
+            return _mk(raw=raw or canonical, canonical=canonical, code=f"first_score_{side}", family="first_to_score", category="Scoring", side=side, selection=side, period=period)
+
+    if "last goal" in text or "last to score" in text:
+        side = _side_from_text(outcome or raw)
+        if side in {"home", "away"}:
+            canonical = "Last to Score H" if side == "home" else "Last to Score A"
+            return _mk(raw=raw or canonical, canonical=canonical, code=f"last_score_{side}", family="last_to_score", category="Scoring", side=side, selection=side, period=period)
 
     if "handicap" in text or re.search(r"\bah\b", text):
         side = _side_from_text(outcome or raw or market)
@@ -224,21 +318,46 @@ def describe_market(value, *, market_name="", outcome_name="", specifier=""):
         if side and handicap:
             prefix = "AH Home" if side == "home" else "AH Away" if side == "away" else "AH"
             canonical = f"{prefix} {handicap}"
-            return _mk(raw=raw or canonical, canonical=canonical, code=f"asian_handicap_{side}_{handicap}", family="asian_handicap", category="Asian Handicap", side=side, line=handicap)
+            family = "asian_handicap" if "asian" in text or re.search(r"\bah\b", text) else "handicap"
+            return _mk(raw=raw or canonical, canonical=canonical, code=f"{family}_{side}_{handicap}", family=family, category="Asian Handicap", side=side, selection=side, line=handicap, period=period)
 
     if "corner" in text:
         side = _over_under_side(outcome or raw or text)
         if side and line:
-            canonical = f"Corners {side.title()} {line}"
-            return _mk(raw=raw or canonical, canonical=canonical, code=f"corners_total_{side}_{line}", family="corners_total", category="Corners", side=side, line=line, requires_corner_stats=True)
-        return _mk(raw=raw or combined, canonical=raw or combined, code="corners_market", family="corners", category="Corners", requires_corner_stats=True)
+            team_side = "home" if "home" in text else "away" if "away" in text else ""
+            family = "team_corners" if team_side else "corners_total"
+            canonical = f"{team_side.title() + ' Team ' if team_side else ''}Corners {side.title()} {line}"
+            return _mk(raw=raw or canonical, canonical=canonical, code=f"{family}_{team_side or 'total'}_{side}_{line}", family=family, category="Corners", side=side, team=team_side, selection=side, line=line, period=period, requires_corner_stats=True)
+        return _mk(raw=raw or combined, canonical=raw or combined, code="corners_market", family="corners", category="Corners", period=period, requires_corner_stats=True)
 
-    if "card" in text or "booking" in text or "yellow" in text or "red card" in text:
+    player_card_phrase = re.search(r"\b(to be booked|to get booked|to receive a card|carded|booked yes)\b", text)
+    if ("player" in text and ("card" in text or "booking" in text or "booked" in text)) or player_card_phrase:
+        subject = outcome or raw
+        return _mk(
+            raw=raw or combined,
+            canonical=raw or outcome or combined,
+            code="player_card",
+            family="player_card",
+            category="Player Cards",
+            line=line,
+            player=subject,
+            subject=subject,
+            period=period,
+            requires_player_stats=True,
+            requires_card_stats=True,
+        )
+
+    if "card" in text or "booking" in text or "booked" in text or "yellow" in text or "red card" in text:
         side = _over_under_side(outcome or raw or text)
         if side and line:
-            canonical = f"Cards {side.title()} {line}"
-            return _mk(raw=raw or canonical, canonical=canonical, code=f"cards_total_{side}_{line}", family="cards_total", category="Cards", side=side, line=line, requires_card_stats=True)
-        return _mk(raw=raw or combined, canonical=raw or combined, code="cards_market", family="cards", category="Cards", requires_card_stats=True)
+            team_side = "home" if "home" in text else "away" if "away" in text else ""
+            family = "team_cards" if team_side else "cards_total"
+            category = "Booking Points" if "booking point" in text else "Cards"
+            if "booking point" in text:
+                family = "booking_points"
+            canonical = f"{team_side.title() + ' Team ' if team_side else ''}{category} {side.title()} {line}"
+            return _mk(raw=raw or canonical, canonical=canonical, code=f"{family}_{team_side or 'total'}_{side}_{line}", family=family, category=category, side=side, team=team_side, selection=side, line=line, period=period, requires_card_stats=True)
+        return _mk(raw=raw or combined, canonical=raw or combined, code="cards_market", family="cards", category="Cards", period=period, requires_card_stats=True)
 
     if "player" in text or any(keyword in text for keyword in ["to score", "shots", "shot on target", "assist", "saves", "tackles"]):
         subject = outcome or raw
@@ -251,7 +370,7 @@ def describe_market(value, *, market_name="", outcome_name="", specifier=""):
         elif "assist" in text:
             family = "player_assist"
             category = "Player Assists"
-        elif "card" in text or "booking" in text:
+        elif "card" in text or "booking" in text or "booked" in text:
             family = "player_card"
             category = "Player Cards"
         elif "save" in text:
@@ -268,25 +387,72 @@ def describe_market(value, *, market_name="", outcome_name="", specifier=""):
             category=category,
             line=line,
             subject=subject,
+            player=subject,
+            period=period,
             requires_player_stats=True,
             requires_card_stats=family == "player_card",
         )
+
+    if "correct score" in text:
+        return _mk(raw=raw or combined, canonical=raw or outcome or combined, code="correct_score", family="correct_score", category="Scoreline", selection=outcome or raw, period=period)
+
+    if "odd even" in text or re.search(r"\b(odd|even)\b", outcome_text):
+        team_side = "home" if "home" in text else "away" if "away" in text else ""
+        selection = "odd" if "odd" in outcome_text or "odd" in text else "even" if "even" in outcome_text or "even" in text else ""
+        canonical = f"{team_side.title() + ' Team ' if team_side else ''}Odd/Even {selection.title()}".strip()
+        return _mk(raw=raw or canonical, canonical=canonical, code=f"odd_even_{team_side or 'total'}_{selection}", family="odd_even", category="Goals", team=team_side, selection=selection, period=period)
+
+    if any(key in text for key in ["goal bounds", "goal range", "exact goals", "multigoals", "excluded number of goals"]):
+        if "exact goals" in text or "excluded number" in text:
+            family = "exact_goals"
+        elif "multigoals" in text:
+            family = "multigoals"
+        else:
+            family = "goal_range"
+        team_side = "home" if "home" in text else "away" if "away" in text else ""
+        selection = outcome or raw
+        return _mk(raw=raw or combined, canonical=selection or combined, code=f"{family}_{team_side or 'total'}", family=family, category="Goal Ranges", team=team_side, selection=selection, period=period)
+
+    if re.search(r"\b[0-9]+\s*\+(?=\s|$)", text):
+        team_side = "home" if "home" in text else "away" if "away" in text else ""
+        goal_match = re.search(r"\b([0-9]+)\s*\+(?=\s|$)", text)
+        if goal_match:
+            goal_line = str(max(int(goal_match.group(1)) - 0.5, 0.5))
+            canonical = f"{team_side.title() + ' Team ' if team_side else ''}Over {goal_line}".strip()
+            return _mk(raw=raw or canonical, canonical=canonical, code=f"team_total_goals_{team_side or 'unknown'}_over_{goal_line}", family="team_total_goals", category="Team Goals", side="over", team=team_side, selection="over", line=goal_line, period=period, requires_team_goal_stats=True)
+
+    if "winning margin" in text or "lead by" in text:
+        team_side = "home" if "home" in text else "away" if "away" in text else ""
+        return _mk(raw=raw or combined, canonical=raw or outcome or combined, code=f"winning_margin_{team_side or 'any'}", family="winning_margin", category="Result", team=team_side, selection=outcome or raw, period=period)
+
+    team_goals_match = re.search(r"\b(home|away|team)\b.*\b([0-9]+)\s*\+(?=\s|$)", text)
+    if team_goals_match:
+        team_side = "home" if "home" in text else "away" if "away" in text else ""
+        goal_line = str(max(int(team_goals_match.group(2)) - 0.5, 0.5))
+        canonical = f"{team_side.title() + ' Team ' if team_side else 'Team '}Over {goal_line}"
+        return _mk(raw=raw or canonical, canonical=canonical, code=f"team_total_goals_{team_side or 'team'}_over_{goal_line}", family="team_total_goals", category="Team Goals", side="over", team=team_side, selection="over", line=goal_line, period=period, requires_team_goal_stats=True)
 
     total_context = "over under" in text or "total goals" in text or re.search(r"\b(over|under)\b", text)
     if total_context:
         side = _over_under_side(outcome or raw or text)
         if side and line:
-            if "team total" in text or "home total" in text or "away total" in text:
+            if (
+                "team total" in text
+                or "home total" in text
+                or "away total" in text
+                or re.search(r"\b(home|away)\s+team\s+(?:goals?\s+)?(?:over|under)\b", text)
+                or re.search(r"\b(home|away)\s+over\s+under\b", text)
+            ):
                 team_side = "home" if "home" in text else "away" if "away" in text else ""
                 canonical = f"{team_side.title()} Team {side.title()} {line}".strip()
-                return _mk(raw=raw or canonical, canonical=canonical, code=f"team_total_goals_{team_side}_{side}_{line}", family="team_total_goals", category="Team Goals", side=team_side or side, line=line, requires_team_goal_stats=True)
+                return _mk(raw=raw or canonical, canonical=canonical, code=f"team_total_goals_{team_side}_{side}_{line}", family="team_total_goals", category="Team Goals", side=side, team=team_side, selection=side, line=line, period=period, requires_team_goal_stats=True)
             canonical = f"{side.title()} {line}"
-            return _mk(raw=raw or canonical, canonical=canonical, code=f"total_goals_{side}_{line}", family="total_goals", category="Goals", side=side, line=line)
+            return _mk(raw=raw or canonical, canonical=canonical, code=f"total_goals_{side}_{line}", family="total_goals", category="Goals", side=side, selection=side, line=line, period=period)
 
     if "gg over" in text or ("btts" in text and "over" in text):
         line = line or "2.5"
         canonical = f"GG + Over {line}"
-        return _mk(raw=raw or canonical, canonical=canonical, code=f"btts_over_{line}", family="combo", category="Goals", side="over", line=line)
+        return _mk(raw=raw or canonical, canonical=canonical, code=f"btts_over_{line}", family="combo", category="Goals", side="over", selection="yes_over", line=line, period=period)
 
     return MarketDescriptor(
         raw=raw or combined,

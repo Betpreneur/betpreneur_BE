@@ -142,6 +142,10 @@ class StatPalSnapshotServiceTests(TestCase):
                     "away_xg": 1.2,
                     "home_shots": 12,
                     "away_corners": 5,
+                    "home_yellow_cards": 2,
+                    "away_yellow_cards": 3,
+                    "home_red_cards": 0,
+                    "away_red_cards": 1,
                 }
             },
             match_id="12345",
@@ -152,6 +156,9 @@ class StatPalSnapshotServiceTests(TestCase):
         self.assertEqual(summary["expected_goals"], 2.9)
         self.assertEqual(summary["home_shots"], 12)
         self.assertEqual(summary["away_corners"], 5)
+        self.assertEqual(summary["home_yellow_cards"], 2)
+        self.assertEqual(summary["away_yellow_cards"], 3)
+        self.assertEqual(summary["away_red_cards"], 1)
 
     def test_refresh_fixture_snapshots_saves_fixture_endpoint_payload(self):
         class DummyClient:
@@ -259,3 +266,60 @@ class StatPalSnapshotServiceTests(TestCase):
         self.assertEqual(result["api_usage"]["attempted_calls"], 1)
         self.assertEqual(result["api_usage"]["failed_calls"], 1)
         self.assertEqual(result["api_usage"]["snapshot_types_failed"], ["lineups"])
+
+    def test_snapshot_types_for_market_are_market_family_aware(self):
+        service = StatPalSnapshotService()
+
+        goals = service.snapshot_types_for_market("Over 2.5")
+        cards = service.snapshot_types_for_market("Cards Over 3.5")
+        player = service.snapshot_types_for_market("Player To Be Booked")
+
+        self.assertIn(StatPalFixtureSnapshot.SnapshotType.PREDICTIONS, goals)
+        self.assertIn(StatPalFixtureSnapshot.SnapshotType.DETAILED_STATS, goals)
+        self.assertIn(StatPalFixtureSnapshot.SnapshotType.LINEUPS, cards)
+        self.assertIn(StatPalFixtureSnapshot.SnapshotType.INJURIES_SUSPENSIONS, cards)
+        self.assertIn(StatPalFixtureSnapshot.SnapshotType.LINEUPS, player)
+        self.assertIn(StatPalFixtureSnapshot.SnapshotType.PREMATCH_ODDS, player)
+
+    def test_snapshot_plan_reports_cache_coverage_for_market(self):
+        service = StatPalSnapshotService()
+        service.save_endpoint_payload(
+            snapshot_type=StatPalFixtureSnapshot.SnapshotType.LINEUPS,
+            endpoint_name="SOCCER_LINEUPS",
+            payload={"lineups": []},
+            match_id="12345",
+        )
+
+        plan = service.snapshot_plan_for_market("Cards Over 3.5", match_id="12345")
+
+        self.assertIn(StatPalFixtureSnapshot.SnapshotType.LINEUPS, plan["fresh_snapshot_types"])
+        self.assertIn(StatPalFixtureSnapshot.SnapshotType.DETAILED_STATS, plan["missing_snapshot_types"])
+        self.assertGreater(plan["coverage_percent"], 0)
+
+    def test_prepare_fixture_context_for_market_fetches_required_snapshots(self):
+        class DummyClient:
+            def __init__(self):
+                self.calls = []
+
+            def soccer_endpoint(self, endpoint_name, params=None, **path_params):
+                self.calls.append({"endpoint_name": endpoint_name, "params": params, "path_params": path_params})
+                if endpoint_name == "SOCCER_INJURIES_SUSPENSIONS":
+                    return {"injuries_suspensions": {"league": []}}
+                return {"endpoint": endpoint_name, "params": params or {}, "path_params": path_params}
+
+        client = DummyClient()
+        service = StatPalSnapshotService(client=client)
+
+        bundle = service.prepare_fixture_context_for_market(
+            "Cards Over 3.5",
+            match_id="12345",
+            provider_competition_id="39",
+        )
+
+        called = [call["endpoint_name"] for call in client.calls]
+        self.assertIn("SOCCER_LINEUPS", called)
+        self.assertIn("SOCCER_DETAILED_STATS", called)
+        self.assertIn("SOCCER_PREMATCH_ODDS", called)
+        self.assertTrue(bundle["context"]["available"])
+        self.assertIn("market_snapshot_plan", bundle["context"])
+        self.assertIn("market_snapshot_coverage", bundle["context"])

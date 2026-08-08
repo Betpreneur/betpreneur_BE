@@ -44,10 +44,17 @@ def _sample_replace_result():
                 "sample_size": 713,
                 "similar_market_roi": 8.4,
             },
+            "replacement_scope": "broad_fallback",
         },
         "market_taxonomy": {
             "recognized": True,
             "core_supported": True,
+        },
+        "market_capability": {
+            "support_level": "full",
+            "data_quality": "strong",
+            "confidence_cap": 88,
+            "warnings": [],
         },
         "statpal_context": {
             "available": True,
@@ -75,6 +82,23 @@ def _sample_replace_result():
     }
 
 
+def _sample_market_not_found_with_replacement():
+    result = _sample_replace_result()
+    result["submitted_market"] = "Cards Over 3.5"
+    result["status"] = "market_not_found"
+    result["selected_market"] = {
+        "market": "Cards Over 3.5",
+        "advisory_score": 50,
+        "advisory_status": "avoid",
+        "advisory_evidence": {},
+    }
+    result["market_taxonomy"] = {
+        "recognized": True,
+        "core_supported": False,
+    }
+    return result
+
+
 class SlipReviewPublicContractTests(TestCase):
     def test_public_review_contract_is_frontend_friendly(self):
         summary = _manual_review_summary([_sample_replace_result()])
@@ -97,15 +121,34 @@ class SlipReviewPublicContractTests(TestCase):
         self.assertEqual(selection["verdict"]["code"], "replace")
         self.assertEqual(selection["verdict"]["label"], "Replace")
         self.assertEqual(selection["your_pick"]["market"], "Away Win")
+        self.assertEqual(selection["your_pick"]["support_level"], "full")
+        self.assertEqual(selection["your_pick"]["data_quality"], "strong")
+        self.assertEqual(selection["your_pick"]["confidence_cap"], 88)
         self.assertNotIn("taxonomy", selection["your_pick"])
         self.assertNotIn("statpal_advisory", selection["your_pick"])
         self.assertEqual(selection["ai_pick"]["market"], "Over 1.5")
+        self.assertEqual(selection["ai_pick"]["replacement_scope"], "broad_fallback")
         self.assertIn(
             selection["ai_pick"]["recommendation_strength"],
             {"playable", "safer_alternative", "strong_recommendation"},
         )
         self.assertTrue(selection["technical_ref"]["has_technical_details"])
+        self.assertEqual(selection["technical_ref"]["market_support_level"], "full")
+        self.assertEqual(selection["technical_ref"]["market_data_quality"], "strong")
         self.assertEqual(selection["technical_ref"]["statpal_snapshot_types"], ["lineups"])
+
+    def test_market_not_found_with_replacement_counts_as_analysed(self):
+        summary = _manual_review_summary([_sample_market_not_found_with_replacement()])
+        public = summary["public"]
+
+        self.assertEqual(summary["analysed_count"], 1)
+        self.assertEqual(summary["replace_count"], 1)
+        self.assertEqual(summary["unmatched_count"], 0)
+        self.assertEqual(public["ticket"]["analysed_legs"], 1)
+        self.assertEqual(public["ticket"]["unmatched_legs"], 0)
+        self.assertEqual(public["counts"]["replace"], 1)
+        self.assertEqual(public["counts"]["unmatched"], 0)
+        self.assertEqual(public["selections"][0]["verdict"]["code"], "replace")
 
     def test_public_only_review_payload_hides_internal_summary(self):
         user = get_user_model().objects.create_user(username="tester")

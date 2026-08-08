@@ -5,6 +5,7 @@ from typing import Any
 
 from django.utils import timezone
 
+from .market_taxonomy import MarketDescriptor, describe_market
 from .models import FixtureCache, ProviderFixtureMap, StatPalFixtureSnapshot
 from .services import json_safe, normalize_fixture_text
 from .statpal import StatPalClient, StatPalError
@@ -28,9 +29,228 @@ class StatPalSnapshotService:
         StatPalFixtureSnapshot.SnapshotType.PREDICTIONS: "SOCCER_PREDICTIONS",
         StatPalFixtureSnapshot.SnapshotType.DETAILED_STATS: "SOCCER_DETAILED_STATS",
     }
+    MARKET_SNAPSHOT_TYPES = {
+        "match_result": (
+            StatPalFixtureSnapshot.SnapshotType.PREDICTIONS,
+            StatPalFixtureSnapshot.SnapshotType.DETAILED_STATS,
+            StatPalFixtureSnapshot.SnapshotType.PREMATCH_ODDS,
+            StatPalFixtureSnapshot.SnapshotType.INJURIES_SUSPENSIONS,
+        ),
+        "double_chance": (
+            StatPalFixtureSnapshot.SnapshotType.PREDICTIONS,
+            StatPalFixtureSnapshot.SnapshotType.DETAILED_STATS,
+            StatPalFixtureSnapshot.SnapshotType.PREMATCH_ODDS,
+        ),
+        "draw_no_bet": (
+            StatPalFixtureSnapshot.SnapshotType.PREDICTIONS,
+            StatPalFixtureSnapshot.SnapshotType.DETAILED_STATS,
+            StatPalFixtureSnapshot.SnapshotType.PREMATCH_ODDS,
+        ),
+        "asian_handicap": (
+            StatPalFixtureSnapshot.SnapshotType.PREDICTIONS,
+            StatPalFixtureSnapshot.SnapshotType.DETAILED_STATS,
+            StatPalFixtureSnapshot.SnapshotType.PREMATCH_ODDS,
+        ),
+        "handicap": (
+            StatPalFixtureSnapshot.SnapshotType.PREDICTIONS,
+            StatPalFixtureSnapshot.SnapshotType.DETAILED_STATS,
+            StatPalFixtureSnapshot.SnapshotType.PREMATCH_ODDS,
+        ),
+        "total_goals": (
+            StatPalFixtureSnapshot.SnapshotType.PREDICTIONS,
+            StatPalFixtureSnapshot.SnapshotType.DETAILED_STATS,
+            StatPalFixtureSnapshot.SnapshotType.PREMATCH_ODDS,
+            StatPalFixtureSnapshot.SnapshotType.INJURIES_SUSPENSIONS,
+        ),
+        "team_total_goals": (
+            StatPalFixtureSnapshot.SnapshotType.PREDICTIONS,
+            StatPalFixtureSnapshot.SnapshotType.DETAILED_STATS,
+            StatPalFixtureSnapshot.SnapshotType.PREMATCH_ODDS,
+            StatPalFixtureSnapshot.SnapshotType.INJURIES_SUSPENSIONS,
+        ),
+        "btts": (
+            StatPalFixtureSnapshot.SnapshotType.PREDICTIONS,
+            StatPalFixtureSnapshot.SnapshotType.DETAILED_STATS,
+            StatPalFixtureSnapshot.SnapshotType.PREMATCH_ODDS,
+        ),
+        "clean_sheet": (
+            StatPalFixtureSnapshot.SnapshotType.PREDICTIONS,
+            StatPalFixtureSnapshot.SnapshotType.DETAILED_STATS,
+            StatPalFixtureSnapshot.SnapshotType.PREMATCH_ODDS,
+        ),
+        "corners_total": (
+            StatPalFixtureSnapshot.SnapshotType.DETAILED_STATS,
+            StatPalFixtureSnapshot.SnapshotType.PREMATCH_ODDS,
+        ),
+        "team_corners": (
+            StatPalFixtureSnapshot.SnapshotType.DETAILED_STATS,
+            StatPalFixtureSnapshot.SnapshotType.PREMATCH_ODDS,
+        ),
+        "cards_total": (
+            StatPalFixtureSnapshot.SnapshotType.DETAILED_STATS,
+            StatPalFixtureSnapshot.SnapshotType.LINEUPS,
+            StatPalFixtureSnapshot.SnapshotType.PREMATCH_ODDS,
+            StatPalFixtureSnapshot.SnapshotType.INJURIES_SUSPENSIONS,
+        ),
+        "team_cards": (
+            StatPalFixtureSnapshot.SnapshotType.DETAILED_STATS,
+            StatPalFixtureSnapshot.SnapshotType.LINEUPS,
+            StatPalFixtureSnapshot.SnapshotType.PREMATCH_ODDS,
+            StatPalFixtureSnapshot.SnapshotType.INJURIES_SUSPENSIONS,
+        ),
+        "booking_points": (
+            StatPalFixtureSnapshot.SnapshotType.DETAILED_STATS,
+            StatPalFixtureSnapshot.SnapshotType.LINEUPS,
+            StatPalFixtureSnapshot.SnapshotType.PREMATCH_ODDS,
+            StatPalFixtureSnapshot.SnapshotType.INJURIES_SUSPENSIONS,
+        ),
+        "player_goal": (
+            StatPalFixtureSnapshot.SnapshotType.LINEUPS,
+            StatPalFixtureSnapshot.SnapshotType.PREDICTIONS,
+            StatPalFixtureSnapshot.SnapshotType.DETAILED_STATS,
+            StatPalFixtureSnapshot.SnapshotType.INJURIES_SUSPENSIONS,
+            StatPalFixtureSnapshot.SnapshotType.PREMATCH_ODDS,
+        ),
+        "player_shots": (
+            StatPalFixtureSnapshot.SnapshotType.LINEUPS,
+            StatPalFixtureSnapshot.SnapshotType.DETAILED_STATS,
+            StatPalFixtureSnapshot.SnapshotType.INJURIES_SUSPENSIONS,
+            StatPalFixtureSnapshot.SnapshotType.PREMATCH_ODDS,
+        ),
+        "player_shots_on_target": (
+            StatPalFixtureSnapshot.SnapshotType.LINEUPS,
+            StatPalFixtureSnapshot.SnapshotType.DETAILED_STATS,
+            StatPalFixtureSnapshot.SnapshotType.INJURIES_SUSPENSIONS,
+            StatPalFixtureSnapshot.SnapshotType.PREMATCH_ODDS,
+        ),
+        "player_card": (
+            StatPalFixtureSnapshot.SnapshotType.LINEUPS,
+            StatPalFixtureSnapshot.SnapshotType.DETAILED_STATS,
+            StatPalFixtureSnapshot.SnapshotType.INJURIES_SUSPENSIONS,
+            StatPalFixtureSnapshot.SnapshotType.PREMATCH_ODDS,
+        ),
+        "player_assist": (
+            StatPalFixtureSnapshot.SnapshotType.LINEUPS,
+            StatPalFixtureSnapshot.SnapshotType.DETAILED_STATS,
+            StatPalFixtureSnapshot.SnapshotType.INJURIES_SUSPENSIONS,
+            StatPalFixtureSnapshot.SnapshotType.PREMATCH_ODDS,
+        ),
+    }
+    FALLBACK_MARKET_SNAPSHOT_TYPES = (
+        StatPalFixtureSnapshot.SnapshotType.PREDICTIONS,
+        StatPalFixtureSnapshot.SnapshotType.PREMATCH_ODDS,
+        StatPalFixtureSnapshot.SnapshotType.LINEUPS,
+    )
 
     def __init__(self, client: StatPalClient | None = None):
         self.client = client or StatPalClient()
+
+    def snapshot_types_for_market(self, market: str | MarketDescriptor | dict[str, Any]) -> list[str]:
+        descriptor = self._market_descriptor(market)
+        snapshot_types = self.MARKET_SNAPSHOT_TYPES.get(descriptor.family, self.FALLBACK_MARKET_SNAPSHOT_TYPES)
+        return list(dict.fromkeys(snapshot_types))
+
+    def snapshot_plan_for_market(
+        self,
+        market: str | MarketDescriptor | dict[str, Any],
+        *,
+        match_id: str = "",
+        provider_match_id: str = "",
+        provider_competition_id: str = "",
+    ) -> dict[str, Any]:
+        descriptor = self._market_descriptor(market)
+        snapshot_types = self.snapshot_types_for_market(descriptor)
+        existing = []
+        fresh = []
+        stale = []
+        missing = []
+        for snapshot_type in snapshot_types:
+            snapshot = self.get_snapshot(
+                match_id=match_id,
+                provider_match_id=provider_match_id,
+                snapshot_type=snapshot_type,
+            )
+            if not snapshot:
+                missing.append(snapshot_type)
+                continue
+            existing.append(snapshot_type)
+            if self._is_expired(snapshot):
+                stale.append(snapshot_type)
+            else:
+                fresh.append(snapshot_type)
+        requires_league_id = [
+            snapshot_type
+            for snapshot_type in snapshot_types
+            if self._fixture_endpoint_path_params(snapshot_type, provider_competition_id) is None
+        ]
+        return {
+            "market": descriptor.to_dict(),
+            "snapshot_types": snapshot_types,
+            "existing_snapshot_types": existing,
+            "fresh_snapshot_types": fresh,
+            "stale_snapshot_types": stale,
+            "missing_snapshot_types": missing,
+            "requires_provider_competition_id": requires_league_id,
+            "coverage_percent": round((len(fresh) / len(snapshot_types)) * 100, 1) if snapshot_types else 0,
+        }
+
+    def prepare_fixture_context_for_market(
+        self,
+        market: str | MarketDescriptor | dict[str, Any],
+        *,
+        match_id: str = "",
+        provider_match_id: str = "",
+        provider_competition_id: str = "",
+        force: bool = False,
+    ) -> dict[str, Any]:
+        before = self.snapshot_plan_for_market(
+            market,
+            match_id=match_id,
+            provider_match_id=provider_match_id,
+            provider_competition_id=provider_competition_id,
+        )
+        refreshed = self.refresh_fixture_snapshots(
+            match_id=match_id,
+            provider_match_id=provider_match_id,
+            provider_competition_id=provider_competition_id,
+            force=force,
+            snapshot_types=before["snapshot_types"],
+        )
+        context = self.fixture_context(match_id=match_id, provider_match_id=provider_match_id)
+        after = self.snapshot_plan_for_market(
+            market,
+            match_id=match_id,
+            provider_match_id=provider_match_id,
+            provider_competition_id=provider_competition_id,
+        )
+        context["market_snapshot_plan"] = after
+        context["market_snapshot_coverage"] = {
+            "required": after["snapshot_types"],
+            "available": sorted((context.get("snapshots") or {}).keys()),
+            "fresh": after["fresh_snapshot_types"],
+            "missing": after["missing_snapshot_types"],
+            "coverage_percent": after["coverage_percent"],
+        }
+        return {
+            "plan": after,
+            "plan_before_refresh": before,
+            "refreshed": refreshed,
+            "context": context,
+        }
+
+    @staticmethod
+    def _market_descriptor(market: str | MarketDescriptor | dict[str, Any]) -> MarketDescriptor:
+        if isinstance(market, MarketDescriptor):
+            return market
+        if isinstance(market, dict):
+            raw = market.get("raw") or market.get("canonical") or market.get("market") or ""
+            return describe_market(
+                raw,
+                market_name=market.get("market_name") or "",
+                outcome_name=market.get("outcome_name") or "",
+                specifier=market.get("specifier") or "",
+            )
+        return describe_market(market)
 
     def save_snapshot(
         self,
@@ -400,10 +620,54 @@ class StatPalSnapshotService:
             "home_xg": home_xg,
             "away_xg": away_xg,
             "expected_goals": total_xg,
-            "home_shots": StatPalSnapshotService._find_numeric(payload, "home_shots", "shots_home"),
-            "away_shots": StatPalSnapshotService._find_numeric(payload, "away_shots", "shots_away"),
-            "home_corners": StatPalSnapshotService._find_numeric(payload, "home_corners", "corners_home"),
-            "away_corners": StatPalSnapshotService._find_numeric(payload, "away_corners", "corners_away"),
+            "home_shots": StatPalSnapshotService._find_numeric(payload, "home_shots", "shots_home", "home_total_shots"),
+            "away_shots": StatPalSnapshotService._find_numeric(payload, "away_shots", "shots_away", "away_total_shots"),
+            "home_corners": StatPalSnapshotService._find_numeric(
+                payload,
+                "home_corners",
+                "corners_home",
+                "home_corner_kicks",
+                "home_avg_corners",
+                "avg_corners_home",
+            ),
+            "away_corners": StatPalSnapshotService._find_numeric(
+                payload,
+                "away_corners",
+                "corners_away",
+                "away_corner_kicks",
+                "away_avg_corners",
+                "avg_corners_away",
+            ),
+            "home_yellow_cards": StatPalSnapshotService._find_numeric(
+                payload,
+                "home_yellow_cards",
+                "yellow_cards_home",
+                "home_yellowcards",
+                "yellowcards_home",
+            ),
+            "away_yellow_cards": StatPalSnapshotService._find_numeric(
+                payload,
+                "away_yellow_cards",
+                "yellow_cards_away",
+                "away_yellowcards",
+                "yellowcards_away",
+            ),
+            "home_red_cards": StatPalSnapshotService._find_numeric(
+                payload,
+                "home_red_cards",
+                "red_cards_home",
+                "home_redcards",
+                "redcards_home",
+            ),
+            "away_red_cards": StatPalSnapshotService._find_numeric(
+                payload,
+                "away_red_cards",
+                "red_cards_away",
+                "away_redcards",
+                "redcards_away",
+            ),
+            "total_cards": StatPalSnapshotService._find_numeric(payload, "total_cards", "cards_total"),
+            "booking_points": StatPalSnapshotService._find_numeric(payload, "booking_points", "total_booking_points"),
             "top_level_keys": sorted((payload or {}).keys()) if isinstance(payload, dict) else [],
         }
 

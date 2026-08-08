@@ -20,7 +20,8 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from .models import AlgoFixture, AlgoRun, GameBack, MarketPrediction, Pick, SlipReview, SlipSelection
-from .market_taxonomy import canonical_market_name, describe_market, market_matches, market_options
+from .market_taxonomy import canonical_market_name, describe_market, market_matches, market_options, normalize_market_text
+from .market_capabilities import market_capability_service
 from .recommendation_policy import assess_recommendation
 from .services import BetanoBetslipImporter, FixtureSearchService, SportyBetShareImporter, algo_runner_service
 from .statpal_advisory import statpal_market_advisory
@@ -1888,6 +1889,11 @@ def _match_checker_alternative_reason(submitted_market, alternative):
     scoreline_fit = evidence.get("scoreline_fit_score")
     market_fit = evidence.get("market_fit_score")
     confidence = alternative.get("final_confidence") or alternative.get("confidence")
+    scope = alternative.get("replacement_scope")
+    if scope == "comparable_market":
+        return f"{alt_market} is the stronger comparable market for this same selection type."
+    if scope == "broad_fallback":
+        return f"{alt_market} is a broader fallback because {submitted} is weak or lacks reliable scoring data."
     if scoreline_fit and scoreline_fit >= 70:
         return f"{alt_market} fits the match scoreline pattern better than {submitted}."
     if market_fit and market_fit >= 70:
@@ -1939,19 +1945,201 @@ def _with_statpal_advisory(market, statpal_advisory):
     return payload
 
 
-def _replacement_market_for_slip(game, selected_market=None):
-    markets = [
-        _with_match_checker_advisory(market)
-        for market in (game.get("markets") or [])
-        if market.get("market") not in EXCLUDED_MARKETS
-    ]
-    markets = [market for market in markets if market]
-    if selected_market:
-        selected_name = selected_market.get("market")
-        markets = [market for market in markets if not _market_matches(selected_name, market.get("market"))]
-    candidates = [market for market in markets if (market.get("advisory_score") or 0) >= 55]
-    if not candidates:
+def _cap_advisory_score(score, market_capability):
+    parsed = _float_or_none(score)
+    if parsed is None:
         return None
+    cap = _float_or_none((market_capability or {}).get("confidence_cap"))
+    if cap is None or cap <= 0:
+        return round(max(0, min(100, parsed)), 1)
+    return round(max(0, min(cap, parsed)), 1)
+
+
+def _with_market_capability(market, market_capability):
+    if not market:
+        return None
+    payload = dict(market)
+    payload["market_capability"] = market_capability or {}
+    capped_score = _cap_advisory_score(payload.get("advisory_score"), market_capability)
+    if capped_score is not None:
+        original_score = _float_or_none(payload.get("advisory_score"))
+        payload["advisory_score"] = capped_score
+        payload["advisory_status"] = _match_checker_status(capped_score)
+        evidence = dict(payload.get("advisory_evidence") or {})
+        evidence["market_capability"] = market_capability or {}
+        if original_score is not None and capped_score < original_score:
+            evidence["uncapped_advisory_score"] = original_score
+            evidence["cap_applied"] = True
+        payload["advisory_evidence"] = evidence
+    warnings = list(payload.get("advisory_warnings") or [])
+    warnings.extend((market_capability or {}).get("warnings") or [])
+    data_quality = (market_capability or {}).get("data_quality")
+    if data_quality in {"limited", "poor", "unsupported"}:
+        warnings.append(f"data_quality_{data_quality}")
+    payload["advisory_warnings"] = list(dict.fromkeys(warnings))[:10]
+    return payload
+
+
+def _submitted_market_payload(
+    *,
+    requested_market,
+    market_taxonomy,
+    statpal_advisory,
+    market_capability,
+):
+    advisory_score = _cap_advisory_score((statpal_advisory or {}).get("score"), market_capability)
+    if advisory_score is None:
+        advisory_status = "needs_data"
+    else:
+        advisory_status = _match_checker_status(advisory_score)
+    warnings = list((statpal_advisory or {}).get("warnings") or [])
+    warnings.extend((market_capability or {}).get("warnings") or [])
+    return {
+        "market": requested_market,
+        "market_taxonomy": market_taxonomy,
+        "market_capability": market_capability or {},
+        "confidence": None,
+        "final_confidence": None,
+        "advisory_score": advisory_score,
+        "advisory_status": advisory_status,
+        "advisory_basis": (statpal_advisory or {}).get("basis") or "submitted_market_advisory",
+        "advisory_warnings": list(dict.fromkeys(warnings))[:10],
+        "advisory_evidence": {
+            **((statpal_advisory or {}).get("evidence") or {}),
+            "market_capability": market_capability or {},
+        },
+        "statpal_advisory": statpal_advisory or {},
+    }
+
+
+def _generated_market_names_for_family(descriptor):
+    family = descriptor.family
+    raw_subject = descriptor.subject or descriptor.player or descriptor.raw
+    if family in {"corners_total", "team_corners", "corners"}:
+        if descriptor.team in {"home", "away"}:
+            prefix = "Home Team Corners" if descriptor.team == "home" else "Away Team Corners"
+            return [f"{prefix} {side.title()} {line}" for line in ("2.5", "3.5", "4.5", "5.5", "6.5") for side in ("over", "under")]
+        return [f"Corners {side.title()} {line}" for line in ("7.5", "8.5", "9.5", "10.5", "11.5") for side in ("over", "under")]
+    if family in {"cards_total", "team_cards", "cards"}:
+        if descriptor.team in {"home", "away"}:
+            prefix = "Home Team Cards" if descriptor.team == "home" else "Away Team Cards"
+            return [f"{prefix} {side.title()} {line}" for line in ("1.5", "2.5", "3.5") for side in ("over", "under")]
+        return [f"Cards {side.title()} {line}" for line in ("2.5", "3.5", "4.5", "5.5") for side in ("over", "under")]
+    if family == "booking_points":
+        return [f"Booking Points {side.title()} {line}" for line in ("35.5", "45.5", "55.5", "65.5") for side in ("over", "under")]
+    if family in {"total_goals", "team_total_goals"}:
+        if family == "team_total_goals" and descriptor.team in {"home", "away"}:
+            prefix = "Home Team" if descriptor.team == "home" else "Away Team"
+            return [f"{prefix} {side.title()} {line}" for line in ("0.5", "1.5", "2.5") for side in ("over", "under")]
+        return [f"{side.title()} {line}" for line in ("0.5", "1.5", "2.5", "3.5", "4.5") for side in ("over", "under")]
+    if family.startswith("player_") and raw_subject:
+        subject = str(raw_subject)
+        for suffix in (" to score", " player to score", " shots", " shot on target", " shots on target", " to be booked", " assist", " saves"):
+            normalized = normalize_market_text(subject)
+            if normalized.endswith(normalize_market_text(suffix)):
+                subject = subject[: -len(suffix)].strip()
+                break
+        if subject:
+            return [
+                f"{subject} To Score",
+                f"{subject} Shots Over 0.5",
+                f"{subject} Shots Over 1.5",
+                f"{subject} Shots On Target Over 0.5",
+                f"{subject} To Be Booked",
+                f"{subject} Assist",
+                f"{subject} Saves Over 2.5",
+            ]
+    return []
+
+
+def _generated_match_checker_markets(
+    selected_descriptor,
+    *,
+    game,
+    statpal_context,
+    provider_payload=None,
+    statpal_payload=None,
+):
+    generated = []
+    seen = set()
+    fixture = {**(game or {}), "statpal_context": statpal_context or {}}
+    for market_name in _generated_market_names_for_family(selected_descriptor):
+        descriptor = describe_market(market_name)
+        if not descriptor.recognized:
+            continue
+        key = normalize_market_text(descriptor.canonical or market_name)
+        if key in seen:
+            continue
+        seen.add(key)
+        capability = market_capability_service.assess(descriptor, statpal_context=statpal_context).to_dict()
+        advisory = statpal_market_advisory.evaluate_market(
+            descriptor,
+            fixture=fixture,
+            provider_payload=provider_payload or {},
+            statpal_payload=statpal_payload,
+        )
+        if not advisory.get("available") or _float_or_none(advisory.get("score")) is None:
+            continue
+        market = _submitted_market_payload(
+            requested_market=descriptor.canonical or market_name,
+            market_taxonomy=descriptor.to_dict(),
+            statpal_advisory=advisory,
+            market_capability=capability,
+        )
+        market.update(
+            {
+                "market": descriptor.canonical or market_name,
+                "meaning": _public_market_meaning(descriptor.canonical or market_name),
+                "confidence": None,
+                "final_confidence": None,
+                "odds": None,
+                "odds_source": "estimated",
+                "generated": True,
+                "generated_source": "statpal_market_family",
+            }
+        )
+        generated.append(market)
+    return generated
+
+
+def _market_family_group(market):
+    taxonomy = (market or {}).get("market_taxonomy") or describe_market((market or {}).get("market")).to_dict()
+    family = taxonomy.get("family") or ""
+    if family in {"total_goals", "team_total_goals", "btts", "clean_sheet", "first_to_score", "last_to_score"}:
+        return "goals"
+    if family in {"corners_total", "team_corners", "corners"}:
+        return "corners"
+    if family in {"cards_total", "team_cards", "booking_points", "cards"}:
+        return "cards"
+    if str(family).startswith("player_"):
+        return "player"
+    if family in {"match_result", "double_chance", "draw_no_bet", "asian_handicap", "handicap"}:
+        return "result"
+    return family or "unknown"
+
+
+def _replacement_scope(selected_market, candidate):
+    selected_group = _market_family_group(selected_market)
+    candidate_group = _market_family_group(candidate)
+    if selected_group == candidate_group:
+        return "comparable_market"
+    return "broad_fallback"
+
+
+def _allows_broad_replacement(selected_market):
+    group = _market_family_group(selected_market)
+    score = _float_or_none((selected_market or {}).get("advisory_score"))
+    status = str((selected_market or {}).get("advisory_status") or "").lower()
+    capability = (selected_market or {}).get("market_capability") or {}
+    data_quality = str(capability.get("data_quality") or "").lower()
+    if group in {"cards", "corners", "player"}:
+        if score is None:
+            return data_quality in {"poor", "unsupported", ""}
+        return score < 45 or status in {"avoid", "needs_data"}
+    return True
+
+
+def _rank_replacement_candidates(candidates):
     return sorted(
         candidates,
         key=lambda market: (
@@ -1960,7 +2148,39 @@ def _replacement_market_for_slip(game, selected_market=None):
             _float_or_none(market.get("ev")) or -1,
         ),
         reverse=True,
-    )[0]
+    )
+
+
+def _replacement_market_for_slip(game, selected_market=None, generated_markets=None):
+    markets = [
+        _with_match_checker_advisory(market)
+        for market in (game.get("markets") or [])
+        if market.get("market") not in EXCLUDED_MARKETS
+    ]
+    markets.extend(generated_markets or [])
+    markets = [market for market in markets if market]
+    if selected_market:
+        selected_name = selected_market.get("market")
+        markets = [market for market in markets if not _market_matches(selected_name, market.get("market"))]
+    candidates = [market for market in markets if (market.get("advisory_score") or 0) >= 55]
+    if not candidates:
+        return None
+    if selected_market:
+        comparable = [
+            market
+            for market in candidates
+            if _replacement_scope(selected_market, market) in {"comparable_market", "goal_family"}
+        ]
+        if comparable:
+            replacement = _rank_replacement_candidates(comparable)[0]
+            replacement["replacement_scope"] = _replacement_scope(selected_market, replacement)
+            return replacement
+        if not _allows_broad_replacement(selected_market):
+            return None
+    replacement = _rank_replacement_candidates(candidates)[0]
+    if selected_market:
+        replacement["replacement_scope"] = _replacement_scope(selected_market, replacement)
+    return replacement
 
 
 def _market_is_better_for_slip(selected_market, replacement_market):
@@ -1970,6 +2190,9 @@ def _market_is_better_for_slip(selected_market, replacement_market):
         return False
     selected_score = _float_or_none(selected_market.get("advisory_score")) or float(selected_market.get("display_score") or 0)
     replacement_score = _float_or_none(replacement_market.get("advisory_score")) or float(replacement_market.get("display_score") or 0)
+    scope = replacement_market.get("replacement_scope") or _replacement_scope(selected_market, replacement_market)
+    if scope == "broad_fallback":
+        return replacement_score >= selected_score + 14 and replacement_score >= 66
     return replacement_score >= selected_score + 6 and replacement_score >= 58
 
 
@@ -2413,8 +2636,20 @@ def _public_selection_risk(verdict, pick):
     return "low"
 
 
+def _selection_has_analysis(item):
+    if item.get("status") == "analysed":
+        return True
+    return item.get("status") == "market_not_found" and bool(item.get("replacement_market"))
+
+
+def _selection_is_unmatched(item):
+    if item.get("status") in {"unmatched", "ambiguous_match"}:
+        return True
+    return item.get("status") == "market_not_found" and not item.get("replacement_market")
+
+
 def _selection_strength_score(item):
-    if item.get("status") != "analysed":
+    if not _selection_has_analysis(item):
         return None
     market = item.get("selected_market") or {}
     advisory_score = _float_or_none(item.get("advisory_score") or market.get("advisory_score"))
@@ -2462,6 +2697,7 @@ def _selection_card(item):
             "odds": _float_or_none(replacement_market.get("odds")),
             "ev": _float_or_none(replacement_market.get("ev")),
             "reason": _match_checker_alternative_reason(item.get("submitted_market"), replacement_market),
+            "replacement_scope": replacement_market.get("replacement_scope") or _replacement_scope(selected_market, replacement_market),
             "evidence": replacement_market.get("advisory_evidence") or {},
             "warnings": replacement_market.get("advisory_warnings") or [],
         }
@@ -2509,6 +2745,8 @@ def _public_selection_card(item):
         ai_pick = _public_market_pick(selected_market, fallback_market=item.get("submitted_market"), fallback_odds=_selection_original_odds(item))
     if ai_pick:
         ai_pick["recommendation_strength"] = _public_recommendation_strength(ai_pick)
+        if verdict == "replace" and replacement_market:
+            ai_pick["replacement_scope"] = replacement_market.get("replacement_scope") or _replacement_scope(selected_market, replacement_market)
     if verdict != "replace":
         card = {**card, "alternative": None}
     why, reason_codes = _public_why_from_card(card)
@@ -2521,12 +2759,21 @@ def _public_selection_card(item):
         "score": card.get("advisory_score"),
         "status": card.get("advisory_status") or _match_checker_status(card.get("advisory_score") or 0),
     }
+    capability = item.get("market_capability") or selected_market.get("market_capability") or {}
+    if capability:
+        your_pick["support_level"] = capability.get("support_level")
+        your_pick["data_quality"] = capability.get("data_quality")
+        your_pick["confidence_cap"] = capability.get("confidence_cap")
     risk_level = _public_selection_risk(verdict, your_pick)
     technical_ref = {
         "status": item.get("status"),
         "match_resolution_score": card.get("match_resolution_score"),
         "market_recognized": (item.get("market_taxonomy") or {}).get("recognized"),
         "market_core_supported": (item.get("market_taxonomy") or {}).get("core_supported"),
+        "market_support_level": capability.get("support_level") if capability else "",
+        "market_data_quality": capability.get("data_quality") if capability else "",
+        "market_confidence_cap": capability.get("confidence_cap") if capability else None,
+        "market_capability_warnings": capability.get("warnings") or [],
         "statpal_snapshot_types": sorted(((card.get("statpal_context") or {}).get("snapshots") or {}).keys()),
         "has_technical_details": True,
     }
@@ -2559,7 +2806,7 @@ def _slip_intelligence(results):
         copy["selection_score"] = _selection_strength_score(copy)
         enriched.append(copy)
 
-    analysed = [item for item in enriched if item.get("status") == "analysed"]
+    analysed = [item for item in enriched if _selection_has_analysis(item)]
     if analysed:
         overall_score = round(sum(item["selection_score"] for item in analysed) / len(analysed), 1)
     else:
@@ -2571,7 +2818,10 @@ def _slip_intelligence(results):
     keep_items = [item for item in enriched if item.get("verdict") == "keep"]
     expired_items = [item for item in enriched if item.get("status") == "expired"]
     pending_items = [item for item in enriched if item.get("status") == "matched_unscored"]
-    unverified_items = [item for item in enriched if item.get("status") not in {"analysed", "expired"}]
+    unverified_items = [
+        item for item in enriched
+        if not _selection_has_analysis(item) and item.get("status") != "expired"
+    ]
 
     if remove_items or len(replace_items) >= 3 or overall_score < 45:
         risk_level = "high"
@@ -2715,10 +2965,7 @@ def _slip_intelligence(results):
             "total_legs": len(enriched),
             "analysed_legs": len(analysed),
             "pending_analysis_legs": len(pending_items),
-            "unmatched_legs": len([
-                item for item in enriched
-                if item.get("status") in {"unmatched", "ambiguous_match", "market_not_found"}
-            ]),
+            "unmatched_legs": len([item for item in enriched if _selection_is_unmatched(item)]),
             "expired_legs": len(expired_items),
         },
         "ticket_health": ticket_health,
@@ -2755,10 +3002,7 @@ def _slip_intelligence(results):
             "replace": len(replace_items),
             "remove": len(remove_items),
             "pending_analysis": len(pending_items),
-            "unmatched": len([
-                item for item in enriched
-                if item.get("status") in {"unmatched", "ambiguous_match", "market_not_found"}
-            ]),
+            "unmatched": len([item for item in enriched if _selection_is_unmatched(item)]),
             "expired": len(expired_items),
         },
         "selections": public_selections,
@@ -2800,13 +3044,13 @@ def _manual_review_summary(results):
     enriched, intelligence = _slip_intelligence(results)
     return {
         "count": len(enriched),
-        "analysed_count": sum(1 for item in enriched if item.get("status") == "analysed"),
+        "analysed_count": sum(1 for item in enriched if _selection_has_analysis(item)),
         "keep_count": sum(1 for item in enriched if item.get("verdict") == "keep"),
         "caution_count": sum(1 for item in enriched if item.get("verdict") == "caution"),
         "replace_count": sum(1 for item in enriched if item.get("verdict") == "replace"),
         "remove_count": sum(1 for item in enriched if item.get("verdict") == "remove"),
         "expired_count": sum(1 for item in enriched if item.get("status") == "expired"),
-        "unmatched_count": sum(1 for item in enriched if item.get("status") in {"unmatched", "ambiguous_match", "market_not_found"}),
+        "unmatched_count": sum(1 for item in enriched if _selection_is_unmatched(item)),
         "pending_analysis_count": sum(1 for item in enriched if item.get("status") == "matched_unscored"),
         "health_score": intelligence.get("health_score", 0),
         "risk_level": intelligence.get("risk_level", ""),
@@ -3238,18 +3482,28 @@ def _analyse_manual_selection(selection, *, days, request=None, force_fresh=Fals
         if str(provider_metadata.get("provider") or "").lower() == "statpal"
         else ""
     )
-    statpal_refresh = statpal_snapshot_service.refresh_fixture_snapshots(
+    statpal_bundle = statpal_snapshot_service.prepare_fixture_context_for_market(
+        market_descriptor,
         match_id=candidate.get("match_id"),
         provider_match_id=statpal_provider_match_id,
         provider_competition_id=provider_metadata.get("provider_competition_id") or "",
     )
-    statpal_context = statpal_snapshot_service.fixture_context(
-        match_id=candidate.get("match_id"),
-        provider_match_id=statpal_provider_match_id,
-    )
+    statpal_refresh = statpal_bundle.get("refreshed") or {}
+    statpal_context = statpal_bundle.get("context") or {}
+    market_capability = market_capability_service.assess(
+        market_descriptor,
+        statpal_context=statpal_context,
+    ).to_dict()
     statpal_advisory = statpal_market_advisory.evaluate_market(
         market_descriptor,
         fixture={**game, "statpal_context": statpal_context},
+        provider_payload=selection.get("provider_payload") or {},
+        statpal_payload=selection.get("statpal_payload"),
+    )
+    generated_markets = _generated_match_checker_markets(
+        market_descriptor,
+        game=game,
+        statpal_context=statpal_context,
         provider_payload=selection.get("provider_payload") or {},
         statpal_payload=selection.get("statpal_payload"),
     )
@@ -3257,15 +3511,18 @@ def _analyse_manual_selection(selection, *, days, request=None, force_fresh=Fals
     analysis_market = _market_for_fixture_orientation(canonical_requested_market, candidate)
     selected_market = next((market for market in markets if _market_matches(analysis_market, market.get("market"))), None)
     if not selected_market:
-        replacement_market = _replacement_market_for_slip(game)
-        advisory_score = statpal_advisory.get("score")
-        advisory_status = statpal_advisory.get("status") if advisory_score is not None else "needs_data"
-        advisory_warnings = list(statpal_advisory.get("warnings") or [])
-        if market_descriptor.recognized and advisory_score is not None:
-            advisory_basis = statpal_advisory.get("basis") or "statpal_advisory"
-        else:
-            advisory_basis = "unsupported_market"
-            advisory_warnings = advisory_warnings or ["unsupported_market"]
+        submitted_market = _submitted_market_payload(
+            requested_market=requested_market,
+            market_taxonomy=market_taxonomy,
+            statpal_advisory=statpal_advisory,
+            market_capability=market_capability,
+        )
+        replacement_market = _replacement_market_for_slip(
+            game,
+            selected_market=submitted_market,
+            generated_markets=generated_markets,
+        )
+        verdict = _manual_verdict(submitted_market, replacement_market)
         return {
             "match": match_text,
             "submitted_market": requested_market,
@@ -3273,35 +3530,14 @@ def _analyse_manual_selection(selection, *, days, request=None, force_fresh=Fals
             "analysis_market": analysis_market,
             "fixture_orientation": candidate.get("match_orientation", ""),
             "status": "market_not_found",
-            "verdict": "replace" if replacement_market else "unmatched_market",
-            "message": (
-                "We recognized this market, but it is not scored directly yet, so we selected the best available alternative for this match."
-                if market_descriptor.recognized
-                else "This market is not recognized yet, so we selected the best available alternative for this match."
-            )
-            if replacement_market
-            else (
-                "We recognized this market, but it is not available in the scored markets for this game yet."
-                if market_descriptor.recognized
-                else "Fixture matched, but that market is not available in the scored markets for this game."
-            ),
+            **verdict,
             "matched_fixture": candidate,
             "available_markets": [market.get("market") for market in markets],
-            "selected_market": {
-                "market": requested_market,
-                "market_taxonomy": market_taxonomy,
-                "confidence": None,
-                "final_confidence": None,
-                "advisory_score": advisory_score,
-                "advisory_status": advisory_status,
-                "advisory_basis": advisory_basis,
-                "advisory_warnings": advisory_warnings or ["market_recognized_not_scored"],
-                "advisory_evidence": statpal_advisory.get("evidence") or {},
-                "statpal_advisory": statpal_advisory,
-            },
+            "selected_market": submitted_market,
             "best_market": game.get("best_market"),
             "recommended_market": game.get("recommended_market"),
             "replacement_market": replacement_market,
+            "generated_markets": generated_markets,
             "fixture_resolution": {
                 "status": "market_not_found",
                 "attempts": resolver_trace,
@@ -3309,6 +3545,7 @@ def _analyse_manual_selection(selection, *, days, request=None, force_fresh=Fals
             "statpal_refresh": statpal_refresh,
             "statpal_context": statpal_context,
             "statpal_advisory": statpal_advisory,
+            "market_capability": market_capability,
         }
 
     best_market = game.get("best_market") or game.get("top_market")
@@ -3317,9 +3554,14 @@ def _analyse_manual_selection(selection, *, days, request=None, force_fresh=Fals
     if selected_market:
         selected_market["market_taxonomy"] = market_taxonomy
         selected_market = _with_statpal_advisory(selected_market, statpal_advisory)
+        selected_market = _with_market_capability(selected_market, market_capability)
     best_market = _with_match_checker_advisory(best_market)
     recommended_market = _with_match_checker_advisory(recommended_market)
-    replacement_market = _replacement_market_for_slip(game, selected_market=selected_market)
+    replacement_market = _replacement_market_for_slip(
+        game,
+        selected_market=selected_market,
+        generated_markets=generated_markets,
+    )
     verdict = _manual_verdict(selected_market, replacement_market)
     return {
         "match": match_text,
@@ -3345,9 +3587,11 @@ def _analyse_manual_selection(selection, *, days, request=None, force_fresh=Fals
         "best_market": best_market,
         "recommended_market": recommended_market,
         "replacement_market": replacement_market,
+        "generated_markets": generated_markets,
         "statpal_refresh": statpal_refresh,
         "statpal_context": statpal_context,
         "statpal_advisory": statpal_advisory,
+        "market_capability": market_capability,
         "possible_matches": candidates,
         "on_demand_analysis": on_demand,
         "fixture_resolution": {
