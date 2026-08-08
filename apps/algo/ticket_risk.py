@@ -164,6 +164,10 @@ class TicketRisk:
     killers: list[dict[str, Any]]
     calibration: Calibration
     repaired_success_percent: float | None
+    # How far same-fixture legs depart from independence (ADR-002). An empty dict or a
+    # factor of 1.0 means every leg was on its own match, or the dependence between
+    # them was not representable on the score grid.
+    correlation: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self):
         payload = asdict(self)
@@ -285,6 +289,11 @@ class TicketRiskService:
         for probability in probabilities:
             ticket_probability *= probability
 
+        # Legs sharing a fixture are not independent; adjust the product rather than
+        # replace the calibrated marginals (ADR-002).
+        correlation = _correlation_for(items, legs)
+        ticket_probability = min(1.0, ticket_probability * correlation.factor)
+
         # Each leg's share of the ticket's total improbability. Using -ln(p) makes the
         # shares additive, which is what lets us say "these three carry 68% of the risk".
         total_improbability = sum(-math.log(p) for p in probabilities) or 1.0
@@ -329,8 +338,66 @@ class TicketRiskService:
             legs=resolved,
             killers=_killers(resolved, items),
             calibration=calibration,
-            repaired_success_percent=round(repaired_probability * 100, 2),
+            repaired_success_percent=round(min(1.0, repaired_probability * correlation.factor) * 100, 2),
+            correlation=correlation.to_dict(),
         )
+
+
+def _fixture_key(item: dict[str, Any]) -> str:
+    matched = item.get("matched_fixture") or {}
+    return str(matched.get("match_id") or item.get("match_id") or "")
+
+
+def _correlation_for(items: list[dict[str, Any]], legs: list[LegRisk]):
+    """
+    Build the same-fixture dependence adjustment.
+
+    Only legs that carry a probability participate; an unassessed leg contributes no
+    marginal to adjust. Fixtures with a single leg are skipped entirely.
+    """
+    from .scoring.correlation import CorrelationResult, combine
+    from .scoring.service import score_model_service
+
+    assessed = {leg.index for leg in legs if leg.probability is not None}
+    grouped: dict[str, list[int]] = {}
+    for index, item in enumerate(items):
+        if index not in assessed:
+            continue
+        key = _fixture_key(item)
+        if key:
+            grouped.setdefault(key, []).append(index)
+
+    multi = {key: indexes for key, indexes in grouped.items() if len(indexes) > 1}
+    if not multi:
+        return CorrelationResult(factor=1.0, correlated_groups=0, adjusted_legs=0, skipped_legs=0)
+
+    groups = []
+    for indexes in multi.values():
+        first = items[indexes[0]]
+        matched = first.get("matched_fixture") or {}
+        rates = score_model_service.rates_for_fixture(
+            league_id=matched.get("league_id") or matched.get("code") or "",
+            home_team_name=matched.get("home_team") or "",
+            away_team_name=matched.get("away_team") or "",
+        )
+        if not rates.usable:
+            continue
+        legs_spec = []
+        for index in indexes:
+            taxonomy = items[index].get("market_taxonomy") or {}
+            legs_spec.append(
+                (
+                    taxonomy.get("family") or "",
+                    taxonomy.get("side") or taxonomy.get("selection") or "",
+                    taxonomy.get("line"),
+                    taxonomy.get("team") or "",
+                )
+            )
+        groups.append((rates.matrix(), legs_spec))
+
+    if not groups:
+        return CorrelationResult(factor=1.0, correlated_groups=0, adjusted_legs=0, skipped_legs=0)
+    return combine(groups)
 
 
 def _tier_counts(legs: list[LegRisk]) -> dict[str, int]:

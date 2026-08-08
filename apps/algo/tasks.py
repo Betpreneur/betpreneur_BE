@@ -138,6 +138,62 @@ def settle_daily_results(self, target_date=None):
 
 
 @shared_task(bind=True, ignore_result=False)
+def refresh_imminent_lineups(self, match_ids=None):
+    """
+    Pull team sheets for fixtures about to kick off.
+
+    Lineups only firm up in the hour before kickoff, so this runs frequently and targets
+    only fixtures users actually have money on — the ones referenced by slip selections
+    still awaiting settlement today.
+    """
+    from .models import SlipSelection
+    from .scoring.lineups import lineup_service
+
+    if match_ids is None:
+        today = timezone.localdate()
+        pending = SlipSelection.objects.filter(
+            match_date=today, outcome=SlipSelection.Outcome.PENDING
+        ).values_list("analysis_payload", flat=True)
+        match_ids = set()
+        for payload in pending:
+            matched = ((payload or {}).get("matched_fixture") or {})
+            candidate = (
+                matched.get("statpal_provider_match_id")
+                or matched.get("provider_match_id")
+                or matched.get("main_id")
+                or ""
+            )
+            if candidate:
+                match_ids.add(str(candidate))
+
+    refreshed = failed = 0
+    errors = []
+    for match_id in sorted(match_ids or []):
+        try:
+            lineup_service.refresh(match_id=match_id)
+            refreshed += 1
+        except Exception as exc:
+            failed += 1
+            if len(errors) < 20:
+                errors.append({"match_id": match_id, "error": str(exc)[:200]})
+
+    return {"considered": len(match_ids or []), "refreshed": refreshed, "failed": failed, "errors": errors}
+
+
+@shared_task(bind=True, ignore_result=False, max_retries=2, default_retry_delay=300)
+def refresh_player_availability(self):
+    """
+    Reload injuries and suspensions.
+
+    Runs often, because a late fitness call is exactly the case that turns a priced
+    player prop into a dead bet. One league-wide call covers every fixture.
+    """
+    from .scoring.availability import player_availability_service
+
+    return player_availability_service.refresh()
+
+
+@shared_task(bind=True, ignore_result=False)
 def fit_score_models(self, league_ids=None):
     """
     Refit the per-league goal models.

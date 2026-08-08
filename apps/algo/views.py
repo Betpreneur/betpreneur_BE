@@ -19,12 +19,31 @@ from rest_framework.permissions import AllowAny, IsAdminUser, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from .models import AlgoFixture, AlgoRun, GameBack, MarketPrediction, Pick, SlipReview, SlipSelection
+from .models import (
+    AlgoFixture,
+    AlgoRun,
+    GameBack,
+    MarketPrediction,
+    Pick,
+    SlipRepair,
+    SlipReview,
+    SlipSelection,
+)
 from .market_taxonomy import canonical_market_name, describe_market, market_matches, market_options, normalize_market_text
 from .market_capabilities import market_capability_service
 from .recommendation_policy import assess_recommendation
 from .services import BetanoBetslipImporter, FixtureSearchService, SportyBetShareImporter, algo_runner_service
+from .data.planner import (
+    FixtureHydrator,
+    capability_for_descriptor,
+    model_backed_capability,
+    plan_slip_hydration,
+)
+from .evaluators.registry import SCORE_MATRIX_ENGINE, evaluator_for
+from .explain import service as explanation_service
 from .leg_state import assess_leg
+from .repair import plan_repair
+from .scoring.service import score_model_service
 from .statpal_advisory import statpal_market_advisory
 from .statpal_snapshots import statpal_snapshot_service
 from .ticket_risk import risk_level_for, ticket_risk_service
@@ -67,6 +86,8 @@ from .serializers import (
     SlipReviewDetailResponseSerializer,
     SlipReviewListResponseSerializer,
     SlipReviewOptionsResponseSerializer,
+    SlipRepairRequestSerializer,
+    SlipRepairResponseSerializer,
     SlipReviewRecapQuerySerializer,
     SlipReviewRecapResponseSerializer,
     SportyBetSlipImportRequestSerializer,
@@ -2077,7 +2098,9 @@ def _generated_match_checker_markets(
         if key in seen:
             continue
         seen.add(key)
-        capability = market_capability_service.assess(descriptor, statpal_context=statpal_context).to_dict()
+        capability = capability_for_descriptor(
+            descriptor, fixture=fixture, statpal_context=statpal_context
+        )
         advisory = statpal_market_advisory.evaluate_market(
             descriptor,
             fixture=fixture,
@@ -2827,6 +2850,12 @@ def _public_selection_card(item):
     }
 
 
+def _with_explanation(card):
+    """Attach a plain-language explanation built only from values the model produced."""
+    card["explanation"] = explanation_service.explain_leg(card).to_dict()
+    return card
+
+
 def _leg_state_counts(items):
     """
     Where every leg stopped, and how it was assessed.
@@ -2987,7 +3016,7 @@ def _slip_intelligence(results):
     }
 
     public_selections = [
-        _with_leg_risk(_public_selection_card(item), leg)
+        _with_explanation(_with_leg_risk(_public_selection_card(item), leg))
         for item, leg in zip(enriched, ticket_risk.legs)
     ]
     recommended_change_ids = [
@@ -3062,6 +3091,8 @@ def _slip_intelligence(results):
             "assessed_legs_in_estimate": ticket_risk.assessed_legs,
             "legs_excluded_from_estimate": ticket_risk.unassessed_legs,
         },
+        "correlation": ticket_risk.correlation,
+        "explanation": {},
         "leg_states": _leg_state_counts(enriched),
         "ticket_health": ticket_health,
         "ticket_killers": {
@@ -3127,6 +3158,8 @@ def _slip_intelligence(results):
             "flagged_risky_selections": len(flagged_risky_items),
         },
     }
+    # Built last, so it can summarise the finished payload rather than a partial one.
+    public_review["explanation"] = explanation_service.explain_ticket(public_review).to_dict()
 
     return enriched, {
         "overall_score": overall_score,
@@ -3452,7 +3485,7 @@ def _selection_expiry(selection):
     return {"expired": False}
 
 
-def _analyse_manual_selection(selection, *, days, request=None, force_fresh=False):
+def _analyse_manual_selection(selection, *, days, request=None, force_fresh=False, hydration_cache=None):
     match_text = selection.get("match", "")
     requested_market = selection.get("market", "")
     market_descriptor = describe_market(
@@ -3629,7 +3662,8 @@ def _analyse_manual_selection(selection, *, days, request=None, force_fresh=Fals
         if str(provider_metadata.get("provider") or "").lower() == "statpal"
         else ""
     )
-    statpal_bundle = statpal_snapshot_service.prepare_fixture_context_for_market(
+    hydrator = hydration_cache or FixtureHydrator()
+    statpal_bundle = hydrator.bundle_for(
         market_descriptor,
         match_id=candidate.get("match_id"),
         provider_match_id=statpal_provider_match_id,
@@ -3637,10 +3671,12 @@ def _analyse_manual_selection(selection, *, days, request=None, force_fresh=Fals
     )
     statpal_refresh = statpal_bundle.get("refreshed") or {}
     statpal_context = statpal_bundle.get("context") or {}
-    market_capability = market_capability_service.assess(
-        market_descriptor,
-        statpal_context=statpal_context,
-    ).to_dict()
+
+    # Snapshot coverage is only the right yardstick for the StatPal advisory path;
+    # matrix- and count-model markets are judged on the data that actually serves them.
+    market_capability = capability_for_descriptor(
+        market_descriptor, fixture=game, statpal_context=statpal_context
+    )
     statpal_advisory = statpal_market_advisory.evaluate_market(
         market_descriptor,
         fixture={**game, "statpal_context": statpal_context},
@@ -3791,6 +3827,19 @@ def process_slip_review_import(review_id):
             for item in imported.get("selections") or []
             if item.get("match") and item.get("market")
         ]
+        # One hydrator for the whole review: snapshots are fetched once per fixture
+        # rather than once per leg, and matrix-served legs skip the provider entirely.
+        hydrator = FixtureHydrator()
+        plan = plan_slip_hydration(selections)
+        log.info(
+            "Slip hydration plan review=%s legs=%s fixtures=%s needing_snapshots=%s served_by_model=%s",
+            review.id,
+            plan["legs"],
+            plan["distinct_fixtures"],
+            plan["fixtures_needing_snapshots"],
+            plan["fixtures_served_by_model"],
+        )
+
         results = []
         for selection in selections:
             result = _analyse_manual_selection(
@@ -3798,10 +3847,17 @@ def process_slip_review_import(review_id):
                 days=payload.get("days", 3),
                 request=None,
                 force_fresh=True,
+                hydration_cache=hydrator,
             )
             result["provider"] = review.source
             result["provider_payload"] = _json_safe(selection.get("provider_payload") or {})
             results.append(result)
+
+        log.info(
+            "Slip hydration done review=%s %s",
+            review.id,
+            hydrator.stats.to_dict(),
+        )
 
         if not results:
             raise ValueError("No supported football selections were found in this slip.")
@@ -3990,6 +4046,77 @@ def _slip_recap_payload(user, *, days):
         },
         "message": message,
     }
+
+
+def _repair_payload(review, plan, repair):
+    return {
+        "repair_id": repair.id,
+        "review_id": review.id,
+        "mode": repair.mode,
+        "original": {
+            "legs": plan.original_legs,
+            "combined_odds": plan.original_combined_odds,
+            "estimated_success_percent": plan.original_success_percent,
+        },
+        "revised": {
+            "legs": plan.revised_legs,
+            "combined_odds": plan.revised_combined_odds,
+            "estimated_success_percent": plan.revised_success_percent,
+        },
+        "changes": plan.changes,
+        "decisions": [decision.to_dict() for decision in plan.decisions],
+        "disclosure": plan.disclosure,
+    }
+
+
+class SlipRepairView(APIView):
+    permission_classes = [IsAuthenticated]
+    serializer_class = SlipRepairResponseSerializer
+
+    @extend_schema(
+        summary="Repair a slip",
+        description=(
+            "Authenticated user endpoint. Builds a revised version of a reviewed slip by "
+            "replacing or dropping selections the model cannot defend. Send `decisions` to "
+            "accept or reject individual changes; omit it to apply every recommended change. "
+            "A repaired ticket is an evidence-based alternative, not a guarantee, and it "
+            "usually carries lower combined odds than the original."
+        ),
+        tags=["Slip Reviews"],
+        request=SlipRepairRequestSerializer,
+        responses={201: SlipRepairResponseSerializer},
+    )
+    def post(self, request, review_id):
+        review = SlipReview.objects.filter(id=review_id, user=request.user).first()
+        if review is None:
+            return Response({"detail": "Slip review not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        serializer = SlipRepairRequestSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        submitted = serializer.validated_data.get("decisions") or []
+        decisions = {item["index"]: item["action"] for item in submitted}
+
+        items = [selection.analysis_payload or {} for selection in review.selections.all()]
+        if not items:
+            return Response(
+                {"detail": "This review has no analysed selections to repair."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        ticket_risk = ticket_risk_service.assess(items)
+        plan = plan_repair(items, ticket_risk, decisions=decisions)
+        repair = SlipRepair.objects.create(
+            review=review,
+            mode=SlipRepair.Mode.CUSTOM if decisions else SlipRepair.Mode.RECOMMENDED,
+            original_legs=plan.original_legs,
+            original_combined_odds=plan.original_combined_odds,
+            original_success_percent=plan.original_success_percent,
+            revised_legs=plan.revised_legs,
+            revised_combined_odds=plan.revised_combined_odds,
+            revised_success_percent=plan.revised_success_percent,
+            changes=[decision.to_dict() for decision in plan.decisions],
+        )
+        return Response(_repair_payload(review, plan, repair), status=status.HTTP_201_CREATED)
 
 
 class SlipReviewRecapView(APIView):

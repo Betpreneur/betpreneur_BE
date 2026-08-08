@@ -1,4 +1,4 @@
-from django.test import SimpleTestCase
+from django.test import SimpleTestCase, TestCase
 
 from apps.algo.views import (
     _generated_match_checker_markets,
@@ -8,6 +8,7 @@ from apps.algo.views import (
     _with_market_capability,
 )
 from apps.algo.market_taxonomy import describe_market
+from apps.algo.models import TeamRateProfile
 
 
 class UserPickAdvisoryTests(SimpleTestCase):
@@ -166,49 +167,6 @@ class UserPickAdvisoryTests(SimpleTestCase):
 
         self.assertIsNone(replacement)
 
-    def test_generated_cards_markets_provide_same_family_replacement(self):
-        selected = {
-            "market": "Cards Over 5.5",
-            "advisory_score": 42,
-            "advisory_status": "avoid",
-            "market_taxonomy": {"family": "cards_total"},
-            "market_capability": {"data_quality": "strong"},
-        }
-        statpal_context = {
-            "market_snapshot_plan": {
-                "snapshot_types": ["detailed_stats", "lineups", "prematch_odds", "injuries_suspensions"],
-                "missing_snapshot_types": [],
-                "coverage_percent": 100,
-            },
-            "snapshots": {
-                "detailed_stats": {
-                    "summary": {
-                        "home_yellow_cards": 2.1,
-                        "away_yellow_cards": 2.0,
-                    }
-                },
-                "lineups": {"summary": {"projected": True}},
-                "prematch_odds": {"summary": {}},
-                "injuries_suspensions": {"summary": {}},
-            },
-        }
-        generated = _generated_match_checker_markets(
-            describe_market("Cards Over 5.5"),
-            game={"markets": [{"market": "Over 1.5"}]},
-            statpal_context=statpal_context,
-        )
-
-        replacement = _replacement_market_for_slip(
-            {"markets": [{"market": "Over 1.5", "final_confidence": 90, "council_review": {"decision": "approve"}}]},
-            selected_market=selected,
-            generated_markets=generated,
-        )
-
-        self.assertIsNotNone(replacement)
-        self.assertEqual(replacement["replacement_scope"], "comparable_market")
-        self.assertIn("Cards", replacement["market"])
-        self.assertTrue(replacement["generated"])
-
     def test_generated_player_markets_include_same_player_alternatives(self):
         payload = {
             "player": {
@@ -255,3 +213,57 @@ class UserPickAdvisoryTests(SimpleTestCase):
         generated_names = {market["market"] for market in generated}
         self.assertIn("Test Forward Shots Over 1.5", generated_names)
         self.assertIn("Test Forward Shots On Target Over 0.5", generated_names)
+
+
+class GeneratedCardsAlternativeTests(TestCase):
+    """
+    Cards alternatives are only offered when the count model can actually price them.
+
+    Before the count model existed, a cards alternative could be generated from a
+    constant that ignored the line. Suggesting a swap we cannot model is exactly the
+    recommendation the product should not make.
+    """
+
+    def setUp(self):
+        for team_id, name in (("h1", "Alpha"), ("a1", "Beta")):
+            TeamRateProfile.objects.create(
+                provider="statpal", team_id=team_id, team_name=name,
+                team_name_normalized=name.lower(), corners_home=6.0, corners_away=4.5,
+                cards_home=2.2, cards_away=2.4, matches=20,
+            )
+        self.game = {
+            "markets": [{"market": "Over 1.5"}],
+            "hid": "h1", "aid": "a1", "hname": "Alpha", "aname": "Beta",
+        }
+
+    def test_a_priceable_cards_alternative_is_offered(self):
+        selected = {
+            "market": "Cards Over 5.5",
+            "advisory_score": 42,
+            "advisory_status": "avoid",
+            "market_taxonomy": {"family": "cards_total"},
+            "market_capability": {"data_quality": "strong"},
+        }
+
+        generated = _generated_match_checker_markets(
+            describe_market("Cards Over 5.5"), game=self.game, statpal_context={}
+        )
+        replacement = _replacement_market_for_slip(
+            {"markets": [{"market": "Over 1.5", "final_confidence": 90,
+                          "council_review": {"decision": "approve"}}]},
+            selected_market=selected,
+            generated_markets=generated,
+        )
+
+        self.assertIsNotNone(replacement)
+        self.assertIn("Cards", replacement["market"])
+        self.assertTrue(replacement["generated"])
+
+    def test_no_cards_alternative_without_team_rates(self):
+        TeamRateProfile.objects.all().delete()
+
+        generated = _generated_match_checker_markets(
+            describe_market("Cards Over 5.5"), game=self.game, statpal_context={}
+        )
+
+        self.assertEqual([item for item in generated if "Cards" in item.get("market", "")], [])

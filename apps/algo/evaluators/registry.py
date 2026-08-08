@@ -29,6 +29,7 @@ NONE = "none"
 
 STATPAL_ENGINE = "statpal_advisory"
 SCORE_MATRIX_ENGINE = "score_matrix"
+COUNT_MODEL_ENGINE = "count_model"
 
 
 @dataclass(frozen=True)
@@ -60,25 +61,32 @@ MARKET_EVALUATORS: dict[str, EvaluatorSpec] = {
     "team_total_goals": EvaluatorSpec(
         "team_total_goals", "_evaluate_team_goal_market", QUANTITATIVE, _GOAL_CORE, _GOAL_RICH
     ),
+    # Corners and cards come from cached team rate profiles, not snapshots. The old
+    # evaluators read fields the match-stats endpoint does not carry, so they returned a
+    # constant that ignored the line while claiming to be quantitative.
     "corners_total": EvaluatorSpec(
-        "corners_total", "_evaluate_corners_market", QUANTITATIVE,
-        (Cap.TEAM_CORNERS,), (Cap.MARKET_ODDS, Cap.TEAM_POSSESSION),
+        "corners_total", "", QUANTITATIVE, (Cap.TEAM_CORNERS,),
+        (Cap.MARKET_ODDS, Cap.TEAM_POSSESSION), engine=COUNT_MODEL_ENGINE,
     ),
     "team_corners": EvaluatorSpec(
-        "team_corners", "_evaluate_corners_market", QUANTITATIVE,
-        (Cap.TEAM_CORNERS,), (Cap.MARKET_ODDS, Cap.TEAM_POSSESSION),
+        "team_corners", "", QUANTITATIVE, (Cap.TEAM_CORNERS,),
+        (Cap.MARKET_ODDS, Cap.TEAM_POSSESSION), engine=COUNT_MODEL_ENGINE,
     ),
     "cards_total": EvaluatorSpec(
-        "cards_total", "_evaluate_cards_market", QUANTITATIVE, _CARD_CORE,
-        (Cap.REFEREE, Cap.LINEUP_PROJECTED, Cap.MARKET_ODDS),
+        "cards_total", "", QUANTITATIVE, _CARD_CORE,
+        (Cap.REFEREE, Cap.LINEUP_PROJECTED, Cap.MARKET_ODDS), engine=COUNT_MODEL_ENGINE,
     ),
     "team_cards": EvaluatorSpec(
-        "team_cards", "_evaluate_cards_market", QUANTITATIVE, _CARD_CORE,
-        (Cap.REFEREE, Cap.LINEUP_PROJECTED, Cap.MARKET_ODDS),
+        "team_cards", "", QUANTITATIVE, _CARD_CORE,
+        (Cap.REFEREE, Cap.LINEUP_PROJECTED, Cap.MARKET_ODDS), engine=COUNT_MODEL_ENGINE,
+    ),
+    "cards": EvaluatorSpec(
+        "cards", "", QUANTITATIVE, _CARD_CORE,
+        (Cap.REFEREE, Cap.MARKET_ODDS), engine=COUNT_MODEL_ENGINE,
     ),
     "booking_points": EvaluatorSpec(
-        "booking_points", "_evaluate_cards_market", QUANTITATIVE, _CARD_CORE,
-        (Cap.REFEREE, Cap.LINEUP_PROJECTED, Cap.MARKET_ODDS),
+        "booking_points", "", QUANTITATIVE, _CARD_CORE,
+        (Cap.REFEREE, Cap.LINEUP_PROJECTED, Cap.MARKET_ODDS), engine=COUNT_MODEL_ENGINE,
     ),
     "player_goal": EvaluatorSpec(
         "player_goal", "_evaluate_player_market", QUANTITATIVE, _PLAYER_CORE,
@@ -103,11 +111,6 @@ MARKET_EVALUATORS: dict[str, EvaluatorSpec] = {
     "player_saves": EvaluatorSpec(
         "player_saves", "_evaluate_player_market", QUANTITATIVE, _PLAYER_CORE,
         (Cap.LINEUP_CONFIRMED, Cap.LINEUP_PROJECTED, Cap.INJURIES),
-    ),
-    # Generic cards fallback emitted by the taxonomy when no line is present.
-    "cards": EvaluatorSpec(
-        "cards", "_evaluate_cards_market", QUANTITATIVE, _CARD_CORE,
-        (Cap.REFEREE, Cap.LINEUP_PROJECTED, Cap.MARKET_ODDS),
     ),
 
     # --- derived from the shared score distribution (ADR-001) ---

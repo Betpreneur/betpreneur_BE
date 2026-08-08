@@ -4,7 +4,13 @@ import math
 from dataclasses import asdict, dataclass
 from typing import Any
 
-from .evaluators.registry import HEURISTIC, NONE, SCORE_MATRIX_ENGINE, evaluator_for
+from .evaluators.registry import (
+    COUNT_MODEL_ENGINE,
+    HEURISTIC,
+    NONE,
+    SCORE_MATRIX_ENGINE,
+    evaluator_for,
+)
 from .market_taxonomy import MarketDescriptor, describe_market, normalize_market_text
 from .models import ProviderPlayerMap
 
@@ -83,13 +89,21 @@ class StatPalMarketAdvisoryService:
                 "market_family": descriptor.family,
             }
 
-        if spec.engine == SCORE_MATRIX_ENGINE:
-            from .evaluators import score_matrix_evaluator
+        if spec.engine in {SCORE_MATRIX_ENGINE, COUNT_MODEL_ENGINE}:
+            if spec.engine == SCORE_MATRIX_ENGINE:
+                from .evaluators import score_matrix_evaluator as engine
+            else:
+                from .evaluators import count_market_evaluator as engine
 
-            payload = score_matrix_evaluator.evaluate(descriptor, fixture=fixture)
+            payload = engine.evaluate(descriptor, fixture=fixture)
             payload["assessment_type"] = spec.assessment_type
             payload["market_family"] = descriptor.family
             return payload
+
+        if spec.handler == "_evaluate_player_market":
+            unavailable = self._player_availability_block(descriptor, fixture)
+            if unavailable is not None:
+                return unavailable
 
         # The family alone decides the handler. A data-requirement flag must never
         # hijack dispatch -- that is what routed team markets into the player model.
@@ -109,6 +123,80 @@ class StatPalMarketAdvisoryService:
             # as one. Consumers key off assessment_type to decide what they may claim.
             payload.setdefault("warnings", []).append("heuristic_assessment")
         return payload
+
+    @staticmethod
+    def _player_team_hint(descriptor, fixture) -> str:
+        """SportyBet writes the club in brackets: `Haller, Sebastian (Sanfrecce Hiroshima)`."""
+        subject = str(descriptor.subject or descriptor.raw or "")
+        if "(" in subject and ")" in subject:
+            return subject.split("(", 1)[1].rsplit(")", 1)[0].strip()
+        return ""
+
+    def _player_availability_block(self, descriptor: MarketDescriptor, fixture):
+        """
+        Refuse to price a player who will not be on the pitch.
+
+        An injured or suspended player makes the bet dead, not risky, so this returns an
+        unavailable assessment rather than a low score. A doubtful player is priced but
+        flagged, because the bet is still live.
+        """
+        from .scoring.availability import player_availability_service
+
+        subject = str(descriptor.subject or descriptor.raw or "")
+        if not subject:
+            return None
+
+        from .scoring.lineups import lineup_service
+
+        team_hint = self._player_team_hint(descriptor, fixture)
+        match_id = str((fixture or {}).get("statpal_provider_match_id") or "")
+
+        verdict = player_availability_service.verdict_for(
+            player_name=subject, team_name=team_hint, match_id=match_id
+        )
+
+        if not verdict.is_out:
+            # A confirmed team sheet that omits the player is equally decisive; a
+            # projected one is only a signal and must not block pricing.
+            sheet = lineup_service.verdict_for(
+                match_id=match_id, player_name=subject, team_name=team_hint
+            )
+            if sheet.blocks_pricing:
+                return {
+                    **StatPalAdvisory(
+                        available=False,
+                        score=None,
+                        status="unavailable",
+                        basis="player_not_in_confirmed_lineup",
+                        evidence={"player": subject, "lineup": sheet.to_dict()},
+                        warnings=["player_omitted_from_confirmed_lineup"],
+                        message=f"{subject} is not in the confirmed team sheet for this fixture.",
+                    ).to_dict(),
+                    "assessment_type": NONE,
+                    "market_family": descriptor.family,
+                }
+            return None
+
+        return {
+            **StatPalAdvisory(
+                available=False,
+                score=None,
+                status="unavailable",
+                basis="player_unavailable",
+                evidence={
+                    "player": verdict.player_name or subject,
+                    "availability": verdict.status,
+                    "reason": verdict.reason,
+                },
+                warnings=["player_out_injured_or_suspended"],
+                message=(
+                    f"{verdict.player_name or subject} is currently listed as unavailable"
+                    + (f" ({verdict.reason})." if verdict.reason else ".")
+                ),
+            ).to_dict(),
+            "assessment_type": NONE,
+            "market_family": descriptor.family,
+        }
 
     def _evaluate_player_market(self, descriptor: MarketDescriptor, *, fixture=None, statpal_payload=None) -> StatPalAdvisory:
         payload = statpal_payload or self._player_payload_from_mapping(descriptor.subject or descriptor.raw)

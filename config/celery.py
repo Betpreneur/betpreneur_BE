@@ -28,6 +28,19 @@ app.conf.beat_schedule = {
         ),
         "options": {"expires": timedelta(hours=6).total_seconds()},
     },
+    # Every 15 minutes: team sheets only firm up in the hour before kickoff, and a
+    # confirmed omission is what turns a priced player prop into a dead bet.
+    "refresh-imminent-lineups": {
+        "task": "apps.algo.tasks.refresh_imminent_lineups",
+        "schedule": crontab(minute=os.environ.get("ALGO_LINEUP_MINUTES", "*/15")),
+        "options": {"expires": timedelta(minutes=14).total_seconds()},
+    },
+    # Hourly: a late fitness call is what turns a priced player prop into a dead bet.
+    "refresh-player-availability": {
+        "task": "apps.algo.tasks.refresh_player_availability",
+        "schedule": crontab(minute=os.environ.get("ALGO_AVAILABILITY_MINUTE", "5")),
+        "options": {"expires": timedelta(minutes=50).total_seconds()},
+    },
     "fit-score-models": {
         "task": "apps.algo.tasks.fit_score_models",
         "schedule": crontab(

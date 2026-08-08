@@ -582,6 +582,26 @@ class SlipReviewListResponseSerializer(serializers.Serializer):
     reviews = serializers.JSONField()
 
 
+class SlipRepairDecisionSerializer(serializers.Serializer):
+    index = serializers.IntegerField(min_value=0)
+    action = serializers.ChoiceField(choices=["keep", "replace", "drop"])
+
+
+class SlipRepairRequestSerializer(serializers.Serializer):
+    decisions = SlipRepairDecisionSerializer(many=True, required=False)
+
+
+class SlipRepairResponseSerializer(serializers.Serializer):
+    repair_id = serializers.IntegerField()
+    review_id = serializers.IntegerField()
+    mode = serializers.CharField()
+    original = serializers.JSONField()
+    revised = serializers.JSONField()
+    changes = serializers.IntegerField()
+    decisions = serializers.JSONField()
+    disclosure = serializers.CharField()
+
+
 class SlipReviewRecapQuerySerializer(serializers.Serializer):
     days = serializers.IntegerField(required=False, min_value=1, max_value=90, default=1)
 

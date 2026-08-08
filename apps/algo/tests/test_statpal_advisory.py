@@ -115,7 +115,7 @@ class StatPalAdvisoryUnitTests(SimpleTestCase):
     def test_cards_market_is_recognized_but_requests_deeper_profiles(self):
         descriptor = describe_market("Cards Over 3.5")
 
-        result = statpal_market_advisory.evaluate_market(descriptor)
+        result = statpal_market_advisory._evaluate_cards_market(descriptor).to_dict()
 
         self.assertTrue(result["available"])
         self.assertEqual(result["basis"], "statpal_cards_advisory_stub")
@@ -139,7 +139,7 @@ class StatPalAdvisoryUnitTests(SimpleTestCase):
             }
         }
 
-        result = statpal_market_advisory.evaluate_market(descriptor, fixture=fixture)
+        result = statpal_market_advisory._evaluate_cards_market(descriptor, fixture=fixture).to_dict()
 
         self.assertTrue(result["available"])
         self.assertEqual(result["basis"], "statpal_cards_market_model")
@@ -165,7 +165,7 @@ class StatPalAdvisoryUnitTests(SimpleTestCase):
             }
         }
 
-        result = statpal_market_advisory.evaluate_market(descriptor, fixture=fixture)
+        result = statpal_market_advisory._evaluate_cards_market(descriptor, fixture=fixture).to_dict()
 
         self.assertEqual(result["basis"], "statpal_cards_market_model")
         self.assertEqual(result["evidence"]["booking_points"], 47.5)
@@ -222,7 +222,7 @@ class StatPalAdvisoryUnitTests(SimpleTestCase):
             }
         }
 
-        result = statpal_market_advisory.evaluate_market(descriptor, fixture=fixture)
+        result = statpal_market_advisory._evaluate_corners_market(descriptor, fixture=fixture).to_dict()
 
         self.assertTrue(result["available"])
         self.assertEqual(result["basis"], "statpal_corner_market_model")
@@ -246,7 +246,7 @@ class StatPalAdvisoryUnitTests(SimpleTestCase):
             }
         }
 
-        result = statpal_market_advisory.evaluate_market(descriptor, fixture=fixture)
+        result = statpal_market_advisory._evaluate_corners_market(descriptor, fixture=fixture).to_dict()
 
         self.assertEqual(descriptor.family, "team_corners")
         self.assertEqual(result["basis"], "statpal_corner_market_model")
