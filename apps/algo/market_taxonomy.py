@@ -181,6 +181,7 @@ def _data_requirements(family):
         "player_shots_on_target": ("player_stats", "lineups", "team_stats", "odds"),
         "player_card": ("player_stats", "card_stats", "lineups", "referee_stats", "odds"),
         "player_assist": ("player_stats", "lineups", "team_stats", "odds"),
+        "team_shots_on_target": ("team_stats", "shot_stats", "odds"),
     }
     return requirements.get(family, ("team_stats", "league_stats", "odds"))
 
@@ -389,6 +390,32 @@ def describe_market(value, *, market_name="", outcome_name="", specifier=""):
             canonical = f"{team_side.title() + ' Team ' if team_side else ''}{category} {side.title()} {line}"
             return _mk(raw=raw or canonical, canonical=canonical, code=f"{family}_{team_side or 'total'}_{side}_{line}", family=family, category=category, side=side, team=team_side, selection=side, line=line, period=period, requires_card_stats=True)
         return _mk(raw=raw or combined, canonical=raw or combined, code="cards_market", family="cards", category="Cards", period=period, requires_card_stats=True)
+
+    if (
+        "shot" in text
+        and "target" in text
+        and ("team" in text or "home" in text or "away" in text)
+        and not ("player" in text or "to score" in text)
+    ):
+        side = _over_under_side(outcome or raw or text)
+        team_side = "home" if "home" in text else "away" if "away" in text else ""
+        canonical = (
+            f"{team_side.title() + ' Team ' if team_side else ''}Shots On Target "
+            f"{(side or '').title()} {line}".strip()
+        ).strip()
+        return _mk(
+            raw=raw or canonical or combined,
+            canonical=canonical or raw or combined,
+            code=f"team_shots_on_target_{team_side or 'total'}_{side or 'market'}_{line}",
+            family="team_shots_on_target",
+            category="Team Shots",
+            side=side,
+            team=team_side,
+            selection=side,
+            line=line,
+            period=period,
+            support_level="unsupported",
+        )
 
     if "player" in text or any(keyword in text for keyword in ["to score", "shots", "shot on target", "assist", "saves", "tackles"]):
         subject = outcome or raw

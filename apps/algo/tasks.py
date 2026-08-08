@@ -1,6 +1,7 @@
 from datetime import timedelta
 from datetime import date
 
+from billiard.exceptions import SoftTimeLimitExceeded
 from celery import chord, shared_task
 from django.core.exceptions import ObjectDoesNotExist
 from django.utils import timezone
@@ -102,14 +103,22 @@ def explain_picks_for_run(self, run_id):
     ignore_result=False,
     max_retries=2,
     default_retry_delay=60,
-    soft_time_limit=600,
-    time_limit=720,
+    soft_time_limit=1500,
+    time_limit=1800,
 )
 def import_slip_review(self, review_id):
     try:
         from .views import _json_safe, process_slip_review_import
 
         return _json_safe(process_slip_review_import(review_id))
+    except SoftTimeLimitExceeded:
+        from .views import fail_slip_review_import
+
+        return fail_slip_review_import(
+            review_id,
+            "Slip review timed out while analysing selections. Please retry with fewer legs or try again later.",
+            error_code="soft_time_limit_exceeded",
+        )
     except ValueError as exc:
         return {
             "review_id": review_id,

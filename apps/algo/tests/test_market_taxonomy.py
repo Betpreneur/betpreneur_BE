@@ -86,6 +86,16 @@ class MarketTaxonomyTests(SimpleTestCase):
         self.assertIn("Cards", groups)
         self.assertIn("Corners", groups)
 
+    def test_team_shots_on_target_is_not_a_player_market(self):
+        market = describe_market("Home Team Shots on Target Over 9.5")
+
+        self.assertEqual(market.family, "team_shots_on_target")
+        self.assertEqual(market.team, "home")
+        self.assertEqual(market.side, "over")
+        self.assertEqual(market.line, "9.5")
+        self.assertFalse(market.requires_player_stats)
+        self.assertEqual(market.support_level, "unsupported")
+
 
 class BookmakerMarketParsingTests(SimpleTestCase):
     def test_sportybet_parses_over_under_line(self):

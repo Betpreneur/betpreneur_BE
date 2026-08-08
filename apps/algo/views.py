@@ -39,7 +39,7 @@ from .data.planner import (
     model_backed_capability,
     plan_slip_hydration,
 )
-from .evaluators.registry import SCORE_MATRIX_ENGINE, evaluator_for
+from .evaluators.registry import COUNT_MODEL_ENGINE, SCORE_MATRIX_ENGINE, evaluator_for
 from .explain import service as explanation_service
 from .leg_state import assess_leg
 from .repair import plan_repair
@@ -2059,6 +2059,21 @@ def _generated_market_names_for_family(descriptor):
             prefix = "Home Team" if descriptor.team == "home" else "Away Team"
             return [f"{prefix} {side.title()} {line}" for line in ("0.5", "1.5", "2.5") for side in ("over", "under")]
         return [f"{side.title()} {line}" for line in ("0.5", "1.5", "2.5", "3.5", "4.5") for side in ("over", "under")]
+    if family in {"match_result", "double_chance", "draw_no_bet", "asian_handicap", "handicap"}:
+        return [
+            "Home Win",
+            "Draw",
+            "Away Win",
+            "DC: 1X",
+            "DC: X2",
+            "DC: 12",
+            "DNB Home",
+            "DNB Away",
+            "AH Home +0.5",
+            "AH Away +0.5",
+        ]
+    if family == "btts":
+        return ["GG / BTTS Yes", "BTTS No"]
     if family.startswith("player_") and raw_subject:
         subject = str(raw_subject)
         for suffix in (" to score", " player to score", " shots", " shot on target", " shots on target", " to be booked", " assist", " saves"):
@@ -2287,6 +2302,60 @@ def _manual_fixture_game(match_id, match_date, request=None):
         request=request,
         include_markets=True,
     )
+
+
+def _minimal_game_from_candidate(candidate):
+    fixture_name = candidate.get("fixture") or " vs ".join(
+        item for item in [candidate.get("home_team"), candidate.get("away_team")] if item
+    )
+    return {
+        "fixture": fixture_name,
+        "home_team": candidate.get("home_team", ""),
+        "away_team": candidate.get("away_team", ""),
+        "home_logo": candidate.get("home_logo", ""),
+        "away_logo": candidate.get("away_logo", ""),
+        "league": candidate.get("league", ""),
+        "league_logo": candidate.get("league_logo", ""),
+        "country": candidate.get("country", ""),
+        "country_flag": candidate.get("country_flag", ""),
+        "round": candidate.get("round", ""),
+        "kickoff": candidate.get("kickoff", ""),
+        "match_id": str(candidate.get("match_id") or ""),
+        "match_date": candidate.get("match_date"),
+        "statpal_home_team_id": candidate.get("statpal_home_team_id") or candidate.get("hid") or "",
+        "statpal_away_team_id": candidate.get("statpal_away_team_id") or candidate.get("aid") or "",
+        "code": candidate.get("code") or candidate.get("league_id") or "",
+        "league_id": candidate.get("league_id") or candidate.get("code") or "",
+        "hname": candidate.get("hname") or candidate.get("home_team", ""),
+        "aname": candidate.get("aname") or candidate.get("away_team", ""),
+        "hid": candidate.get("hid") or candidate.get("statpal_home_team_id") or "",
+        "aid": candidate.get("aid") or candidate.get("statpal_away_team_id") or "",
+        "markets": [],
+        "market_count": 0,
+        "recommendation_status": "no_edge",
+        "fixture_context": candidate.get("fixture_context") or {},
+        "team_news": candidate.get("team_news") or {},
+        "corner_profile": candidate.get("corner_profile") or {},
+        "insights": candidate.get("insights") or {},
+    }
+
+
+def _market_can_skip_core_on_demand(descriptor):
+    if descriptor.family in {"team_shots_on_target"}:
+        return True
+    spec = evaluator_for(descriptor.family)
+    if not spec:
+        return False
+    return spec.engine in {SCORE_MATRIX_ENGINE, COUNT_MODEL_ENGINE} or descriptor.family.startswith("player_")
+
+
+def _consume_review_force_fresh(review_scoring_context):
+    if review_scoring_context is None:
+        return True
+    if review_scoring_context.get("fixture_universe_synced"):
+        return False
+    review_scoring_context["fixture_universe_synced"] = True
+    return True
 
 
 def _manual_verdict(selected_market, replacement_market):
@@ -3485,7 +3554,15 @@ def _selection_expiry(selection):
     return {"expired": False}
 
 
-def _analyse_manual_selection(selection, *, days, request=None, force_fresh=False, hydration_cache=None):
+def _analyse_manual_selection(
+    selection,
+    *,
+    days,
+    request=None,
+    force_fresh=False,
+    hydration_cache=None,
+    review_scoring_context=None,
+):
     match_text = selection.get("match", "")
     requested_market = selection.get("market", "")
     market_descriptor = describe_market(
@@ -3621,12 +3698,23 @@ def _analyse_manual_selection(selection, *, days, request=None, force_fresh=Fals
     )
 
     on_demand = None
-    if force_fresh:
+    skip_core_on_demand = _market_can_skip_core_on_demand(market_descriptor)
+    if skip_core_on_demand:
+        game = _manual_fixture_game(candidate["match_id"], candidate["match_date"], request=request)
+        if not game:
+            game = _minimal_game_from_candidate(candidate)
+            on_demand = {
+                "status": "skipped",
+                "reason": "market_served_by_match_checker_advisory",
+                "market_family": market_descriptor.family,
+            }
+    elif force_fresh:
+        effective_force_fresh = _consume_review_force_fresh(review_scoring_context)
         on_demand = algo_runner_service.score_cached_fixture_on_demand(
             candidate["match_id"],
             match_date=candidate.get("match_date"),
             reason="slip_review",
-            force=True,
+            force=effective_force_fresh,
         )
         game = _manual_fixture_game(candidate["match_id"], candidate["match_date"], request=request)
     else:
@@ -3841,6 +3929,7 @@ def process_slip_review_import(review_id):
         )
 
         results = []
+        review_scoring_context = {"fixture_universe_synced": False}
         for selection in selections:
             result = _analyse_manual_selection(
                 selection,
@@ -3848,6 +3937,7 @@ def process_slip_review_import(review_id):
                 request=None,
                 force_fresh=True,
                 hydration_cache=hydrator,
+                review_scoring_context=review_scoring_context,
             )
             result["provider"] = review.source
             result["provider_payload"] = _json_safe(selection.get("provider_payload") or {})
@@ -3879,6 +3969,27 @@ def process_slip_review_import(review_id):
         raise
 
 
+def fail_slip_review_import(review_id, message, *, error_code="failed"):
+    review = SlipReview.objects.get(id=review_id)
+    review.status = SlipReview.Status.FAILED
+    review.summary = _empty_slip_summary(
+        message,
+        task_id=(review.summary or {}).get("task_id", ""),
+        error=message,
+    )
+    review.summary["error_code"] = error_code
+    review.save(update_fields=["status", "summary", "updated_at"])
+    return _api_response_payload(
+        {
+            "review_id": review.id,
+            "status": review.status,
+            "error": message,
+            "error_code": error_code,
+            **(review.summary or {}),
+        }
+    )
+
+
 class ManualSlipReviewView(APIView):
     permission_classes = [IsAuthenticated]
     serializer_class = ManualSlipReviewResponseSerializer
@@ -3898,8 +4009,15 @@ class ManualSlipReviewView(APIView):
         serializer = ManualSlipReviewRequestSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         days = serializer.validated_data.get("days", 3)
+        review_scoring_context = {"fixture_universe_synced": False}
         results = [
-            _analyse_manual_selection(selection, days=days, request=request, force_fresh=True)
+            _analyse_manual_selection(
+                selection,
+                days=days,
+                request=request,
+                force_fresh=True,
+                review_scoring_context=review_scoring_context,
+            )
             for selection in serializer.validated_data["selections"]
         ]
         review, summary, safe_results = _create_slip_review(

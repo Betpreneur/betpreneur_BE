@@ -1,7 +1,9 @@
 from django.test import SimpleTestCase, TestCase
 
 from apps.algo.views import (
+    _consume_review_force_fresh,
     _generated_match_checker_markets,
+    _market_can_skip_core_on_demand,
     _manual_verdict,
     _replacement_market_for_slip,
     _submitted_market_payload,
@@ -12,6 +14,18 @@ from apps.algo.models import TeamRateProfile
 
 
 class UserPickAdvisoryTests(SimpleTestCase):
+    def test_review_force_fresh_is_consumed_once(self):
+        context = {"fixture_universe_synced": False}
+
+        self.assertTrue(_consume_review_force_fresh(context))
+        self.assertFalse(_consume_review_force_fresh(context))
+
+    def test_matrix_and_count_markets_skip_core_on_demand(self):
+        self.assertTrue(_market_can_skip_core_on_demand(describe_market("Home Win")))
+        self.assertTrue(_market_can_skip_core_on_demand(describe_market("Cards Over 3.5")))
+        self.assertTrue(_market_can_skip_core_on_demand(describe_market("Home Team Shots on Target Over 9.5")))
+        self.assertFalse(_market_can_skip_core_on_demand(describe_market("Correct Score 2-1")))
+
     def test_submitted_market_score_is_capped_by_capability(self):
         submitted = _submitted_market_payload(
             requested_market="Cards Over 3.5",

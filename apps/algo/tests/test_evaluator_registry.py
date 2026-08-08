@@ -39,7 +39,7 @@ class AssessmentTypeTests(SimpleTestCase):
             self.assertEqual(assessment_type_for(family), QUANTITATIVE, family)
 
     def test_unmodelled_families_report_no_model(self):
-        for family in ["correct_score", "exact_goals", "winning_margin", "last_to_score"]:
+        for family in ["correct_score", "exact_goals", "winning_margin", "last_to_score", "team_shots_on_target"]:
             self.assertEqual(assessment_type_for(family), NONE, family)
 
     def test_only_quantitative_evaluators_may_publish_a_probability(self):
@@ -96,6 +96,14 @@ class DispatchTests(TestCase):
 
         self.assertEqual(result["assessment_type"], NONE)
         self.assertEqual(result["basis"], "no_model_for_family")
+        self.assertFalse(result["available"])
+
+    def test_team_shots_on_target_is_unmodelled_not_player_routed(self):
+        result = self._evaluate("Home Team Shots on Target Over 9.5")
+
+        self.assertEqual(result["assessment_type"], NONE)
+        self.assertEqual(result["basis"], "no_model_for_family")
+        self.assertEqual(result["market_family"], "team_shots_on_target")
         self.assertFalse(result["available"])
 
     def test_every_result_states_its_family(self):
