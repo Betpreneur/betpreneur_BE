@@ -1,3 +1,6 @@
+from unittest.mock import patch
+from dataclasses import replace
+
 from django.test import SimpleTestCase, TestCase
 
 from apps.algo.views import (
@@ -11,6 +14,7 @@ from apps.algo.views import (
 )
 from apps.algo.market_taxonomy import describe_market
 from apps.algo.models import TeamRateProfile
+from apps.algo.scoring.dixon_coles import ScoreMatrix
 
 
 class UserPickAdvisoryTests(SimpleTestCase):
@@ -49,6 +53,31 @@ class UserPickAdvisoryTests(SimpleTestCase):
         self.assertEqual(submitted["advisory_score"], 56)
         self.assertEqual(submitted["advisory_status"], "caution")
         self.assertIn("low_statpal_coverage", submitted["advisory_warnings"])
+
+    def test_scored_statpal_fallback_upgrades_stale_poor_capability(self):
+        submitted = _submitted_market_payload(
+            requested_market="Over 2.5",
+            market_taxonomy={"family": "total_goals"},
+            statpal_advisory={
+                "available": True,
+                "score": 91.4,
+                "status": "strong",
+                "basis": "statpal_goal_market_model",
+                "warnings": [],
+                "evidence": {"estimated_probability": 96.0},
+            },
+            market_capability={
+                "support_level": "medium",
+                "data_quality": "poor",
+                "confidence_cap": 0,
+                "warnings": ["thin_league_sample", "no_expected_goals_available"],
+            },
+        )
+
+        self.assertEqual(submitted["advisory_score"], 75)
+        self.assertEqual(submitted["market_capability"]["data_quality"], "medium")
+        self.assertEqual(submitted["market_capability"]["confidence_cap"], 75)
+        self.assertNotIn("no_expected_goals_available", submitted["market_capability"]["warnings"])
 
     def test_user_pick_is_not_replaced_unless_alternative_is_clearly_better(self):
         selected = {
@@ -146,12 +175,12 @@ class UserPickAdvisoryTests(SimpleTestCase):
 
         self.assertIsNone(replacement)
 
-    def test_broad_replacement_requires_clearer_upgrade(self):
+    def test_broad_replacement_can_be_used_as_safer_fallback_for_risky_goal_pick(self):
         selected = {
-            "market": "Player To Score",
+            "market": "Away Win & Over 2.5",
             "advisory_score": 52,
             "advisory_status": "avoid",
-            "market_taxonomy": {"family": "player_goal"},
+            "market_taxonomy": {"family": "result_total_goals"},
             "market_capability": {"data_quality": "limited"},
         }
         weak_upgrade = {"market": "Over 1.5", "advisory_score": 62, "advisory_status": "caution"}
@@ -160,8 +189,22 @@ class UserPickAdvisoryTests(SimpleTestCase):
         weak_verdict = _manual_verdict(selected, weak_upgrade)
         strong_verdict = _manual_verdict(selected, strong_upgrade)
 
-        self.assertEqual(weak_verdict["verdict"], "remove")
-        self.assertEqual(strong_verdict["verdict"], "remove")
+        self.assertEqual(weak_verdict["verdict"], "replace")
+        self.assertEqual(strong_verdict["verdict"], "replace")
+
+    def test_specialist_pick_without_comparable_data_is_still_not_assessed_not_broad_replaced(self):
+        selected = {
+            "market": "Player To Score",
+            "advisory_score": 52,
+            "advisory_status": "avoid",
+            "market_taxonomy": {"family": "player_goal"},
+            "market_capability": {"data_quality": "limited"},
+        }
+        broad_upgrade = {"market": "Over 1.5", "advisory_score": 68, "advisory_status": "playable"}
+
+        verdict = _manual_verdict(selected, broad_upgrade)
+
+        self.assertEqual(verdict["verdict"], "remove")
 
     def test_specialist_pick_does_not_use_broad_fallback_even_when_weak(self):
         selected = {
@@ -180,6 +223,72 @@ class UserPickAdvisoryTests(SimpleTestCase):
         replacement = _replacement_market_for_slip(game, selected_market=selected)
 
         self.assertIsNone(replacement)
+
+    def test_result_total_combo_generates_model_backed_alternatives(self):
+        descriptor = replace(
+            describe_market("Away Win & Over 2.5"),
+            family="result_total_goals",
+            canonical="Away Win & Over 2.5",
+        )
+        game = {
+            "fixture": "Alpha vs Beta",
+            "home_team": "Alpha",
+            "away_team": "Beta",
+            "statpal_provider_competition_id": "league-1",
+            "markets": [],
+        }
+
+        with patch("apps.algo.scoring.service.score_model_service.rates_for_fixture") as rates:
+            matrix = ScoreMatrix(
+                grid=(
+                    (0.0, 0.0, 0.7, 0.0, 0.0, 0.0),
+                    (0.1, 0.2, 0.0, 0.0, 0.0, 0.0),
+                    (0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
+                    (0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
+                    (0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
+                    (0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
+                ),
+                home_rate=1.4,
+                away_rate=1.2,
+                rho=0,
+            )
+            rates.return_value = type(
+                "Rates",
+                (),
+                {
+                    "usable": True,
+                    "data_quality": "medium",
+                    "league_id": "league-1",
+                    "model_version": "test",
+                    "matrix": lambda self: matrix,
+                },
+            )()
+            generated = _generated_match_checker_markets(descriptor, game=game, statpal_context={})
+
+        self.assertTrue(any(item["market"] == "Over 1.5" for item in generated))
+        self.assertTrue(any(item["market"] == "Away Win" for item in generated))
+
+    def test_replacement_selector_can_offer_safer_broad_fallback_when_enabled(self):
+        selected = {
+            "market": "Away Win & Over 2.5",
+            "advisory_score": 32,
+            "advisory_status": "avoid",
+            "market_taxonomy": {"family": "result_total_goals"},
+        }
+        generated = [{"market": "Over 1.5", "advisory_score": 70, "advisory_status": "playable", "market_taxonomy": {"family": "total_goals"}}]
+
+        default_replacement = _replacement_market_for_slip({"markets": []}, selected_market=selected)
+        fallback_replacement = _replacement_market_for_slip(
+            {"markets": []},
+            selected_market=selected,
+            generated_markets=generated,
+            allow_safer_fallback=True,
+        )
+
+        self.assertIsNone(default_replacement)
+        self.assertIsNotNone(fallback_replacement)
+        self.assertEqual(fallback_replacement["market"], "Over 1.5")
+        self.assertEqual(fallback_replacement["replacement_scope"], "comparable_market")
 
     def test_generated_player_markets_include_same_player_alternatives(self):
         payload = {

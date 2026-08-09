@@ -1993,10 +1993,42 @@ def _cap_advisory_score(score, market_capability):
     return round(max(0, min(cap, parsed)), 1)
 
 
+def _statpal_advisory_scored(statpal_advisory):
+    return bool((statpal_advisory or {}).get("available")) and _float_or_none((statpal_advisory or {}).get("score")) is not None
+
+
+def _effective_market_capability(market_capability, statpal_advisory):
+    capability = dict(market_capability or {})
+    if not _statpal_advisory_scored(statpal_advisory):
+        return capability
+
+    quality = str(capability.get("data_quality") or "").lower()
+    cap = _float_or_none(capability.get("confidence_cap"))
+    if quality not in {"poor", "unsupported"} and (cap is None or cap > 0):
+        return capability
+
+    warnings = [
+        warning
+        for warning in (capability.get("warnings") or [])
+        if warning not in {"no_expected_goals_available", "data_quality_poor", "data_quality_unsupported"}
+    ]
+    return {
+        **capability,
+        "support_level": capability.get("support_level") or "medium",
+        "data_quality": "medium",
+        "confidence_cap": max(cap or 0, 75),
+        "scoreable": True,
+        "coverage_percent": max(_float_or_none(capability.get("coverage_percent")) or 0, 60.0),
+        "warnings": list(dict.fromkeys(warnings)),
+        "reason": "Scored by StatPal fallback context after the fitted model lacked enough fixture-specific inputs.",
+    }
+
+
 def _with_market_capability(market, market_capability):
     if not market:
         return None
     payload = dict(market)
+    market_capability = _effective_market_capability(market_capability, payload.get("statpal_advisory"))
     payload["market_capability"] = market_capability or {}
     capped_score = _cap_advisory_score(payload.get("advisory_score"), market_capability)
     if capped_score is not None:
@@ -2025,6 +2057,7 @@ def _submitted_market_payload(
     statpal_advisory,
     market_capability,
 ):
+    market_capability = _effective_market_capability(market_capability, statpal_advisory)
     advisory_score = _cap_advisory_score((statpal_advisory or {}).get("score"), market_capability)
     if advisory_score is None:
         advisory_status = "needs_data"
@@ -2070,6 +2103,20 @@ def _generated_market_names_for_family(descriptor):
             prefix = "Home Team" if descriptor.team == "home" else "Away Team"
             return [f"{prefix} {side.title()} {line}" for line in ("0.5", "1.5", "2.5") for side in ("over", "under")]
         return [f"{side.title()} {line}" for line in ("0.5", "1.5", "2.5", "3.5", "4.5") for side in ("over", "under")]
+    if family in {"result_total_goals", "double_chance_total_goals"}:
+        return [
+            "Home Win",
+            "Draw",
+            "Away Win",
+            "DC: 1X",
+            "DC: X2",
+            "DC: 12",
+            "Over 0.5",
+            "Over 1.5",
+            "Over 2.5",
+            "Under 2.5",
+            "Under 3.5",
+        ]
     if family in {"match_result", "double_chance", "draw_no_bet", "asian_handicap", "handicap"}:
         return [
             "Home Win",
@@ -2160,7 +2207,18 @@ def _generated_match_checker_markets(
 def _market_family_group(market):
     taxonomy = (market or {}).get("market_taxonomy") or describe_market((market or {}).get("market")).to_dict()
     family = taxonomy.get("family") or ""
-    if family in {"total_goals", "team_total_goals", "btts", "clean_sheet", "first_to_score", "last_to_score"}:
+    if family in {
+        "total_goals",
+        "team_total_goals",
+        "btts",
+        "clean_sheet",
+        "first_to_score",
+        "last_to_score",
+        "result_total_goals",
+        "double_chance_total_goals",
+        "total_btts",
+        "result_btts",
+    }:
         return "goals"
     if family in {"corners_total", "team_corners", "corners"}:
         return "corners"
@@ -2198,7 +2256,7 @@ def _rank_replacement_candidates(candidates):
     )
 
 
-def _replacement_market_for_slip(game, selected_market=None, generated_markets=None):
+def _replacement_market_for_slip(game, selected_market=None, generated_markets=None, *, allow_safer_fallback=False):
     markets = [
         _with_match_checker_advisory(market)
         for market in (game.get("markets") or [])
@@ -2224,6 +2282,11 @@ def _replacement_market_for_slip(game, selected_market=None, generated_markets=N
             return replacement
         if not _allows_broad_replacement(selected_market):
             return None
+        if allow_safer_fallback:
+            replacement = _rank_replacement_candidates(candidates)[0]
+            replacement["replacement_scope"] = _replacement_scope(selected_market, replacement)
+            replacement["recommendation_strength"] = "safer_alternative"
+            return replacement
     replacement = _rank_replacement_candidates(candidates)[0]
     if selected_market:
         replacement["replacement_scope"] = _replacement_scope(selected_market, replacement)
@@ -2243,6 +2306,15 @@ def _market_is_better_for_slip(selected_market, replacement_market):
             return False
         return replacement_score >= selected_score + 14 and replacement_score >= 66
     return replacement_score >= selected_score + 6 and replacement_score >= 58
+
+
+def _alternative_is_allowed_for_slip(selected_market, replacement_market):
+    if not replacement_market or not _market_was_assessed(replacement_market):
+        return False
+    scope = replacement_market.get("replacement_scope") or _replacement_scope(selected_market, replacement_market)
+    if scope != "broad_fallback":
+        return True
+    return _allows_broad_replacement(selected_market)
 
 
 def _reverse_oriented_market(market):
@@ -2476,6 +2548,7 @@ def _market_was_assessed(selected_market) -> bool:
 def _manual_verdict(selected_market, replacement_market):
     status_value = selected_market.get("recommendation_status") or "no_edge"
     has_better_market = _market_is_better_for_slip(selected_market, replacement_market)
+    has_stat_backed_alternative = _alternative_is_allowed_for_slip(selected_market, replacement_market)
     advisory_score = _float_or_none(selected_market.get("advisory_score")) or 0
     advisory_status = selected_market.get("advisory_status") or _match_checker_status(advisory_score)
 
@@ -2516,10 +2589,12 @@ def _manual_verdict(selected_market, replacement_market):
             else "This selection is playable for tracking, but it is not strong enough as a recommended pick."
         )
     elif status_value == "no_edge":
-        verdict = "replace" if has_better_market else "remove"
+        verdict = "replace" if has_better_market or has_stat_backed_alternative else "remove"
         message = (
             "The selected market does not show enough edge; consider the stronger match-specific alternative."
             if has_better_market
+            else "The selected market is high risk; use the statistically backed alternative instead."
+            if has_stat_backed_alternative
             else "The selected market does not show enough edge from the current analysis."
         )
     else:
@@ -4063,6 +4138,7 @@ def _analyse_manual_selection(
         provider_payload=selection.get("provider_payload") or {},
         statpal_payload=selection.get("statpal_payload"),
     )
+    market_capability = _effective_market_capability(market_capability, statpal_advisory)
     generated_markets = _generated_match_checker_markets(
         market_descriptor,
         game=scoring_game,
@@ -4084,6 +4160,7 @@ def _analyse_manual_selection(
             game,
             selected_market=submitted_market,
             generated_markets=generated_markets,
+            allow_safer_fallback=True,
         )
         verdict = _manual_verdict(submitted_market, replacement_market)
         # A market priced by a fitted model is not "not found" merely because the core
@@ -4132,6 +4209,7 @@ def _analyse_manual_selection(
         game,
         selected_market=selected_market,
         generated_markets=generated_markets,
+        allow_safer_fallback=True,
     )
     verdict = _manual_verdict(selected_market, replacement_market)
     return {

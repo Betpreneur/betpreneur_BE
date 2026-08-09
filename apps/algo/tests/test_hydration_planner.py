@@ -139,8 +139,12 @@ class ModelBackedCapabilityTests(SimpleTestCase):
         # No xG exists on StatPal, so a fitted model is shots-informed at best.
         self.assertLess(model_backed_capability("match_result", "strong")["confidence_cap"], 88)
 
-    def test_absence_of_expected_goals_is_declared(self):
+    def test_absence_of_expected_goals_is_declared_only_for_unfitted_model(self):
         capability = model_backed_capability("btts", "strong")
+
+        self.assertNotIn("no_expected_goals_available", capability["warnings"])
+
+        capability = model_backed_capability("btts", "poor")
 
         self.assertIn("no_expected_goals_available", capability["warnings"])
 

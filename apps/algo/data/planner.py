@@ -54,7 +54,8 @@ def model_backed_capability(family: str, data_quality: str) -> dict:
     warnings = []
     if quality in {"limited", "poor"}:
         warnings.append("thin_league_sample")
-    warnings.append("no_expected_goals_available")
+    if quality == "poor":
+        warnings.append("no_expected_goals_available")
     return {
         "market": {"family": family},
         "support_level": "full" if quality in {"strong", "medium"} else "medium",
