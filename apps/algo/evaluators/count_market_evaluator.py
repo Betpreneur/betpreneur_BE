@@ -148,7 +148,10 @@ def _forecast(descriptor, home_profile, away_profile):
         return counts.expected_cards(home_profile, away_profile), "cards"
 
     if family in SOT_FAMILIES:
-        return counts.CountForecast(expected=0.0, sources=(), matches=0), "shots_on_target"
+        if family == "team_shots_on_target" and team:
+            profile = home_profile if team == "home" else away_profile
+            return counts.expected_team_shots_on_target(profile, side=team), "shots_on_target"
+        return counts.expected_shots_on_target(home_profile, away_profile), "shots_on_target"
 
     return None, ""
 

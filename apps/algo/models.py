@@ -829,7 +829,8 @@ class PlayerAvailability(models.Model):
 
 class TeamRateProfile(models.Model):
     """
-    Per-game corner and card rates for one team, cached from `soccer/teams/{id}`.
+    Per-game corner, card and shots-on-target rates for one team, cached from
+    `soccer/teams/{id}`.
 
     These are not available on the match-stats endpoint, which is why the earlier
     corners and cards evaluators never fired and fell back to a constant.
@@ -844,6 +845,8 @@ class TeamRateProfile(models.Model):
     corners_away = models.FloatField(null=True, blank=True)
     cards_home = models.FloatField(null=True, blank=True)
     cards_away = models.FloatField(null=True, blank=True)
+    shots_on_target_home = models.FloatField(null=True, blank=True)
+    shots_on_target_away = models.FloatField(null=True, blank=True)
     fouls_per_game = models.FloatField(null=True, blank=True)
     matches = models.PositiveIntegerField(default=0)
     payload = models.JSONField(default=dict, blank=True)

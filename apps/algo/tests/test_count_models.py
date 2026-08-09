@@ -76,9 +76,10 @@ class PoissonLineTests(SimpleTestCase):
 
 class ForecastTests(SimpleTestCase):
     class _Profile:
-        def __init__(self, ch=None, ca=None, kh=None, ka=None, matches=20):
+        def __init__(self, ch=None, ca=None, kh=None, ka=None, sh=None, sa=None, matches=20):
             self.corners_home, self.corners_away = ch, ca
             self.cards_home, self.cards_away = kh, ka
+            self.shots_on_target_home, self.shots_on_target_away = sh, sa
             self.matches = matches
 
     def test_total_corners_combine_home_and_away_rates(self):
@@ -109,6 +110,14 @@ class ForecastTests(SimpleTestCase):
 
         self.assertGreater(home.expected, away.expected)
 
+    def test_total_shots_on_target_combine_home_and_away_rates(self):
+        forecast = counts.expected_shots_on_target(
+            self._Profile(sh=5.8), self._Profile(sa=4.3)
+        )
+
+        self.assertGreater(forecast.expected, 9.0)
+        self.assertEqual(len(forecast.sources), 2)
+
 
 class TeamPayloadParsingTests(SimpleTestCase):
     def _payload(self):
@@ -118,6 +127,7 @@ class TeamPayloadParsingTests(SimpleTestCase):
                 "avg_corners": {"home": "6.2", "away": "4.1", "total": "5.2"},
                 "avg_yellowcards": {"home": "2.0", "away": "2.4", "total": "2.2"},
                 "avg_redcards": {"home": "0.1", "away": "0.2", "total": "0.15"},
+                "shots_on_goal": {"home": "5.8", "away": "4.3", "total": "10.1"},
                 "fouls": {"home": "12", "away": "14", "total": "26"},
                 "win": {"total": "8"}, "draw": {"total": "4"}, "lost": {"total": "6"},
             },
@@ -133,6 +143,12 @@ class TeamPayloadParsingTests(SimpleTestCase):
         parsed = parse_team_payload(self._payload())
 
         self.assertAlmostEqual(parsed["cards_home"], 2.0 + 0.2)
+
+    def test_shots_on_target_rates_are_read_per_side(self):
+        parsed = parse_team_payload(self._payload())
+
+        self.assertAlmostEqual(parsed["shots_on_target_home"], 5.8)
+        self.assertAlmostEqual(parsed["shots_on_target_away"], 4.3)
 
     def test_match_count_comes_from_the_result_record(self):
         self.assertEqual(parse_team_payload(self._payload())["matches"], 18)

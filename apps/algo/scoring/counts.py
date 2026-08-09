@@ -22,6 +22,7 @@ from dataclasses import dataclass
 # thin sample toward something sane -- never as a substitute for having no data at all.
 LEAGUE_CORNERS_PER_TEAM = 5.1
 LEAGUE_CARDS_PER_TEAM = 1.9
+LEAGUE_SHOTS_ON_TARGET_PER_TEAM = 4.2
 
 # Pseudo-matches of prior weight, mirroring the goal model's shrinkage.
 SHRINKAGE_MATCHES = 5
@@ -116,6 +117,43 @@ def expected_team_cards(profile, *, side: str) -> CountForecast:
     rate = profile.cards_home if side == "home" else profile.cards_away
     return CountForecast(
         expected=round(max(0.1, _shrink(rate, profile.matches, LEAGUE_CARDS_PER_TEAM)), 3),
+        sources=("team_profile",) if rate is not None else (),
+        matches=profile.matches,
+    )
+
+
+def expected_shots_on_target(home_profile, away_profile) -> CountForecast:
+    """Total match shots on target: home side's home rate plus away side's away rate."""
+    sources = []
+    home_rate = away_rate = None
+    home_matches = away_matches = 0
+    if home_profile is not None:
+        home_rate = getattr(home_profile, "shots_on_target_home", None)
+        home_matches = home_profile.matches
+        if home_rate is not None:
+            sources.append("home_team_profile")
+    if away_profile is not None:
+        away_rate = getattr(away_profile, "shots_on_target_away", None)
+        away_matches = away_profile.matches
+        if away_rate is not None:
+            sources.append("away_team_profile")
+
+    expected = _shrink(home_rate, home_matches, LEAGUE_SHOTS_ON_TARGET_PER_TEAM) + _shrink(
+        away_rate, away_matches, LEAGUE_SHOTS_ON_TARGET_PER_TEAM
+    )
+    return CountForecast(
+        expected=round(max(0.5, expected), 3),
+        sources=tuple(sources),
+        matches=int(min(home_matches or 0, away_matches or 0)),
+    )
+
+
+def expected_team_shots_on_target(profile, *, side: str) -> CountForecast:
+    if profile is None:
+        return CountForecast(expected=LEAGUE_SHOTS_ON_TARGET_PER_TEAM, sources=(), matches=0)
+    rate = getattr(profile, "shots_on_target_home", None) if side == "home" else getattr(profile, "shots_on_target_away", None)
+    return CountForecast(
+        expected=round(max(0.2, _shrink(rate, profile.matches, LEAGUE_SHOTS_ON_TARGET_PER_TEAM)), 3),
         sources=("team_profile",) if rate is not None else (),
         matches=profile.matches,
     )

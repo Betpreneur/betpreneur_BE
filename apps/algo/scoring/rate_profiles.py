@@ -1,5 +1,5 @@
 """
-Cache team corner/card rates from `soccer/teams/{id}`.
+Cache team corner/card/shots-on-target rates from `soccer/teams/{id}`.
 
 Fetched on demand rather than nightly: a per-team call across every league would be
 enormous, and only the fixtures someone actually reviews need these numbers. Profiles
@@ -40,7 +40,7 @@ def _split(node, key):
 
 def parse_team_payload(payload) -> dict:
     """
-    Pull per-game corner and card rates out of a StatPal team response.
+    Pull per-game corner, card and shots-on-target rates out of a StatPal team response.
 
     Bookings follow the bookmaker scale: a red counts as two.
     """
@@ -57,6 +57,7 @@ def parse_team_payload(payload) -> dict:
     corners_home, corners_away, _ = _split(fulltime, "avg_corners")
     yellow_home, yellow_away, _ = _split(fulltime, "avg_yellowcards")
     red_home, red_away, _ = _split(fulltime, "avg_redcards")
+    shots_on_target_home, shots_on_target_away, _ = _split(fulltime, "shots_on_goal")
     _, _, fouls_total = _split(fulltime, "fouls")
 
     def bookings(yellow, red):
@@ -77,6 +78,8 @@ def parse_team_payload(payload) -> dict:
         "corners_away": corners_away,
         "cards_home": bookings(yellow_home, red_home),
         "cards_away": bookings(yellow_away, red_away),
+        "shots_on_target_home": shots_on_target_home,
+        "shots_on_target_away": shots_on_target_away,
         "fouls_per_game": fouls_total,
         "matches": matches,
     }
@@ -97,6 +100,15 @@ class TeamRateProfileService:
     def _fresh(self, profile) -> bool:
         return bool(profile and profile.fetched_at and timezone.now() - profile.fetched_at < PROFILE_TTL)
 
+    @staticmethod
+    def _missing_new_rate_fields(profile) -> bool:
+        if profile is None:
+            return False
+        return (
+            getattr(profile, "shots_on_target_home", None) is None
+            and getattr(profile, "shots_on_target_away", None) is None
+        )
+
     def profile_for(self, *, team_id="", team_name="") -> TeamRateProfile | None:
         """Cached profile for a team, refreshed from StatPal when stale."""
         team_id = str(team_id or "").strip()
@@ -108,7 +120,7 @@ class TeamRateProfileService:
                 provider="statpal", team_name_normalized=normalize_team_name(team_name)
             ).first()
 
-        if self._fresh(profile):
+        if self._fresh(profile) and not self._missing_new_rate_fields(profile):
             return profile
         if not team_id:
             # Without an id there is nothing to fetch; a stale profile beats nothing.
@@ -135,6 +147,8 @@ class TeamRateProfileService:
                 "corners_away": parsed["corners_away"],
                 "cards_home": parsed["cards_home"],
                 "cards_away": parsed["cards_away"],
+                "shots_on_target_home": parsed["shots_on_target_home"],
+                "shots_on_target_away": parsed["shots_on_target_away"],
                 "fouls_per_game": parsed["fouls_per_game"],
                 "matches": parsed["matches"],
             },
