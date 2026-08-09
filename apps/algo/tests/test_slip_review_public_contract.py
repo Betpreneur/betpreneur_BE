@@ -263,11 +263,13 @@ class MatchedFixtureStatPalPayloadTests(SimpleTestCase):
     def test_statpal_hydration_identity_detects_provider_or_team_ids(self):
         self.assertTrue(_has_statpal_hydration_identity({"match_id": "statpal:123"}))
         self.assertTrue(_has_statpal_hydration_identity({"statpal_home_team_id": "home-1"}))
+        self.assertTrue(_has_statpal_hydration_identity({}, {"home_team_id": "home-1"}))
         self.assertTrue(_has_statpal_hydration_identity({}, {"provider_match_id": "202608091"}))
         self.assertTrue(_has_statpal_hydration_identity({}, {}, {"provider": "statpal", "provider_event_id": "202608091"}))
 
     def test_statpal_hydration_identity_rejects_plain_api_fixture_only(self):
         self.assertFalse(_has_statpal_hydration_identity({"match_id": "1494240", "home_team": "A", "away_team": "B"}))
+        self.assertFalse(_has_statpal_hydration_identity({"match_id": "1494240", "home_team_id": "api-home"}))
 
     def test_skip_core_requires_existing_game_or_statpal_identity_for_any_skip_market(self):
         for market in ["Home Win", "Cards Over 3.5", "Florian Wirtz To Score"]:

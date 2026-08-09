@@ -2526,19 +2526,24 @@ def _has_statpal_hydration_identity(candidate=None, statpal_candidate=None, prov
     if str(provider_metadata.get("provider") or "").lower() == "statpal":
         if provider_metadata.get("provider_event_id"):
             return True
-    for payload in (statpal_candidate, candidate):
-        if not isinstance(payload, dict):
-            continue
-        if (
-            payload.get("provider_match_id")
-            or payload.get("statpal_provider_match_id")
-            or str(payload.get("match_id") or "").startswith("statpal:")
-            or payload.get("home_team_id")
-            or payload.get("away_team_id")
-            or payload.get("statpal_home_team_id")
-            or payload.get("statpal_away_team_id")
-        ):
-            return True
+    if isinstance(statpal_candidate, dict) and (
+        statpal_candidate.get("provider_match_id")
+        or statpal_candidate.get("statpal_provider_match_id")
+        or str(statpal_candidate.get("match_id") or "").startswith("statpal:")
+        or statpal_candidate.get("home_team_id")
+        or statpal_candidate.get("away_team_id")
+        or statpal_candidate.get("statpal_home_team_id")
+        or statpal_candidate.get("statpal_away_team_id")
+    ):
+        return True
+    if isinstance(candidate, dict) and (
+        candidate.get("provider_match_id")
+        or candidate.get("statpal_provider_match_id")
+        or str(candidate.get("match_id") or "").startswith("statpal:")
+        or candidate.get("statpal_home_team_id")
+        or candidate.get("statpal_away_team_id")
+    ):
+        return True
     return False
 
 
