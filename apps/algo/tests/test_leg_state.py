@@ -16,7 +16,8 @@ PRIOR = Calibration(basis="prior", sample_size=0, bands={})
 
 
 def _leg(*, family="total_goals", assessment="quantitative_model", score=80,
-         status="analysed", resolution="mapped", data_quality="strong", recognized=True):
+         status="analysed", resolution="mapped", data_quality="strong", recognized=True,
+         advisory_available=False):
     return {
         "match": "A vs B",
         "status": status,
@@ -26,7 +27,7 @@ def _leg(*, family="total_goals", assessment="quantitative_model", score=80,
         "selected_market": {
             "advisory_score": score,
             "market_capability": {"confidence_cap": 88, "data_quality": data_quality},
-            "statpal_advisory": {"assessment_type": assessment},
+            "statpal_advisory": {"assessment_type": assessment, "available": advisory_available, "score": score},
         },
     }
 
@@ -56,6 +57,14 @@ class TerminalStateTests(SimpleTestCase):
         self.assertEqual(
             assess_leg(_leg(data_quality="poor")).state, LegState.INSUFFICIENT_DATA
         )
+
+    def test_scored_quantitative_statpal_fallback_overrides_poor_model_capability(self):
+        leg = _leg(family="team_total_goals", data_quality="poor", score=41.3, advisory_available=True)
+
+        assessment = assess_leg(leg)
+
+        self.assertEqual(assessment.state, LegState.ASSESSED)
+        self.assertTrue(assessment.may_publish_probability)
 
     def test_missing_score_is_insufficient_data(self):
         self.assertEqual(assess_leg(_leg(score=None)).state, LegState.INSUFFICIENT_DATA)
@@ -124,3 +133,13 @@ class TicketEstimateGatingTests(SimpleTestCase):
         self.assertIsNone(ticket.success_percent)
         self.assertIsNone(ticket.health_percent)
         self.assertEqual(ticket.unassessed_legs, 3)
+
+    def test_scored_statpal_fallback_is_included_in_ticket_probability(self):
+        ticket = TicketRiskService().assess(
+            [_leg(family="team_total_goals", data_quality="poor", score=41.3, advisory_available=True)],
+            calibration=PRIOR,
+        )
+
+        self.assertEqual(ticket.assessed_legs, 1)
+        self.assertEqual(ticket.unassessed_legs, 0)
+        self.assertIsNotNone(ticket.success_percent)

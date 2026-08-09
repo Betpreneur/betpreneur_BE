@@ -222,7 +222,7 @@ class TicketRiskService:
             reason = ""
             if score is None:
                 reason = NO_SCORE
-            elif _data_quality(item) in UNASSESSABLE_QUALITY:
+            elif _data_quality(item) in UNASSESSABLE_QUALITY and not _has_scored_quantitative_advisory(item):
                 # We can see this market too poorly to claim anything either way.
                 reason = INSUFFICIENT_DATA
             elif not may_publish_probability(item):
@@ -459,6 +459,21 @@ def _capability(item: dict[str, Any]) -> dict[str, Any]:
 
 def _data_quality(item: dict[str, Any]) -> str:
     return str(_capability(item).get("data_quality") or "").lower()
+
+
+def _has_scored_quantitative_advisory(item: dict[str, Any]) -> bool:
+    from .evaluators.registry import QUANTITATIVE, assessment_type_for
+
+    market = item.get("selected_market") or {}
+    advisory = market.get("statpal_advisory") or item.get("statpal_advisory") or {}
+    taxonomy = item.get("market_taxonomy") or market.get("market_taxonomy") or {}
+    family = taxonomy.get("family") or ""
+    assessment_type = advisory.get("assessment_type") or assessment_type_for(family)
+    return (
+        assessment_type == QUANTITATIVE
+        and bool(advisory.get("available"))
+        and (advisory.get("score") is not None or _leg_score(item) is not None)
+    )
 
 
 def _apply_capability_cap(probability: float, item: dict[str, Any]) -> tuple[float, bool]:

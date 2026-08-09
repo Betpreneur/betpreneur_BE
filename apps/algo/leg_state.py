@@ -85,6 +85,19 @@ def _advisory(item):
     return _selected_market(item).get("statpal_advisory") or {}
 
 
+def _has_scored_quantitative_advisory(item, assessment_type: str) -> bool:
+    advisory = _advisory(item)
+    if assessment_type != QUANTITATIVE:
+        return False
+    if not advisory.get("available"):
+        return False
+    return (
+        advisory.get("score") is not None
+        or _selected_market(item).get("advisory_score") is not None
+        or item.get("advisory_score") is not None
+    )
+
+
 def assess_leg(item) -> LegAssessment:
     """Derive the lifecycle state of a single analysed selection."""
     family = _family(item)
@@ -114,7 +127,8 @@ def assess_leg(item) -> LegAssessment:
 
     data_quality = str(_capability(item).get("data_quality") or "").lower()
     scored = _selected_market(item).get("advisory_score") is not None or item.get("advisory_score") is not None
-    if data_quality in UNASSESSABLE_DATA_QUALITY or not scored:
+    advisory_scored = _has_scored_quantitative_advisory(item, assessment_type)
+    if (data_quality in UNASSESSABLE_DATA_QUALITY and not advisory_scored) or not scored:
         return LegAssessment(
             LegState.INSUFFICIENT_DATA,
             assessment_type,
