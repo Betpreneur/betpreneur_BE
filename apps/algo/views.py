@@ -41,6 +41,7 @@ from .market_taxonomy import (
 from .market_capabilities import market_capability_service
 from .recommendation_policy import assess_recommendation
 from .services import BetanoBetslipImporter, FixtureSearchService, SportyBetShareImporter, algo_runner_service
+from .provider_mapping import provider_mapping_service
 from .data.planner import (
     FixtureHydrator,
     capability_for_descriptor,
@@ -2788,6 +2789,67 @@ def _public_recommendation_strength(pick):
     return "no_recommendation"
 
 
+def _public_price_check_from_card(card):
+    evidence = card.get("evidence") or {}
+    statpal_evidence = evidence.get("statpal") or {}
+    odds_value = evidence.get("odds_value") or statpal_evidence.get("odds_value") or {}
+    if not odds_value:
+        return {
+            "available": False,
+            "status": "unknown",
+            "message": "No StatPal reference price was available for this selection.",
+        }
+
+    edge = _float_or_none(odds_value.get("value_edge_pct"))
+    offered = _float_or_none(odds_value.get("offered_odds"))
+    reference = _float_or_none(odds_value.get("statpal_reference_odds"))
+    reference_min = _float_or_none(odds_value.get("statpal_reference_min_odds"))
+    reference_max = _float_or_none(odds_value.get("statpal_reference_max_odds"))
+    reference_spread = _float_or_none(odds_value.get("statpal_reference_spread_pct"))
+    bookmaker_count = _float_or_none(odds_value.get("statpal_reference_bookmaker_count"))
+    reliability = odds_value.get("reference_reliability") or ""
+    market = odds_value.get("matched_market") or ""
+    outcome = odds_value.get("matched_outcome") or ""
+    bookmaker = odds_value.get("bookmaker") or ""
+    reliability_note = ""
+    if reliability == "thin":
+        reliability_note = " The reference is based on one bookmaker, so treat it as a light signal."
+    elif reliability == "wide":
+        reliability_note = " Bookmaker prices disagree, so treat the edge cautiously."
+    elif reliability == "volatile":
+        reliability_note = " Bookmaker prices disagree sharply, so the edge is unreliable."
+    if edge is None:
+        status = "matched"
+        message = "A StatPal reference price was matched for this selection."
+    elif edge >= 5:
+        status = "positive_edge"
+        message = f"Your price is about {round(edge, 1)}% better than the StatPal reference."
+    elif edge <= -5:
+        status = "short_price"
+        message = f"Your price is about {abs(round(edge, 1))}% shorter than the StatPal reference."
+    else:
+        status = "near_reference"
+        message = "Your price is close to the StatPal reference."
+    message = f"{message}{reliability_note}"
+    return {
+        "available": True,
+        "status": status,
+        "message": message,
+        "offered_odds": offered,
+        "reference_odds": reference,
+        "reference_min_odds": reference_min,
+        "reference_max_odds": reference_max,
+        "reference_spread_percent": reference_spread,
+        "reference_bookmaker_count": int(bookmaker_count) if bookmaker_count is not None else None,
+        "reference_method": odds_value.get("reference_method") or "",
+        "reference_reliability": reliability,
+        "edge_percent": round(edge, 1) if edge is not None else None,
+        "matched_market": market,
+        "matched_outcome": outcome,
+        "bookmaker": bookmaker,
+    }
+
+
 def _public_why_from_card(card):
     why = []
     codes = []
@@ -2813,6 +2875,10 @@ def _public_why_from_card(card):
     elif league_trust in {"probation", "restricted"}:
         why.append("There is limited competition-specific history, so some caution remains.")
         codes.append("limited_league_sample")
+    price_check = _public_price_check_from_card(card)
+    if price_check.get("available"):
+        why.append(price_check["message"])
+        codes.append("price_edge")
     if alternative.get("reason"):
         why.append(alternative["reason"])
         codes.append("better_alternative")
@@ -2964,6 +3030,7 @@ def _public_selection_card(item):
     if verdict != "replace":
         card = {**card, "alternative": None}
     why, reason_codes = _public_why_from_card(card)
+    price_check = _public_price_check_from_card(card)
     your_pick = {
         "market": item.get("submitted_market"),
         "label": item.get("submitted_market"),
@@ -3009,6 +3076,7 @@ def _public_selection_card(item):
         "risk_level": risk_level,
         "risk": _public_risk_label(risk_level),
         "ai_pick": ai_pick,
+        "price_check": price_check,
         "why": why,
         "reason_codes": reason_codes,
         "state": str(leg_assessment.state),
@@ -3657,6 +3725,53 @@ def _provider_metadata(selection):
     }
 
 
+def _sportybet_statpal_event(selection):
+    provider_payload = selection.get("provider_payload") or {}
+    nested = provider_payload.get("provider_payload") or {}
+    outcome = nested.get("outcome") or {}
+    event = dict(outcome) if isinstance(outcome, dict) else {}
+    event.setdefault("eventId", provider_payload.get("provider_event_id") or "")
+    event.setdefault("homeTeamName", provider_payload.get("home_team") or "")
+    event.setdefault("awayTeamName", provider_payload.get("away_team") or "")
+    event.setdefault("estimateStartTime", provider_payload.get("kickoff_ms") or "")
+    if provider_payload.get("competition") and not event.get("sport"):
+        event["sport"] = {"category": {"tournament": {"name": provider_payload.get("competition")}}}
+    return event
+
+
+def _try_sportybet_statpal_mapping(selection, *, provider_date, resolver_trace):
+    provider_payload = selection.get("provider_payload") or {}
+    provider_event_id = str(provider_payload.get("provider_event_id") or "").strip()
+    if str(selection.get("provider") or "").lower() != "sportybet" or not provider_event_id:
+        return None
+
+    search_service = FixtureSearchService()
+    sync_result = {}
+    if provider_date:
+        try:
+            sync_result = search_service.sync_statpal_daily(provider_date)
+        except Exception as exc:
+            sync_result = {"synced": 0, "errors": [str(exc)]}
+
+    try:
+        result = provider_mapping_service.match_sportybet_to_statpal(_sportybet_statpal_event(selection))
+    except Exception as exc:
+        result = {"matched": False, "reason": "sportybet_statpal_mapping_error", "error": str(exc)}
+
+    resolver_trace.append(
+        {
+            "strategy": "sportybet_statpal_mapping",
+            "synced": sync_result.get("synced", 0),
+            "sync_errors": sync_result.get("errors", []),
+            "matched": bool(result.get("matched")),
+            "reason": result.get("reason", ""),
+            "candidate_match_id": ((result.get("candidate") or {}).get("match_id") if isinstance(result.get("candidate"), dict) else ""),
+            "candidate_score": ((result.get("candidate") or {}).get("match_score") if isinstance(result.get("candidate"), dict) else None),
+        }
+    )
+    return result
+
+
 def _selection_expiry(selection):
     status, match_status = _provider_event_status(selection)
     terminal_statuses = {"ended", "finished", "cancelled", "canceled", "postponed", "abandoned"}
@@ -3721,10 +3836,22 @@ def _analyse_manual_selection(
         }
 
     search_service = FixtureSearchService()
+    statpal_mapping_result = _try_sportybet_statpal_mapping(selection, provider_date=provider_date, resolver_trace=resolver_trace)
+    statpal_candidate = (statpal_mapping_result or {}).get("candidate") if isinstance(statpal_mapping_result, dict) else {}
     provider_fixture = search_service.get_provider_fixture(
         provider=provider_metadata.get("provider"),
         provider_event_id=provider_metadata.get("provider_event_id"),
     )
+    if provider_fixture and (provider_fixture.get("fixture") or {}).get("source") == "statpal":
+        statpal_candidate = statpal_candidate or provider_fixture.get("fixture") or {}
+        resolver_trace.append(
+            {
+                "strategy": "provider_fixture_map_statpal_context",
+                "mapping_id": provider_fixture.get("mapping_id"),
+                "candidate_match_ids": [provider_fixture["fixture"].get("match_id")],
+            }
+        )
+        provider_fixture = None
     if provider_fixture:
         candidates = [provider_fixture["fixture"]]
         resolver_trace.append(
@@ -3809,12 +3936,13 @@ def _analyse_manual_selection(
             },
             "possible_matches": candidates,
         }
-    search_service.learn_resolution(
-        provider_metadata=provider_metadata,
-        candidate=candidate,
-        confidence=candidate.get("match_score"),
-        method="provider_fixture_map" if provider_fixture else "team_date_league",
-    )
+    if str(provider_metadata.get("provider") or "").lower() != "sportybet" or provider_fixture:
+        search_service.learn_resolution(
+            provider_metadata=provider_metadata,
+            candidate=candidate,
+            confidence=candidate.get("match_score"),
+            method="provider_fixture_map" if provider_fixture else "team_date_league",
+        )
 
     on_demand = None
     skip_core_on_demand = _market_can_skip_core_on_demand(market_descriptor)
@@ -3864,17 +3992,21 @@ def _analyse_manual_selection(
         }
 
     markets = game.get("markets") or []
-    statpal_provider_match_id = (
-        provider_metadata.get("provider_event_id")
-        if str(provider_metadata.get("provider") or "").lower() == "statpal"
-        else ""
-    )
+    statpal_provider_match_id = ""
+    statpal_provider_competition_id = provider_metadata.get("provider_competition_id") or ""
+    if str(provider_metadata.get("provider") or "").lower() == "statpal":
+        statpal_provider_match_id = provider_metadata.get("provider_event_id") or ""
+    elif isinstance(statpal_candidate, dict):
+        statpal_provider_match_id = statpal_candidate.get("provider_match_id") or str(statpal_candidate.get("match_id") or "").replace("statpal:", "", 1)
+        statpal_provider_competition_id = statpal_candidate.get("provider_competition_id") or statpal_provider_competition_id
     hydrator = hydration_cache or FixtureHydrator()
     statpal_bundle = hydrator.bundle_for(
         market_descriptor,
-        match_id=candidate.get("match_id"),
+        match_id=(statpal_candidate.get("match_id") if isinstance(statpal_candidate, dict) and statpal_candidate.get("match_id") else candidate.get("match_id")),
         provider_match_id=statpal_provider_match_id,
-        provider_competition_id=provider_metadata.get("provider_competition_id") or "",
+        provider_competition_id=statpal_provider_competition_id,
+        home_team_id=(statpal_candidate.get("home_team_id") if isinstance(statpal_candidate, dict) else "") or candidate.get("statpal_home_team_id") or candidate.get("hid") or "",
+        away_team_id=(statpal_candidate.get("away_team_id") if isinstance(statpal_candidate, dict) else "") or candidate.get("statpal_away_team_id") or candidate.get("aid") or "",
     )
     statpal_refresh = statpal_bundle.get("refreshed") or {}
     statpal_context = statpal_bundle.get("context") or {}

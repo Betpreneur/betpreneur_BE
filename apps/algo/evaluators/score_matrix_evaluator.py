@@ -56,12 +56,40 @@ def _outcome_probability(descriptor, matrix):
     if family == "btts":
         return derive.btts(matrix, side != "no"), 0.0
 
+    if family == "result_btts":
+        return derive.result_btts(matrix, side), 0.0
+
     if family == "clean_sheet":
         return derive.clean_sheet(matrix, team or "home"), 0.0
 
     if family == "total_goals" and line is not None:
         outcome = derive.total_goals(matrix, line, side or "over")
         return outcome.probability, outcome.push
+
+    if family == "result_total_goals" and line is not None:
+        outcome = derive.result_total_goals(matrix, line, side)
+        return outcome.probability, outcome.push
+
+    if family == "total_btts" and line is not None:
+        outcome = derive.total_btts(matrix, line, side)
+        return outcome.probability, outcome.push
+
+    if family == "double_chance_btts":
+        return derive.double_chance_btts(matrix, side), 0.0
+
+    if family == "double_chance_total_goals" and line is not None:
+        outcome = derive.double_chance_total_goals(matrix, line, side)
+        return outcome.probability, outcome.push
+
+    if family == "result_or_total_goals" and line is not None:
+        outcome = derive.result_or_total_goals(matrix, line, side)
+        return outcome.probability, outcome.push
+
+    if family == "result_or_btts":
+        return derive.result_or_btts(matrix, side), 0.0
+
+    if family == "result_or_clean_sheet":
+        return derive.result_or_clean_sheet(matrix, side), 0.0
 
     if family == "team_total_goals" and line is not None:
         outcome = derive.team_total_goals(matrix, line, team=team or "home", side=side or "over")

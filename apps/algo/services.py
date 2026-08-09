@@ -256,7 +256,7 @@ class FixtureSearchService:
         percent of the daily quota, so this runs on a schedule rather than per review.
         """
         from .statpal import StatPalClient, StatPalConfigurationError, StatPalError
-        from .statpal_provider import normalize_daily_matches
+        from .statpal_provider import normalize_daily_matches, normalize_leagues
 
         start_date = start_date or timezone.localdate()
         horizon = start_date + timedelta(days=max(0, int(days)))
@@ -267,9 +267,7 @@ class FixtureSearchService:
                 payload = client.soccer_leagues()
             except (StatPalConfigurationError, StatPalError) as exc:
                 return {"synced": 0, "leagues": 0, "errors": [{"provider": "statpal", "error": str(exc)}]}
-            leagues = ((payload or {}).get("leagues") or {}).get("league") or []
-            leagues = leagues if isinstance(leagues, list) else [leagues]
-            league_ids = [str(item.get("id")) for item in leagues if item.get("id")]
+            league_ids = [league["provider_league_id"] for league in normalize_leagues(payload)]
 
         grouped = defaultdict(list)
         calls = failures = 0
@@ -825,8 +823,20 @@ class FixtureSearchService:
             score, orientation = self._match_score_and_orientation(fixture, home_query, away_query, normalized_query)
             if score >= 35:
                 scored.append((score, orientation, fixture))
-        scored.sort(key=lambda item: (item[0], item[2].match_date), reverse=True)
+        # The same fixture is often cached from more than one provider. When they match
+        # equally well, prefer the row that carries the identifiers our models join on —
+        # otherwise resolution succeeds and pricing then fails, because the winning row
+        # has no league or team id to look a fitted model up by.
+        scored.sort(
+            key=lambda item: (item[0], self._pricing_rank(item[2]), item[2].match_date),
+            reverse=True,
+        )
         return [self._serialize_fixture(fixture, score, orientation) for score, orientation, fixture in scored[:limit]]
+
+    @staticmethod
+    def _pricing_rank(fixture) -> int:
+        payload = fixture.api_payload or {}
+        return 1 if payload.get("provider_competition_id") else 0
 
     def _has_team_token_overlap(self, fixture, home_query, away_query):
         if not _team_tokens(home_query) or not _team_tokens(away_query):
@@ -1203,6 +1213,7 @@ class SportyBetShareImporter:
             "match": f"{home} vs {away}",
             "market": market_descriptor.canonical or market,
             "provider_market_text": market,
+            "provider_market_guide": self._market_guide(item, outcome),
             "canonical_market": canonical.to_dict(),
             "market_taxonomy": market_descriptor.to_dict(),
             "home_team": home,
@@ -1226,6 +1237,7 @@ class SportyBetShareImporter:
             "match": f"{home} vs {away}",
             "market": market_descriptor.canonical or market,
             "provider_market_text": market,
+            "provider_market_guide": self._market_guide({}, outcome),
             "canonical_market": canonical.to_dict(),
             "market_taxonomy": market_descriptor.to_dict(),
             "home_team": home,
@@ -1326,6 +1338,20 @@ class SportyBetShareImporter:
         )
         return canonical, describe_market(fallback_text)
 
+    def _market_guide(self, item, outcome):
+        market_id = str(item.get("marketId") or "")
+        specifier = str(item.get("specifier") or "")
+        market = next(
+            (
+                market
+                for market in outcome.get("markets") or []
+                if (not market_id or str(market.get("id") or "") == market_id)
+                and (not specifier or str(market.get("specifier") or "") == specifier)
+            ),
+            None,
+        ) or (outcome.get("markets") or [{}])[0]
+        return str(market.get("marketGuide") or "")
+
     def _market_name(self, item, outcome):
         market_id = str(item.get("marketId") or "")
         specifier = str(item.get("specifier") or "")
@@ -1365,8 +1391,8 @@ class SportyBetShareImporter:
         outcome_text = str(outcome_name or "").strip()
         if outcome_text and any(token in market_text for token in ("goalscorer", "goal scorer", "player to score")):
             return f"{outcome_text} To Score"
-        if outcome_text and any(token in market_text for token in ("player shots", "shots on target", "player shot")):
-            if "target" in market_text:
+        if outcome_text and any(token in market_text for token in ("player shots", "shots on target", "shots on goal", "player shot")):
+            if "target" in market_text or "on goal" in market_text:
                 # The specifier is machine syntax (`total=7.5`); it must not reach a label.
                 return f"{outcome_text} Shots On Target".strip()
             return f"{outcome_text} Shots".strip()
@@ -1378,7 +1404,15 @@ class SportyBetShareImporter:
             outcome_name=outcome_name,
             specifier=specifier,
         )
-        return descriptor.canonical if descriptor.recognized else outcome_name.strip()
+        canonical = descriptor.canonical if descriptor.recognized else outcome_name.strip()
+        if canonical:
+            if "1up" in market_text:
+                return f"{canonical} 1UP"
+            if "2up" in market_text:
+                return f"{canonical} 2UP"
+            if "never down" in market_text:
+                return f"{canonical} Never Down"
+        return canonical
 
     def _selection_odds(self, item, outcome):
         market_id = str(item.get("marketId") or "")
@@ -1683,6 +1717,17 @@ class AlgoRunnerService:
                 provider_match_id=provider_match_id,
                 provider_competition_id=provider_competition_id,
             )
+            home_team_id = str(fixture.get("statpal_home_team_id") or fixture.get("hid") or "").strip()
+            away_team_id = str(fixture.get("statpal_away_team_id") or fixture.get("aid") or "").strip()
+            if home_team_id or away_team_id:
+                team_refresh = statpal_snapshot_service.refresh_fixture_team_stats(
+                    match_id=match_id,
+                    provider_match_id=provider_match_id,
+                    provider_competition_id=provider_competition_id,
+                    home_team_id=home_team_id,
+                    away_team_id=away_team_id,
+                )
+                refresh = {**refresh, "team_stats_refresh": team_refresh}
             context = statpal_snapshot_service.fixture_context(
                 match_id=match_id,
                 provider_match_id=provider_match_id,

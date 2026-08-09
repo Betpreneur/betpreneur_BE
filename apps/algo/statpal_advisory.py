@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import statistics
 from dataclasses import asdict, dataclass
 from typing import Any
 
@@ -98,6 +99,12 @@ class StatPalMarketAdvisoryService:
             payload = engine.evaluate(descriptor, fixture=fixture)
             payload["assessment_type"] = spec.assessment_type
             payload["market_family"] = descriptor.family
+            payload = self._apply_odds_overlay(
+                payload,
+                descriptor=descriptor,
+                fixture=fixture,
+                provider_payload=provider_payload,
+            )
             return payload
 
         if spec.handler == "_evaluate_player_market":
@@ -110,7 +117,7 @@ class StatPalMarketAdvisoryService:
         handler = getattr(self, spec.handler)
         if spec.handler == "_evaluate_player_market":
             advisory = handler(descriptor, fixture=fixture, statpal_payload=statpal_payload)
-        elif spec.handler in {"_evaluate_cards_market", "_evaluate_corners_market"}:
+        elif spec.handler in {"_evaluate_cards_market", "_evaluate_corners_market", "_evaluate_total_goal_market", "_evaluate_team_goal_market"}:
             advisory = handler(descriptor, fixture=fixture, provider_payload=provider_payload)
         else:
             advisory = handler(descriptor, fixture=fixture)
@@ -291,7 +298,12 @@ class StatPalMarketAdvisoryService:
         if abs(expected_total - line) < 0.45:
             warnings.append("thin_cards_edge")
             score -= 5
-        score, snapshot_evidence, snapshot_warnings = self._apply_snapshot_context(score, descriptor=descriptor, fixture=fixture)
+        score, snapshot_evidence, snapshot_warnings = self._apply_snapshot_context(
+            score,
+            descriptor=descriptor,
+            fixture=fixture,
+            provider_payload=provider_payload,
+        )
         evidence.update(snapshot_evidence)
         warnings.extend(snapshot_warnings)
         basis = "statpal_cards_market_model" if expected_total else "statpal_cards_advisory_stub"
@@ -331,7 +343,12 @@ class StatPalMarketAdvisoryService:
             score = 52
             warnings = ["corner_profile_missing", *statpal_warnings]
             basis = "statpal_corners_advisory_stub"
-        score, snapshot_evidence, snapshot_warnings = self._apply_snapshot_context(score, descriptor=descriptor, fixture=fixture)
+        score, snapshot_evidence, snapshot_warnings = self._apply_snapshot_context(
+            score,
+            descriptor=descriptor,
+            fixture=fixture,
+            provider_payload=provider_payload,
+        )
         evidence.update(snapshot_evidence)
         warnings.extend(snapshot_warnings)
         score = round(max(0, min(100, score)), 1)
@@ -345,7 +362,7 @@ class StatPalMarketAdvisoryService:
             message=self._corners_message(descriptor, expected_total, line, evidence.get("estimated_probability")),
         )
 
-    def _evaluate_total_goal_market(self, descriptor: MarketDescriptor, *, fixture=None) -> StatPalAdvisory:
+    def _evaluate_total_goal_market(self, descriptor: MarketDescriptor, *, fixture=None, provider_payload=None) -> StatPalAdvisory:
         line = _num(descriptor.line, 2.5)
         expected_total, evidence, warnings = self._expected_total_goals(fixture)
         probability = self._goal_line_probability(expected_total, line, descriptor.selection or descriptor.side)
@@ -362,7 +379,12 @@ class StatPalMarketAdvisoryService:
         if abs(expected_total - line) < 0.35:
             warnings.append("thin_goal_edge")
             score -= 5
-        score, snapshot_evidence, snapshot_warnings = self._apply_snapshot_context(score, descriptor=descriptor, fixture=fixture)
+        score, snapshot_evidence, snapshot_warnings = self._apply_snapshot_context(
+            score,
+            descriptor=descriptor,
+            fixture=fixture,
+            provider_payload=provider_payload,
+        )
         evidence.update(snapshot_evidence)
         warnings.extend(snapshot_warnings)
         score = round(max(0, min(100, score)), 1)
@@ -376,7 +398,7 @@ class StatPalMarketAdvisoryService:
             message=self._goal_message(descriptor, expected_total, line, probability),
         )
 
-    def _evaluate_team_goal_market(self, descriptor: MarketDescriptor, *, fixture=None) -> StatPalAdvisory:
+    def _evaluate_team_goal_market(self, descriptor: MarketDescriptor, *, fixture=None, provider_payload=None) -> StatPalAdvisory:
         team_side = descriptor.team or ("home" if "home" in normalize_market_text(descriptor.raw) else "away" if "away" in normalize_market_text(descriptor.raw) else "")
         line = _num(descriptor.line, 0.5)
         expected_team, evidence, warnings = self._expected_team_goals(fixture, team_side=team_side)
@@ -396,7 +418,12 @@ class StatPalMarketAdvisoryService:
         if abs(expected_team - line) < 0.25:
             warnings.append("thin_team_goal_edge")
             score -= 4
-        score, snapshot_evidence, snapshot_warnings = self._apply_snapshot_context(score, descriptor=descriptor, fixture=fixture)
+        score, snapshot_evidence, snapshot_warnings = self._apply_snapshot_context(
+            score,
+            descriptor=descriptor,
+            fixture=fixture,
+            provider_payload=provider_payload,
+        )
         evidence.update(snapshot_evidence)
         warnings.extend(snapshot_warnings)
         score = round(max(0, min(100, score)), 1)
@@ -656,6 +683,46 @@ class StatPalMarketAdvisoryService:
             return mapping.payload
         return None
 
+    def _apply_odds_overlay(
+        self,
+        payload: dict[str, Any],
+        *,
+        descriptor: MarketDescriptor,
+        fixture: dict[str, Any] | None = None,
+        provider_payload: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        snapshots = (((fixture or {}).get("statpal_context") or {}).get("snapshots") or {})
+        odds_snapshot = snapshots.get("prematch_odds") or {}
+        odds_summary = odds_snapshot.get("summary") or {}
+        if not odds_summary or not payload.get("available"):
+            return payload
+        score = _num(payload.get("score"), None)
+        if score is None:
+            return payload
+
+        adjustment, odds_evidence, odds_warnings = self._odds_adjustment(
+            odds_summary,
+            descriptor=descriptor,
+            payload=odds_snapshot.get("payload") or {},
+            provider_payload=provider_payload or {},
+        )
+        adjusted = round(max(0, min(100, score + adjustment)), 1)
+        result = dict(payload)
+        result["score"] = adjusted
+        result["status"] = _status(adjusted)
+        evidence = dict(result.get("evidence") or {})
+        evidence["odds_adjustment"] = round(adjustment, 1)
+        evidence["odds_snapshot"] = odds_summary
+        if odds_evidence:
+            evidence["odds_value"] = odds_evidence
+        result["evidence"] = evidence
+        warnings = list(result.get("warnings") or [])
+        if adjustment < 0:
+            warnings.append("odds_snapshot_caution")
+        warnings.extend(odds_warnings)
+        result["warnings"] = list(dict.fromkeys(warnings))
+        return result
+
     def _apply_snapshot_context(
         self,
         score: float,
@@ -663,6 +730,7 @@ class StatPalMarketAdvisoryService:
         descriptor: MarketDescriptor,
         fixture: dict[str, Any] | None = None,
         player_team: str = "",
+        provider_payload: dict[str, Any] | None = None,
     ) -> tuple[float, dict[str, Any], list[str]]:
         context = (fixture or {}).get("statpal_context") or {}
         snapshots = context.get("snapshots") or {}
@@ -696,21 +764,36 @@ class StatPalMarketAdvisoryService:
             if adjustment < 0:
                 warnings.append("lineup_uncertainty")
 
-        odds = ((snapshots.get("prematch_odds") or {}).get("summary") or {})
+        odds_snapshot = snapshots.get("prematch_odds") or {}
+        odds = odds_snapshot.get("summary") or {}
         if odds:
-            adjustment = self._odds_adjustment(odds)
+            adjustment, odds_evidence, odds_warnings = self._odds_adjustment(
+                odds,
+                descriptor=descriptor,
+                payload=odds_snapshot.get("payload") or {},
+                provider_payload=provider_payload or {},
+            )
             score += adjustment
             evidence["odds_adjustment"] = round(adjustment, 1)
             evidence["odds_snapshot"] = odds
+            if odds_evidence:
+                evidence["odds_value"] = odds_evidence
             if adjustment < 0:
                 warnings.append("odds_snapshot_caution")
+            warnings.extend(odds_warnings)
 
         team_stats = ((snapshots.get("team_stats") or {}).get("summary") or {})
         if team_stats:
+            adjustment, team_evidence, team_warnings = self._team_history_adjustment(team_stats, descriptor=descriptor)
+            score += adjustment
             evidence["team_stats_snapshot"] = team_stats
+            evidence["team_history_adjustment"] = round(adjustment, 1)
+            if team_evidence:
+                evidence["team_history"] = team_evidence
             if team_stats.get("sample_size") and _num(team_stats.get("sample_size")) < 5:
                 score -= 4
                 warnings.append("small_team_stat_sample")
+            warnings.extend(team_warnings)
 
         return max(0, min(100, score)), evidence, list(dict.fromkeys(warnings))
 
@@ -761,6 +844,161 @@ class StatPalMarketAdvisoryService:
         return adjustment, evidence, warnings
 
     @staticmethod
+    def _team_history_adjustment(team_stats: dict[str, Any], *, descriptor: MarketDescriptor):
+        if not isinstance(team_stats, dict):
+            return 0.0, {}, []
+        team_stats = StatPalMarketAdvisoryService._team_history_summary_for_descriptor(team_stats, descriptor)
+
+        warnings = []
+        sample_size = _num(team_stats.get("sample_size"))
+        selection = (descriptor.selection or descriptor.side or "").lower()
+        line = _num(descriptor.line, 0.0)
+        period_prefix = "firsthalf_" if descriptor.period == "first_half" else "secondhalf_" if descriptor.period == "second_half" else ""
+        evidence = {
+            "team_id": team_stats.get("team_id") or "",
+            "team_name": team_stats.get("team_name") or "",
+            "sample_size": int(sample_size) if sample_size else 0,
+            "current_league": team_stats.get("current_league") or "",
+            "current_season": team_stats.get("current_season") or "",
+        }
+        if 0 < sample_size < 5:
+            warnings.append("small_team_stat_sample")
+
+        def directional(metric, threshold_line, *, cushion=0.25, scale=1.2, cap=3.0):
+            metric = _num(metric, None)
+            if metric is None or not selection or threshold_line <= 0:
+                return 0.0
+            edge = metric - threshold_line
+            if abs(edge) < cushion:
+                return 0.0
+            magnitude = min(cap, (abs(edge) - cushion) * scale)
+            if selection in {"over", "yes"}:
+                return magnitude if edge > 0 else -magnitude
+            if selection in {"under", "no"}:
+                return magnitude if edge < 0 else -magnitude
+            return 0.0
+
+        family = descriptor.family
+        adjustment = 0.0
+        if family == "total_goals":
+            metric = team_stats.get(f"{period_prefix}avg_total_goals") if period_prefix else team_stats.get("avg_total_goals")
+            if metric is None and period_prefix:
+                scored = _num(team_stats.get(f"{period_prefix}avg_goals_for"), None)
+                conceded = _num(team_stats.get(f"{period_prefix}avg_goals_against"), None)
+                if scored is not None or conceded is not None:
+                    metric = (scored or 0) + (conceded or 0)
+            evidence["metric"] = "avg_total_goals"
+            evidence["metric_value"] = round(_num(metric), 2) if metric is not None else None
+            evidence["line"] = line
+            adjustment = directional(metric, line, cushion=0.35, scale=1.15, cap=3.0)
+        elif family == "team_total_goals":
+            metric = team_stats.get(f"{period_prefix}avg_goals_for") if period_prefix else team_stats.get("avg_goals_for")
+            evidence["metric"] = "avg_goals_for"
+            evidence["metric_value"] = round(_num(metric), 2) if metric is not None else None
+            evidence["line"] = line
+            adjustment = directional(metric, line, cushion=0.2, scale=1.5, cap=3.5)
+        elif family == "team_corners":
+            metric = team_stats.get("avg_corners")
+            evidence["metric"] = "avg_corners"
+            evidence["metric_value"] = round(_num(metric), 2) if metric is not None else None
+            evidence["line"] = line
+            adjustment = directional(metric, line, cushion=0.4, scale=0.9, cap=2.0)
+        elif family == "corners_total":
+            metric = _num(team_stats.get("avg_corners"), None)
+            evidence["metric"] = "avg_corners"
+            evidence["metric_value"] = round(metric, 2) if metric is not None else None
+            if metric is not None:
+                if selection == "over" and metric >= 6:
+                    adjustment = 1.2
+                elif selection == "under" and metric <= 3.5:
+                    adjustment = 1.2
+        elif family == "team_cards":
+            metric = team_stats.get("avg_yellowcards")
+            evidence["metric"] = "avg_yellowcards"
+            evidence["metric_value"] = round(_num(metric), 2) if metric is not None else None
+            evidence["line"] = line
+            adjustment = directional(metric, line, cushion=0.25, scale=0.9, cap=2.0)
+        elif family in {"cards_total", "booking_points"}:
+            metric = _num(team_stats.get("avg_yellowcards"), None)
+            evidence["metric"] = "avg_yellowcards"
+            evidence["metric_value"] = round(metric, 2) if metric is not None else None
+            if metric is not None:
+                if selection == "over" and metric >= 2.7:
+                    adjustment = 1.0
+                elif selection == "under" and metric <= 1.4:
+                    adjustment = 1.0
+        elif family in {"btts", "clean_sheet", "team_clean_sheet"}:
+            avg_for = _num(team_stats.get("avg_goals_for"), None)
+            avg_against = _num(team_stats.get("avg_goals_against"), None)
+            evidence["metric"] = "avg_goals_for_against"
+            evidence["avg_goals_for"] = avg_for
+            evidence["avg_goals_against"] = avg_against
+            if avg_for is not None and avg_against is not None:
+                if family == "btts":
+                    if selection == "yes" and avg_for >= 1 and avg_against >= 1:
+                        adjustment = 1.5
+                    elif selection == "no" and (avg_for < 0.9 or avg_against < 0.9):
+                        adjustment = 1.5
+                else:
+                    if selection == "yes" and avg_against <= 0.9:
+                        adjustment = 1.5
+                    elif selection == "no" and avg_against >= 1.2:
+                        adjustment = 1.5
+
+        if adjustment:
+            warnings.append("team_history_context_applied")
+        return adjustment, evidence, warnings
+
+    @staticmethod
+    def _team_history_summary_for_descriptor(team_stats: dict[str, Any], descriptor: MarketDescriptor) -> dict[str, Any]:
+        teams = team_stats.get("teams") if isinstance(team_stats.get("teams"), list) else []
+        if not teams:
+            return team_stats
+
+        target_side = descriptor.team if descriptor.team in {"home", "away"} else ""
+        if target_side:
+            side_summary = team_stats.get(target_side) or next(
+                (team for team in teams if isinstance(team, dict) and team.get("fixture_side") == target_side),
+                {},
+            )
+            if side_summary:
+                return side_summary
+
+        usable = [team for team in teams if isinstance(team, dict)]
+        if not usable:
+            return team_stats
+
+        def values(key):
+            return [_num(team.get(key), None) for team in usable if _num(team.get(key), None) is not None]
+
+        def avg(key):
+            nums = values(key)
+            return round(sum(nums) / len(nums), 2) if nums else None
+
+        def total(key):
+            nums = values(key)
+            return round(sum(nums), 2) if nums else None
+
+        sample_sizes = values("sample_size")
+        return {
+            "team_id": "fixture",
+            "team_name": " + ".join(team.get("team_name") or "" for team in usable if team.get("team_name")),
+            "fixture_side": "fixture",
+            "sample_size": int(min(sample_sizes)) if sample_sizes else None,
+            "current_league": next((team.get("current_league") for team in usable if team.get("current_league")), ""),
+            "current_season": next((team.get("current_season") for team in usable if team.get("current_season")), ""),
+            "avg_goals_for": avg("avg_goals_for"),
+            "avg_goals_against": avg("avg_goals_against"),
+            "avg_total_goals": avg("avg_total_goals"),
+            "avg_corners": total("avg_corners") if descriptor.family == "corners_total" else avg("avg_corners"),
+            "avg_yellowcards": total("avg_yellowcards") if descriptor.family in {"cards_total", "booking_points"} else avg("avg_yellowcards"),
+            "firsthalf_avg_goals_for": avg("firsthalf_avg_goals_for"),
+            "firsthalf_avg_goals_against": avg("firsthalf_avg_goals_against"),
+            "secondhalf_avg_goals_for": avg("secondhalf_avg_goals_for"),
+            "secondhalf_avg_goals_against": avg("secondhalf_avg_goals_against"),
+        }
+
+    @staticmethod
     def _lineup_adjustment(summary):
         confirmed = summary.get("confirmed")
         projected = summary.get("projected")
@@ -771,14 +1009,237 @@ class StatPalMarketAdvisoryService:
         unavailable = summary.get("available") is False or summary.get("lineups_available") is False
         return -3.0 if unavailable else 0.0
 
-    @staticmethod
-    def _odds_adjustment(summary):
+    @classmethod
+    def _odds_adjustment(cls, summary, *, descriptor: MarketDescriptor | None = None, payload=None, provider_payload=None):
+        offered = cls._offered_odds(provider_payload or {})
+        reference = cls._statpal_reference_odds(descriptor, payload or {}) if descriptor and isinstance(payload, dict) else {}
+        reference_odds = _num(reference.get("odds"), None)
+        evidence = {}
+        warnings = []
+        if offered and reference_odds:
+            edge = (offered / reference_odds) - 1
+            reliability = reference.get("reliability") or "unknown"
+            adjustment_multiplier = cls._odds_reference_adjustment_multiplier(reliability)
+            adjustment = max(-6, min(6, edge * 35 * adjustment_multiplier))
+            evidence = {
+                "offered_odds": round(offered, 3),
+                "statpal_reference_odds": round(reference_odds, 3),
+                "statpal_reference_min_odds": reference.get("min_odds"),
+                "statpal_reference_max_odds": reference.get("max_odds"),
+                "statpal_reference_bookmaker_count": reference.get("bookmaker_count"),
+                "statpal_reference_spread_pct": reference.get("spread_pct"),
+                "value_edge_pct": round(edge * 100, 1),
+                "matched_market": reference.get("market") or "",
+                "matched_outcome": reference.get("outcome") or "",
+                "bookmaker": reference.get("bookmaker") or "",
+                "reference_method": reference.get("reference_method") or "",
+                "reference_reliability": reliability,
+            }
+            if edge <= -0.05:
+                warnings.append("odds_below_statpal_reference")
+            elif edge >= 0.05:
+                warnings.append("positive_price_edge")
+            if reliability == "thin":
+                warnings.append("single_bookmaker_reference")
+            elif reliability == "wide":
+                warnings.append("wide_odds_reference_spread")
+            elif reliability == "volatile":
+                warnings.append("volatile_odds_reference_spread")
+            return adjustment, evidence, warnings
+
         edge = _num(summary.get("edge") or summary.get("value_edge"), 0)
         spread = _num(summary.get("spread_pct"), 0)
         adjustment = max(-6, min(6, edge * 30))
         if spread and spread > 20:
             adjustment -= 3
-        return adjustment
+            warnings.append("wide_odds_spread")
+        return adjustment, evidence, warnings
+
+    @classmethod
+    def _offered_odds(cls, value):
+        if isinstance(value, dict):
+            for key in ("odds", "odd", "price", "decimal_odds", "decimalOdds"):
+                parsed = _num(value.get(key), None)
+                if parsed and parsed > 1:
+                    return parsed
+            for child in value.values():
+                parsed = cls._offered_odds(child)
+                if parsed:
+                    return parsed
+        elif isinstance(value, list):
+            for item in value:
+                parsed = cls._offered_odds(item)
+                if parsed:
+                    return parsed
+        return None
+
+    @classmethod
+    def _statpal_reference_odds(cls, descriptor: MarketDescriptor | None, payload: dict[str, Any]) -> dict[str, Any]:
+        if not descriptor:
+            return {}
+        for market in payload.get("markets") or []:
+            if not cls._market_matches_descriptor(market, descriptor):
+                continue
+            result = cls._reference_from_market(market, descriptor)
+            if result:
+                return result
+        return {}
+
+    @classmethod
+    def _reference_from_market(cls, market: dict[str, Any], descriptor: MarketDescriptor) -> dict[str, Any]:
+        line = _num(descriptor.line, None)
+        outcome = cls._descriptor_outcome_name(descriptor)
+        candidates = []
+        for bookmaker in market.get("bookmakers") or []:
+            result = cls._odd_from_items(bookmaker.get("odds") or [], outcome)
+            if result:
+                candidates.append(cls._reference_candidate(market, bookmaker, result, outcome))
+            for bucket_name in ("totals", "handicaps"):
+                for bucket in bookmaker.get(bucket_name) or []:
+                    bucket_line = _num(bucket.get("line"), None)
+                    if line is not None and bucket_line is not None and abs(bucket_line - line) > 0.01:
+                        continue
+                    result = cls._odd_from_items(bucket.get("odds") or [], outcome)
+                    if result:
+                        candidates.append(cls._reference_candidate(market, bookmaker, result, outcome))
+        return cls._aggregate_reference_candidates(candidates)
+
+    @staticmethod
+    def _reference_candidate(market: dict[str, Any], bookmaker: dict[str, Any], odd: dict[str, Any], outcome: str) -> dict[str, Any]:
+        odds = _num((odd or {}).get("value"), None)
+        if not odds or odds <= 1:
+            return {}
+        return {
+            "odds": odds,
+            "market": (market or {}).get("name") or "",
+            "outcome": (odd or {}).get("name") or outcome,
+            "bookmaker": (bookmaker or {}).get("name") or "",
+        }
+
+    @staticmethod
+    def _aggregate_reference_candidates(candidates: list[dict[str, Any]]) -> dict[str, Any]:
+        rows = [row for row in candidates if row and _num(row.get("odds"), None)]
+        if not rows:
+            return {}
+        odds = sorted(_num(row.get("odds")) for row in rows)
+        reference = float(statistics.median(odds))
+        min_odds = float(odds[0])
+        max_odds = float(odds[-1])
+        spread_pct = round(((max_odds - min_odds) / reference) * 100, 1) if reference else 0
+        reliability = StatPalMarketAdvisoryService._odds_reference_reliability(len(rows), spread_pct)
+        first = rows[0]
+        return {
+            "odds": round(reference, 3),
+            "min_odds": round(min_odds, 3),
+            "max_odds": round(max_odds, 3),
+            "spread_pct": spread_pct,
+            "bookmaker_count": len(rows),
+            "market": first.get("market") or "",
+            "outcome": first.get("outcome") or "",
+            "bookmaker": first.get("bookmaker") if len(rows) == 1 else f"median_of_{len(rows)}",
+            "reference_method": "single_bookmaker" if len(rows) == 1 else "median_bookmaker_odds",
+            "reliability": reliability,
+        }
+
+    @staticmethod
+    def _odds_reference_reliability(bookmaker_count: int, spread_pct: float) -> str:
+        if bookmaker_count <= 1:
+            return "thin"
+        if spread_pct >= 35:
+            return "volatile"
+        if spread_pct >= 20:
+            return "wide"
+        return "solid"
+
+    @staticmethod
+    def _odds_reference_adjustment_multiplier(reliability: str) -> float:
+        return {
+            "solid": 1.0,
+            "wide": 0.55,
+            "volatile": 0.25,
+            "thin": 0.65,
+        }.get(str(reliability or ""), 0.5)
+
+    @staticmethod
+    def _odd_from_items(items, outcome: str):
+        wanted = normalize_market_text(outcome)
+        for item in items or []:
+            name = normalize_market_text((item or {}).get("name") or "")
+            if name == wanted:
+                return item
+            if wanted in {"over", "under"} and name.startswith(wanted):
+                return item
+            if wanted in {"yes", "no"} and name == wanted:
+                return item
+            if wanted in {"home", "draw", "away"} and name == wanted:
+                return item
+        return None
+
+    @staticmethod
+    def _descriptor_outcome_name(descriptor: MarketDescriptor) -> str:
+        if descriptor.family in {"match_result", "double_chance", "draw_no_bet", "asian_handicap", "handicap"}:
+            return {"home": "Home", "draw": "Draw", "away": "Away"}.get(descriptor.side, descriptor.selection or descriptor.side or "")
+        if descriptor.family in {"total_goals", "team_total_goals", "corners_total", "team_corners", "cards_total", "team_cards", "booking_points"}:
+            return (descriptor.selection or descriptor.side or "over").title()
+        if descriptor.family in {"btts", "clean_sheet", "team_clean_sheet"}:
+            return (descriptor.selection or descriptor.side or "yes").title()
+        return descriptor.selection or descriptor.side or ""
+
+    @classmethod
+    def _market_matches_descriptor(cls, market: dict[str, Any], descriptor: MarketDescriptor) -> bool:
+        name = normalize_market_text((market or {}).get("name") or "")
+        if not cls._period_matches(name, descriptor.period):
+            return False
+        if descriptor.family == "match_result":
+            return name in {"1x2", "1 x 2", "match result"} or "1x2" in name
+        if descriptor.family in {"total_goals", "team_total_goals"}:
+            if "corner" in name or "card" in name:
+                return False
+            if descriptor.family == "team_total_goals":
+                if not cls._team_matches(name, descriptor.team):
+                    return False
+            return "over under" in name or "total" in name or "goals" in name
+        if descriptor.family == "btts":
+            return "both teams" in name or "btts" in name or "gg" in name or "ng" in name
+        if descriptor.family in {"clean_sheet", "team_clean_sheet"}:
+            return "clean sheet" in name and cls._team_matches(name, descriptor.team or descriptor.side)
+        if descriptor.family in {"corners_total", "team_corners"}:
+            if "corner" not in name:
+                return False
+            if descriptor.family == "team_corners" and not cls._team_matches(name, descriptor.team):
+                return False
+            return True
+        if descriptor.family in {"cards_total", "team_cards", "booking_points"}:
+            if not ("card" in name or "booking" in name):
+                return False
+            if descriptor.family == "team_cards" and not cls._team_matches(name, descriptor.team):
+                return False
+            return True
+        return False
+
+    @staticmethod
+    def _period_matches(market_name: str, period: str) -> bool:
+        period = str(period or "match")
+        first_half = any(token in market_name for token in ("1st half", "first half", "1h", "half time", "halftime"))
+        second_half = any(token in market_name for token in ("2nd half", "second half", "2h"))
+        if period in {"first_half", "1st_half"}:
+            return first_half
+        if period in {"second_half", "2nd_half"}:
+            return second_half
+        if period in {"match", "full_match"}:
+            return not first_half and not second_half
+        return True
+
+    @staticmethod
+    def _team_matches(market_name: str, team: str) -> bool:
+        team = normalize_market_text(team)
+        if not team:
+            return True
+        if team == "home":
+            return "home" in market_name or "home team" in market_name
+        if team == "away":
+            return "away" in market_name or "away team" in market_name
+        return team in market_name
 
     @staticmethod
     def _club_rows(player: dict[str, Any]) -> list[dict[str, Any]]:

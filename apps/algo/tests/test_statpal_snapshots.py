@@ -1,6 +1,7 @@
 from datetime import date
+from types import SimpleNamespace
 
-from django.test import TestCase
+from django.test import SimpleTestCase, TestCase
 
 from apps.algo.models import FixtureCache, ProviderFixtureMap, StatPalFixtureSnapshot
 from apps.algo.statpal_snapshots import StatPalSnapshotService
@@ -42,6 +43,94 @@ INJURY_PAYLOAD = {
 }
 
 
+class StatPalSnapshotContextPayloadTests(SimpleTestCase):
+    def test_compact_context_payload_strips_raw_keys_and_caps_lists(self):
+        payload = {
+            "raw": {"provider": "full response"},
+            "items": [{"id": str(index), "raw": {"hidden": True}} for index in range(55)],
+        }
+
+        compact = StatPalSnapshotService._compact_context_payload(payload)
+
+        self.assertNotIn("raw", compact)
+        self.assertEqual(len(compact["items"]), 50)
+        self.assertEqual(compact["items"][0]["id"], "0")
+        self.assertNotIn("raw", compact["items"][0])
+
+    def test_team_stats_summary_extracts_history_signals(self):
+        summary = StatPalSnapshotService._summarize_team_stats(
+            {
+                "provider_team_id": "2340835",
+                "name": "Arsenal",
+                "squad_count": 25,
+                "league_stats": [
+                    {
+                        "league": "Premier League",
+                        "season": "2025/2026",
+                        "fulltime": {
+                            "win": {"total": 12, "home": 7, "away": 5},
+                            "draw": {"total": 4, "home": 2, "away": 2},
+                            "lost": {"total": 3, "home": 0, "away": 3},
+                            "avg_goals_per_game_scored": {"total": 2.1, "home": 2.4, "away": 1.8},
+                            "avg_goals_per_game_conceded": {"total": 0.9, "home": 0.7, "away": 1.1},
+                            "clean_sheet": {"total": 8, "home": 5, "away": 3},
+                            "failed_to_score": {"total": 2, "home": 0, "away": 2},
+                            "avg_corners": {"total": 6.2, "home": 6.8, "away": 5.6},
+                            "avg_yellowcards": {"total": 1.7, "home": 1.5, "away": 1.9},
+                        },
+                        "firsthalf": {
+                            "avg_goals_per_game_scored": {"total": 0.9},
+                            "avg_goals_per_game_conceded": {"total": 0.4},
+                        },
+                        "secondhalf": {
+                            "avg_goals_per_game_scored": {"total": 1.2},
+                            "avg_goals_per_game_conceded": {"total": 0.5},
+                        },
+                    }
+                ],
+            }
+        )
+
+        self.assertEqual(summary["team_id"], "2340835")
+        self.assertEqual(summary["normalized_team_name"], "arsenal")
+        self.assertEqual(summary["sample_size"], 19)
+        self.assertEqual(summary["current_league"], "Premier League")
+        self.assertEqual(summary["avg_goals_for"], 2.1)
+        self.assertEqual(summary["avg_goals_against"], 0.9)
+        self.assertEqual(summary["avg_total_goals"], 3.0)
+        self.assertEqual(summary["avg_corners"], 6.2)
+        self.assertEqual(summary["firsthalf_avg_goals_for"], 0.9)
+
+    def test_team_stats_context_combines_home_and_away_profiles(self):
+        service = StatPalSnapshotService()
+        rows = [
+            SimpleNamespace(
+                status="available",
+                summary={"fixture_side": "home", "team_id": "h1", "team_name": "Home", "avg_corners": 5.5},
+                payload={"fixture_side": "home", "provider_team_id": "h1", "raw": {"hidden": True}},
+                fetched_at=None,
+                expires_at=None,
+                source_endpoint="SOCCER_TEAM",
+            ),
+            SimpleNamespace(
+                status="available",
+                summary={"fixture_side": "away", "team_id": "a1", "team_name": "Away", "avg_corners": 4.5},
+                payload={"fixture_side": "away", "provider_team_id": "a1", "raw": {"hidden": True}},
+                fetched_at=None,
+                expires_at=None,
+                source_endpoint="SOCCER_TEAM",
+            ),
+        ]
+
+        context = service._team_stats_context(rows)
+
+        self.assertEqual(context["summary"]["team_count"], 2)
+        self.assertEqual(context["summary"]["home"]["team_id"], "h1")
+        self.assertEqual(context["summary"]["away"]["team_id"], "a1")
+        self.assertEqual(len(context["payload"]["teams"]), 2)
+        self.assertNotIn("raw", context["payload"]["teams"][0])
+
+
 class StatPalSnapshotServiceTests(TestCase):
     def test_save_injuries_payload_creates_fixture_snapshot_summary(self):
         fixture = FixtureCache.objects.create(
@@ -81,13 +170,31 @@ class StatPalSnapshotServiceTests(TestCase):
             snapshot_type=StatPalFixtureSnapshot.SnapshotType.LINEUPS,
             source_endpoint="SOCCER_LINEUPS",
             summary={"home_confirmed": True},
+            payload={
+                "id": "statpal:lineups:statpal-match-1",
+                "raw": {"provider": "full response"},
+                "home": {
+                    "starting_xi": [
+                        {
+                            "id": "p1",
+                            "name": "Starter One",
+                            "raw": {"hidden": True},
+                        }
+                    ]
+                },
+            },
         )
 
         context = StatPalSnapshotService().fixture_context(match_id="12345")
 
         self.assertTrue(context["available"])
         self.assertIn("lineups", context["snapshots"])
-        self.assertEqual(context["snapshots"]["lineups"]["summary"]["home_confirmed"], True)
+        lineups = context["snapshots"]["lineups"]
+        self.assertEqual(lineups["summary"]["home_confirmed"], True)
+        self.assertTrue(lineups["payload_available"])
+        self.assertEqual(lineups["payload"]["id"], "statpal:lineups:statpal-match-1")
+        self.assertNotIn("raw", lineups["payload"])
+        self.assertNotIn("raw", lineups["payload"]["home"]["starting_xi"][0])
 
     def test_save_endpoint_payload_upserts_same_fixture_type(self):
         service = StatPalSnapshotService()
@@ -110,6 +217,100 @@ class StatPalSnapshotServiceTests(TestCase):
         self.assertEqual(first.id, second.id)
         self.assertEqual(StatPalFixtureSnapshot.objects.count(), 1)
         self.assertEqual(second.payload["odds"][0]["market"], "Totals")
+
+    def test_lineups_endpoint_payload_is_normalized_before_save(self):
+        row = StatPalSnapshotService().save_endpoint_payload(
+            snapshot_type=StatPalFixtureSnapshot.SnapshotType.LINEUPS,
+            endpoint_name="SOCCER_LINEUPS",
+            match_id="statpal:2026061822389",
+            provider_match_id="2026061822389",
+            payload={
+                "main_id": "2026061822389",
+                "status": "projected",
+                "updated": "06.17.2026 12:31:15",
+                "updated_ts": 1781699475314,
+                "home": {
+                    "team_id": "2339730",
+                    "team_name": "Canada",
+                    "coach": {"name": "Jesse Marsch", "id": "3381958"},
+                    "team_formation": "4-4-2",
+                    "starting_xi": [{"id": "2504652", "name": "Maxime Crepeau", "number": "16", "position": "goalkeeper"}],
+                    "bench": [],
+                    "sidelined": [{"id": "2773229", "name": "Alphonso Davies", "number": "19", "position": "defender", "status": "out", "reason": "injury"}],
+                    "confidence": 45,
+                },
+                "away": {
+                    "team_id": "2346325",
+                    "team_name": "Qatar",
+                    "coach": {"name": "Julen Lopetegui", "id": "2529722"},
+                    "team_formation": "4-3-3",
+                    "starting_xi": [{"id": "2923575", "name": "Mahmoud Abunada", "number": "1", "position": "goalkeeper"}],
+                    "bench": [],
+                    "sidelined": [],
+                    "confidence": 45,
+                },
+            },
+        )
+
+        self.assertEqual(row.payload["id"], "statpal:lineups:2026061822389")
+        self.assertEqual(row.payload["home"]["formation"], "4-4-2")
+        self.assertEqual(row.payload["starting_count"], 2)
+        self.assertEqual(row.summary["status"], "projected")
+        self.assertEqual(row.summary["home_sidelined_count"], 1)
+
+    def test_prematch_odds_endpoint_payload_is_normalized_before_save(self):
+        row = StatPalSnapshotService().save_endpoint_payload(
+            snapshot_type=StatPalFixtureSnapshot.SnapshotType.PREMATCH_ODDS,
+            endpoint_name="SOCCER_PREMATCH_ODDS",
+            match_id="statpal:2025121318250",
+            provider_match_id="2025121318250",
+            provider_competition_id="3037",
+            payload={
+                "prematch_odds": {
+                    "updated": "09.12.2025 17:15:44",
+                    "updated_ts": 1765300544,
+                    "league": {
+                        "id": "3037",
+                        "name": "England: Premier League",
+                        "country": "england",
+                        "match": [
+                            {
+                                "main_id": "2025121318250",
+                                "date": "13.12.2025",
+                                "time": "15:00",
+                                "home": {"id": "2340925", "name": "Chelsea"},
+                                "away": {"id": "2340991", "name": "Everton"},
+                                "odds": [
+                                    {
+                                        "id": "1834",
+                                        "name": "1x2",
+                                        "stop": "False",
+                                        "bookmaker": [
+                                            {
+                                                "id": "1847",
+                                                "name": "10Bet",
+                                                "timestamp": "1765252069",
+                                                "odd": [
+                                                    {"name": "Home", "value": "1.64"},
+                                                    {"name": "Draw", "value": "3.75"},
+                                                    {"name": "Away", "value": "5.10"},
+                                                ],
+                                            }
+                                        ],
+                                    }
+                                ],
+                            }
+                        ],
+                    },
+                }
+            },
+        )
+
+        self.assertEqual(row.payload["id"], "statpal:prematch_odds:2025121318250")
+        self.assertEqual(row.payload["markets"][0]["bookmakers"][0]["odds"][0]["value"], 1.64)
+        self.assertEqual(row.summary["home_odds"], 1.64)
+        self.assertEqual(row.summary["draw_odds"], 3.75)
+        self.assertEqual(row.summary["away_odds"], 5.1)
 
     def test_prediction_summary_extracts_core_scoring_signals(self):
         summary = StatPalSnapshotService().summarize(
@@ -159,6 +360,76 @@ class StatPalSnapshotServiceTests(TestCase):
         self.assertEqual(summary["home_yellow_cards"], 2)
         self.assertEqual(summary["away_yellow_cards"], 3)
         self.assertEqual(summary["away_red_cards"], 1)
+
+    def test_detailed_stats_snapshot_normalizes_match_stats_endpoint_payload(self):
+        service = StatPalSnapshotService()
+        row = service.save_endpoint_payload(
+            snapshot_type=StatPalFixtureSnapshot.SnapshotType.DETAILED_STATS,
+            endpoint_name="SOCCER_DETAILED_STATS",
+            match_id="12345",
+            provider_match_id="2025120818706",
+            provider_competition_id="3037",
+            payload={
+                "match-stats": {
+                    "updated": "09.12.2025 04:22:31",
+                    "updated_ts": 1765254151,
+                    "tournament": {
+                        "id": "3037",
+                        "name": "England - Premier League",
+                        "matches": {
+                            "main_id": "2025120818706",
+                            "date": "08.12.2025",
+                            "time": "20:00",
+                            "status": "Full-time",
+                            "match_info": {
+                                "stadium": {"name": "Molineux Stadium, Wolverhampton"},
+                                "referee": {"name": "Michael Salisbury, England"},
+                            },
+                            "home": {"id": "2341279", "name": "Wolverhampton", "goals": "1"},
+                            "away": {"id": "2341093", "name": "Manchester United", "goals": "4"},
+                            "team_stats": {
+                                "home": {
+                                    "corners": {"total": "1", "total_h1": "1", "total_h2": "0"},
+                                    "expected_goals": {"total": "0.41"},
+                                    "fouls": {"total": "17"},
+                                },
+                                "away": {
+                                    "corners": {"total": "9", "total_h1": "6", "total_h2": "3"},
+                                    "expected_goals": {"total": "4.24"},
+                                    "fouls": {"total": "12"},
+                                },
+                            },
+                            "event_summary": {
+                                "home": {
+                                    "goals": {"event": {"minute": "45", "player_id": "2752619"}},
+                                    "yellowcards": "",
+                                    "redcards": "",
+                                    "var": "",
+                                },
+                                "away": {
+                                    "goals": "",
+                                    "yellowcards": {"event": [{"minute": "90", "player_id": "2848210"}]},
+                                    "redcards": "",
+                                    "var": {"event": {"minute": "80", "event_type": "Penalty confirmed"}},
+                                },
+                            },
+                        },
+                    },
+                }
+            },
+        )
+
+        self.assertEqual(row.payload["provider_match_id"], "2025120818706")
+        self.assertEqual(row.payload["team_stats"]["away"]["expected_goals"]["total"], 4.24)
+        self.assertEqual(row.summary["home_xg"], 0.41)
+        self.assertEqual(row.summary["away_xg"], 4.24)
+        self.assertEqual(row.summary["expected_goals"], 4.65)
+        self.assertEqual(row.summary["home_corners"], 1)
+        self.assertEqual(row.summary["away_corners"], 9)
+        self.assertEqual(row.summary["home_fouls"], 17)
+        self.assertEqual(row.summary["away_fouls"], 12)
+        self.assertEqual(row.summary["away_yellow_cards"], 1)
+        self.assertEqual(row.summary["var_events"], 1)
 
     def test_refresh_fixture_snapshots_saves_fixture_endpoint_payload(self):
         class DummyClient:

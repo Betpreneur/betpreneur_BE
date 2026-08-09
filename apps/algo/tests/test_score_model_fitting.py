@@ -23,6 +23,7 @@ from apps.algo.scoring.fitting import (
     fit_league_from_standings,
 )
 from apps.algo.scoring.service import score_model_service
+from apps.algo.services import FixtureSearchService
 
 
 def _standings(teams):
@@ -312,3 +313,67 @@ class EarlySeasonFittingTests(SimpleTestCase):
 
         self.assertGreater(fit.home_goal_baseline, 0)
         self.assertGreater(fit.away_goal_baseline, 0)
+
+
+class FixtureResolutionPreferenceTests(TestCase):
+    """
+    The same fixture is cached from several providers. Resolution must prefer the row
+    that can actually be priced.
+
+    In production an API-Football row and a StatPal row both matched at 100%; the sort
+    tiebroke on date, the API-Football row won, and it carries no league id — so every
+    leg resolved perfectly and then reported "no fitted goal model".
+    """
+
+    def setUp(self):
+        from apps.algo.models import FixtureCache
+        import datetime
+
+        self.match_date = datetime.date(2026, 8, 9)
+        common = dict(
+            match_date=self.match_date, fixture="Malmo FF vs Degerfors",
+            home_team="Malmo FF", away_team="Degerfors",
+            home_team_normalized="malmo ff", away_team_normalized="degerfors",
+            fixture_normalized="malmo ff vs degerfors", league="Allsvenskan",
+        )
+        FixtureCache.objects.create(
+            match_id="aps-1", source="aps_provider_lookup", api_payload={}, **common
+        )
+        FixtureCache.objects.create(
+            match_id="statpal:1", source="statpal",
+            api_payload={"provider_competition_id": "3240",
+                         "provider_home_team_id": "2348353",
+                         "provider_away_team_id": "2348259"},
+            **common,
+        )
+
+    def _results(self):
+        return FixtureSearchService()._search_cached(
+            "Malmo FF vs Degerfors", start_date=self.match_date, days=1, limit=5
+        )
+
+    def test_the_priceable_row_is_preferred_when_both_match_equally(self):
+        results = self._results()
+
+        self.assertEqual(results[0]["source"], "statpal")
+        self.assertEqual(results[0]["code"], "3240")
+
+    def test_the_chosen_row_carries_the_team_ids_the_models_need(self):
+        chosen = self._results()[0]
+
+        self.assertEqual(chosen["hid"], "2348353")
+        self.assertEqual(chosen["aid"], "2348259")
+
+    def test_both_rows_are_still_offered_as_candidates(self):
+        self.assertEqual(len(self._results()), 2)
+
+    def test_a_better_scoring_row_still_wins_regardless_of_provider(self):
+        # Preference is only a tiebreak; it must never override a better match.
+        from apps.algo.models import FixtureCache
+
+        FixtureCache.objects.filter(source="statpal").update(
+            fixture="Malmo FF vs Someone Else", fixture_normalized="malmo ff vs someone else",
+            away_team="Someone Else", away_team_normalized="someone else",
+        )
+
+        self.assertEqual(self._results()[0]["source"], "aps_provider_lookup")

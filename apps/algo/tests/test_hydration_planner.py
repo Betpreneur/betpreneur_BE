@@ -34,6 +34,13 @@ class HydratorTests(SimpleTestCase):
         self.service.prepare_fixture_context_for_market.return_value = {
             "context": {"snapshots": {"team_stats": {}}}, "refreshed": {},
         }
+        self.service.refresh_fixture_team_stats.return_value = {
+            "api_usage": {"attempted_calls": 2},
+            "refreshed": [{"side": "home"}, {"side": "away"}],
+        }
+        self.service.fixture_context.return_value = {
+            "snapshots": {"team_stats": {"summary": {"team_count": 2}}},
+        }
         self.hydrator = FixtureHydrator(snapshot_service=self.service)
 
     def test_matrix_family_never_calls_the_provider(self):
@@ -88,6 +95,32 @@ class HydratorTests(SimpleTestCase):
 
         self.assertEqual(self.service.prepare_fixture_context_for_market.call_count, 1)
         self.assertEqual(self.hydrator.stats.served_by_model, 25)
+
+    def test_team_stats_requirement_fetches_home_and_away_profiles(self):
+        descriptor = describe_market("Corners Over 9.5")
+
+        bundle = self.hydrator.bundle_for(
+            descriptor,
+            match_id="statpal:match-1",
+            provider_match_id="match-1",
+            provider_competition_id="3037",
+            home_team_id="home-1",
+            away_team_id="away-1",
+        )
+
+        self.service.refresh_fixture_team_stats.assert_called_once_with(
+            match_id="statpal:match-1",
+            provider_match_id="match-1",
+            provider_competition_id="3037",
+            home_team_id="home-1",
+            away_team_id="away-1",
+        )
+        self.service.fixture_context.assert_called_once_with(
+            match_id="statpal:match-1",
+            provider_match_id="match-1",
+        )
+        self.assertEqual(bundle["context"]["snapshots"]["team_stats"]["summary"]["team_count"], 2)
+        self.assertEqual(self.hydrator.stats.calls_used, 3)
 
 
 class ModelBackedCapabilityTests(SimpleTestCase):

@@ -1,10 +1,100 @@
+from datetime import datetime, timezone as py_timezone
+
 from django.test import TestCase
 
-from apps.algo.models import ProviderPlayerMap, ProviderTeamMap, TeamAliasMap
+from apps.algo.models import FixtureCache, ProviderFixtureMap, ProviderPlayerMap, ProviderTeamMap, TeamAliasMap
 from apps.algo.provider_mapping import provider_mapping_service
 
 
 class ProviderMappingServiceTests(TestCase):
+    def _statpal_fixture(self, **overrides):
+        defaults = {
+            "match_date": datetime(2026, 8, 9, tzinfo=py_timezone.utc).date(),
+            "fixture": "Sparta Rotterdam vs Feyenoord",
+            "home_team": "Sparta Rotterdam",
+            "away_team": "Feyenoord",
+            "home_team_normalized": "sparta rotterdam",
+            "away_team_normalized": "feyenoord",
+            "fixture_normalized": "sparta rotterdam vs feyenoord",
+            "league": "Eredivisie",
+            "country": "netherlands",
+            "kickoff": "16:15",
+            "kickoff_utc": datetime(2026, 8, 9, 15, 15, tzinfo=py_timezone.utc),
+            "match_id": "statpal:2026080912345",
+            "source": "statpal",
+            "api_payload": {
+                "provider_match_id": "2026080912345",
+                "fallback_match_ids": ["6024103", "6531486"],
+                "provider_competition_id": "37",
+                "provider_home_team_id": "2339001",
+                "provider_away_team_id": "2339002",
+            },
+        }
+        defaults.update(overrides)
+        return FixtureCache.objects.create(**defaults)
+
+    def _sportybet_event(self, **overrides):
+        kickoff_ms = int(datetime(2026, 8, 9, 15, 15, tzinfo=py_timezone.utc).timestamp() * 1000)
+        event = {
+            "eventId": "sr:match:72041042",
+            "gameId": "23861",
+            "estimateStartTime": kickoff_ms,
+            "homeTeamName": "Sparta Rotterdam",
+            "awayTeamName": "Feyenoord",
+            "sport": {
+                "category": {
+                    "name": "Netherlands",
+                    "tournament": {"id": "sr:tournament:37", "name": "Eredivisie"},
+                }
+            },
+        }
+        event.update(overrides)
+        return event
+
+    def test_match_sportybet_to_statpal_persists_high_confidence_mapping(self):
+        self._statpal_fixture()
+
+        result = provider_mapping_service.match_sportybet_to_statpal(self._sportybet_event())
+
+        self.assertTrue(result["matched"])
+        self.assertEqual(result["candidate"]["match_id"], "statpal:2026080912345")
+        self.assertGreaterEqual(result["candidate"]["match_score"], 95)
+
+        mapping = ProviderFixtureMap.objects.get(provider="sportybet", provider_event_id="sr:match:72041042")
+        self.assertEqual(mapping.api_fixture_id, "statpal:2026080912345")
+        self.assertEqual(mapping.api_league_id, 37)
+        self.assertEqual(mapping.api_home_team, "Sparta Rotterdam")
+        self.assertEqual(mapping.api_away_team, "Feyenoord")
+        self.assertEqual(mapping.resolution_method, "sportybet_statpal_team_date_direct")
+        self.assertEqual(mapping.payload["candidate"]["provider_match_id"], "2026080912345")
+
+    def test_match_sportybet_to_statpal_rejects_weak_candidate(self):
+        self._statpal_fixture(
+            fixture="Ajax vs PSV",
+            home_team="Ajax",
+            away_team="PSV",
+            home_team_normalized="ajax",
+            away_team_normalized="psv",
+            fixture_normalized="ajax vs psv",
+        )
+
+        result = provider_mapping_service.match_sportybet_to_statpal(self._sportybet_event())
+
+        self.assertFalse(result["matched"])
+        self.assertEqual(result["reason"], "no_candidate_above_threshold")
+        self.assertFalse(ProviderFixtureMap.objects.filter(provider="sportybet").exists())
+
+    def test_match_sportybet_to_statpal_accepts_fallback_id_match(self):
+        self._statpal_fixture()
+
+        result = provider_mapping_service.match_sportybet_to_statpal(
+            self._sportybet_event(eventId="6024103", homeTeamName="Wrong Home", awayTeamName="Wrong Away")
+        )
+
+        self.assertTrue(result["matched"])
+        self.assertEqual(result["candidate"]["match_score"], 100)
+        self.assertEqual(result["candidate"]["resolution_method"], "sportybet_statpal_provider_id")
+
     def test_learn_statpal_player_payload_creates_player_team_and_alias_maps(self):
         payload = {
             "player": {

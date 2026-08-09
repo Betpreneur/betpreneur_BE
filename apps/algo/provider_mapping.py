@@ -1,10 +1,14 @@
+from datetime import datetime, timedelta, timezone as py_timezone
 from decimal import Decimal
+from difflib import SequenceMatcher
 from typing import Any
 
 from django.db import IntegrityError, transaction
+from django.db.models import Q
 from django.utils import timezone
+from django.utils.dateparse import parse_datetime
 
-from .models import ProviderFixtureMap, ProviderPlayerMap, ProviderTeamMap, TeamAliasMap
+from .models import FixtureCache, ProviderFixtureMap, ProviderPlayerMap, ProviderTeamMap, TeamAliasMap
 from .services import json_safe, normalize_fixture_text
 
 
@@ -16,6 +20,8 @@ def _decimal_confidence(value) -> Decimal:
 
 
 class ProviderMappingService:
+    SPORTYBET_STATPAL_MIN_CONFIDENCE = 78
+
     def get_fixture(self, *, provider: str, provider_event_id: str) -> ProviderFixtureMap | None:
         if not provider or not provider_event_id:
             return None
@@ -28,6 +34,309 @@ class ProviderMappingService:
             .order_by("-confidence", "-verified_at", "-updated_at")
             .first()
         )
+
+    def match_sportybet_to_statpal(
+        self,
+        sportybet_event: dict[str, Any],
+        *,
+        candidates: list[dict[str, Any]] | None = None,
+        persist: bool = True,
+        min_confidence: float | None = None,
+    ) -> dict[str, Any]:
+        """Resolve a SportyBet event to a cached or supplied StatPal fixture."""
+        provider_metadata = self._sportybet_fixture_metadata(sportybet_event)
+        if not provider_metadata.get("provider_event_id"):
+            return {"matched": False, "reason": "missing_provider_event_id", "provider": provider_metadata, "candidates": []}
+
+        existing = self.get_fixture(provider="sportybet", provider_event_id=provider_metadata["provider_event_id"])
+        if existing:
+            return {
+                "matched": True,
+                "existing": True,
+                "mapping": existing,
+                "provider": provider_metadata,
+                "candidate": self._mapping_candidate(existing),
+                "candidates": [],
+            }
+
+        candidate_rows = candidates if candidates is not None else self._statpal_fixture_candidates(provider_metadata)
+        scored = []
+        for candidate in candidate_rows:
+            normalized_candidate = self._statpal_candidate(candidate)
+            if not normalized_candidate:
+                continue
+            score, method, details = self._score_sportybet_statpal_candidate(provider_metadata, normalized_candidate)
+            normalized_candidate.update({"match_score": score, "resolution_method": method, "score_details": details})
+            scored.append(normalized_candidate)
+        scored.sort(key=lambda item: item.get("match_score") or 0, reverse=True)
+
+        best = scored[0] if scored else None
+        threshold = float(min_confidence if min_confidence is not None else self.SPORTYBET_STATPAL_MIN_CONFIDENCE)
+        if not best or float(best.get("match_score") or 0) < threshold:
+            return {
+                "matched": False,
+                "reason": "no_candidate_above_threshold",
+                "provider": provider_metadata,
+                "candidate": best,
+                "candidates": scored[:10],
+            }
+
+        mapping = self.learn_sportybet_statpal_resolution(provider_metadata=provider_metadata, candidate=best) if persist else None
+        return {
+            "matched": True,
+            "existing": False,
+            "mapping": mapping,
+            "provider": provider_metadata,
+            "candidate": best,
+            "candidates": scored[:10],
+        }
+
+    def learn_sportybet_statpal_resolution(self, *, provider_metadata: dict[str, Any], candidate: dict[str, Any]) -> ProviderFixtureMap:
+        now = timezone.now()
+        provider_event_id = str(provider_metadata.get("provider_event_id") or "").strip()
+        score = _decimal_confidence(candidate.get("match_score") or 0)
+        defaults = {
+            "provider_competition_id": str(provider_metadata.get("provider_competition_id") or ""),
+            "provider_competition_name": str(provider_metadata.get("competition") or ""),
+            "api_fixture_id": str(candidate.get("match_id") or ""),
+            "api_league_id": self._int_or_none(candidate.get("provider_competition_id")),
+            "api_league_name": str(candidate.get("league") or ""),
+            "provider_home_team": str(provider_metadata.get("home_team") or ""),
+            "provider_away_team": str(provider_metadata.get("away_team") or ""),
+            "api_home_team": str(candidate.get("home_team") or ""),
+            "api_away_team": str(candidate.get("away_team") or ""),
+            "kickoff_at": candidate.get("kickoff_utc") or None,
+            "confidence": score,
+            "resolution_method": str(candidate.get("resolution_method") or "sportybet_statpal_team_date"),
+            "active": True,
+            "payload": json_safe({"provider": provider_metadata, "candidate": candidate}),
+            "verified_at": now,
+        }
+        try:
+            with transaction.atomic():
+                mapping, _ = ProviderFixtureMap.objects.update_or_create(
+                    provider="sportybet",
+                    provider_event_id=provider_event_id,
+                    defaults=defaults,
+                )
+        except IntegrityError:
+            mapping = ProviderFixtureMap.objects.get(provider="sportybet", provider_event_id=provider_event_id)
+
+        self._learn_team_alias(
+            provider="sportybet",
+            provider_team_name=str(provider_metadata.get("home_team") or ""),
+            internal_team_name=str(candidate.get("home_team") or ""),
+            country=str(candidate.get("country") or ""),
+            confidence=score,
+        )
+        self._learn_team_alias(
+            provider="sportybet",
+            provider_team_name=str(provider_metadata.get("away_team") or ""),
+            internal_team_name=str(candidate.get("away_team") or ""),
+            country=str(candidate.get("country") or ""),
+            confidence=score,
+        )
+        return mapping
+
+    def _sportybet_fixture_metadata(self, event: dict[str, Any]) -> dict[str, Any]:
+        event = event or {}
+        sport = event.get("sport") if isinstance(event.get("sport"), dict) else {}
+        category = sport.get("category") if isinstance(sport.get("category"), dict) else {}
+        tournament = category.get("tournament") if isinstance(category.get("tournament"), dict) else {}
+        kickoff_at = self._sportybet_kickoff(event)
+        return {
+            "provider": "sportybet",
+            "provider_event_id": str(event.get("eventId") or event.get("event_id") or "").strip(),
+            "provider_game_id": str(event.get("gameId") or event.get("game_id") or "").strip(),
+            "provider_competition_id": str(tournament.get("id") or category.get("id") or "").strip(),
+            "competition": str(tournament.get("name") or category.get("name") or "").strip(),
+            "country": str(category.get("name") or "").strip(),
+            "home_team": str(event.get("homeTeamName") or event.get("home_team") or "").strip(),
+            "away_team": str(event.get("awayTeamName") or event.get("away_team") or "").strip(),
+            "kickoff_at": kickoff_at,
+            "match_date": kickoff_at.date() if kickoff_at else None,
+            "raw": event,
+        }
+
+    def _sportybet_kickoff(self, event: dict[str, Any]):
+        value = event.get("estimateStartTime") or event.get("startTime") or event.get("kickoff_at")
+        if value in ("", None):
+            return None
+        parsed = parse_datetime(str(value)) if isinstance(value, str) else None
+        if parsed:
+            return parsed if parsed.tzinfo else timezone.make_aware(parsed)
+        try:
+            timestamp = float(value)
+            if timestamp > 10_000_000_000:
+                timestamp = timestamp / 1000
+            return datetime.fromtimestamp(timestamp, tz=py_timezone.utc)
+        except (TypeError, ValueError, OSError):
+            return None
+
+    def _statpal_fixture_candidates(self, metadata: dict[str, Any]) -> list[dict[str, Any]]:
+        match_date = metadata.get("match_date")
+        queryset = FixtureCache.objects.filter(source="statpal")
+        if match_date:
+            queryset = queryset.filter(match_date__range=(match_date - timedelta(days=1), match_date + timedelta(days=1)))
+        tokens = [
+            token
+            for token in normalize_fixture_text(f"{metadata.get('home_team')} {metadata.get('away_team')}").split()
+            if len(token) > 2
+        ]
+        if tokens:
+            query = Q()
+            for token in tokens[:6]:
+                query |= Q(fixture_normalized__icontains=token)
+                query |= Q(home_team_normalized__icontains=token)
+                query |= Q(away_team_normalized__icontains=token)
+            queryset = queryset.filter(query)
+        return [self._fixture_candidate(row) for row in queryset[:200]]
+
+    def _fixture_candidate(self, fixture: FixtureCache) -> dict[str, Any]:
+        payload = fixture.api_payload or {}
+        return {
+            "match_id": fixture.match_id,
+            "provider_match_id": str(payload.get("provider_match_id") or "").strip(),
+            "fallback_match_ids": payload.get("fallback_match_ids") or [],
+            "provider_competition_id": str(payload.get("provider_competition_id") or "").strip(),
+            "league": fixture.league,
+            "country": fixture.country,
+            "home_team": fixture.home_team,
+            "away_team": fixture.away_team,
+            "home_team_id": str(payload.get("provider_home_team_id") or payload.get("hid") or "").strip(),
+            "away_team_id": str(payload.get("provider_away_team_id") or payload.get("aid") or "").strip(),
+            "kickoff_utc": fixture.kickoff_utc,
+            "match_date": fixture.match_date,
+            "source": fixture.source,
+            "raw": payload,
+        }
+
+    def _statpal_candidate(self, candidate: dict[str, Any]) -> dict[str, Any]:
+        candidate = candidate or {}
+        match_id = str(candidate.get("match_id") or "").strip()
+        provider_match_id = str(candidate.get("provider_match_id") or "").strip()
+        if not match_id and provider_match_id:
+            match_id = f"statpal:{provider_match_id}"
+        if not match_id:
+            return {}
+        return {
+            "match_id": match_id,
+            "provider_match_id": provider_match_id or match_id.replace("statpal:", "", 1),
+            "fallback_match_ids": [str(item).strip() for item in (candidate.get("fallback_match_ids") or []) if str(item or "").strip()],
+            "provider_competition_id": str(candidate.get("provider_competition_id") or candidate.get("league_id") or "").strip(),
+            "league": str(candidate.get("league") or "").strip(),
+            "country": str(candidate.get("country") or "").strip(),
+            "home_team": str(candidate.get("home_team") or candidate.get("hname") or "").strip(),
+            "away_team": str(candidate.get("away_team") or candidate.get("aname") or "").strip(),
+            "home_team_id": str(candidate.get("home_team_id") or candidate.get("hid") or "").strip(),
+            "away_team_id": str(candidate.get("away_team_id") or candidate.get("aid") or "").strip(),
+            "kickoff_utc": candidate.get("kickoff_utc"),
+            "match_date": candidate.get("match_date"),
+            "raw": candidate,
+        }
+
+    def _score_sportybet_statpal_candidate(self, metadata: dict[str, Any], candidate: dict[str, Any]):
+        home = normalize_fixture_text(metadata.get("home_team"))
+        away = normalize_fixture_text(metadata.get("away_team"))
+        candidate_home = normalize_fixture_text(candidate.get("home_team"))
+        candidate_away = normalize_fixture_text(candidate.get("away_team"))
+        direct = (self._name_similarity(home, candidate_home) + self._name_similarity(away, candidate_away)) / 2
+        reversed_score = (self._name_similarity(home, candidate_away) + self._name_similarity(away, candidate_home)) / 2
+        orientation = "reversed" if reversed_score > direct else "direct"
+        team_score = max(direct, reversed_score)
+
+        league_score = self._name_similarity(normalize_fixture_text(metadata.get("competition")), normalize_fixture_text(candidate.get("league")))
+        date_score = self._date_score(metadata.get("match_date"), candidate.get("match_date"))
+        time_score = self._time_score(metadata.get("kickoff_at"), candidate.get("kickoff_utc"))
+        id_score = self._id_score(metadata, candidate)
+
+        if id_score >= 1:
+            score = 100.0
+            method = "sportybet_statpal_provider_id"
+        else:
+            score = (team_score * 70) + (date_score * 15) + (league_score * 10) + (time_score * 5)
+            method = f"sportybet_statpal_team_date_{orientation}"
+        return round(score, 2), method, {
+            "team_score": round(team_score * 100, 2),
+            "league_score": round(league_score * 100, 2),
+            "date_score": round(date_score * 100, 2),
+            "time_score": round(time_score * 100, 2),
+            "id_score": round(id_score * 100, 2),
+            "orientation": orientation,
+        }
+
+    @staticmethod
+    def _name_similarity(left: str, right: str) -> float:
+        if not left or not right:
+            return 0.0
+        if left == right:
+            return 1.0
+        left_tokens = set(left.split())
+        right_tokens = set(right.split())
+        token_score = len(left_tokens & right_tokens) / max(len(left_tokens | right_tokens), 1)
+        fuzzy = SequenceMatcher(None, left, right).ratio()
+        return max(token_score, fuzzy)
+
+    @staticmethod
+    def _date_score(left, right) -> float:
+        if not left or not right:
+            return 0.0
+        delta = abs((left - right).days)
+        if delta == 0:
+            return 1.0
+        if delta == 1:
+            return 0.35
+        return 0.0
+
+    @staticmethod
+    def _time_score(left, right) -> float:
+        if not left or not right:
+            return 0.0
+        if timezone.is_naive(right):
+            right = timezone.make_aware(right)
+        if timezone.is_naive(left):
+            left = timezone.make_aware(left)
+        minutes = abs((left - right).total_seconds()) / 60
+        if minutes <= 10:
+            return 1.0
+        if minutes <= 60:
+            return 0.75
+        if minutes <= 180:
+            return 0.35
+        return 0.0
+
+    @staticmethod
+    def _id_score(metadata: dict[str, Any], candidate: dict[str, Any]) -> float:
+        ids = {
+            str(metadata.get("provider_event_id") or "").strip(),
+            str(metadata.get("provider_game_id") or "").strip(),
+        } - {""}
+        candidate_ids = {
+            str(candidate.get("provider_match_id") or "").strip(),
+            str(candidate.get("match_id") or "").replace("statpal:", "", 1).strip(),
+            *[str(item).strip() for item in candidate.get("fallback_match_ids") or []],
+        } - {""}
+        return 1.0 if ids & candidate_ids else 0.0
+
+    @staticmethod
+    def _mapping_candidate(mapping: ProviderFixtureMap) -> dict[str, Any]:
+        return {
+            "match_id": mapping.api_fixture_id,
+            "provider_match_id": ((mapping.payload or {}).get("candidate") or {}).get("provider_match_id", ""),
+            "league": mapping.api_league_name,
+            "home_team": mapping.api_home_team,
+            "away_team": mapping.api_away_team,
+            "match_score": float(mapping.confidence or 0),
+        }
+
+    @staticmethod
+    def _int_or_none(value):
+        try:
+            if value in (None, ""):
+                return None
+            return int(value)
+        except (TypeError, ValueError):
+            return None
 
     def get_team(self, *, provider: str, provider_team_id: str = "", provider_team_name: str = "") -> ProviderTeamMap | None:
         qs = ProviderTeamMap.objects.filter(provider=provider, active=True)

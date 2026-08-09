@@ -147,3 +147,125 @@ def poisson_over_under(expected: float, line: float, side: str = "over") -> tupl
     else:
         win = max(0.0, 1.0 - at_or_below)
     return win, push
+
+
+def poisson_range(expected: float, bucket: str) -> tuple[float | None, tuple[int | None, int | None]]:
+    """
+    Probability that a count lands in an inclusive bucket.
+
+    SportyBet range markets arrive as outcome labels such as ``0-8``, ``9-11`` or
+    ``12+``. Unlike over/under lines there is no push mass: a settled count either
+    belongs to the bucket or it does not.
+    """
+    expected = max(1e-6, float(expected))
+    raw = str(bucket or "").strip().replace(" ", "")
+    lower: int | None
+    upper: int | None
+    if raw.endswith("+"):
+        try:
+            lower = int(raw[:-1])
+        except ValueError:
+            return None, (None, None)
+        upper = None
+    elif "-" in raw:
+        start, _, end = raw.partition("-")
+        try:
+            lower, upper = int(start), int(end)
+        except ValueError:
+            return None, (None, None)
+    else:
+        try:
+            lower = upper = int(raw)
+        except ValueError:
+            return None, (None, None)
+
+    if lower is None or lower < 0 or (upper is not None and upper < lower):
+        return None, (None, None)
+
+    ceiling = max(30, int(expected * 4) + 12, (upper if upper is not None else lower) + 20)
+
+    def pmf(count: int) -> float:
+        return math.exp(-expected) * expected**count / math.factorial(count)
+
+    total = sum(pmf(count) for count in range(0, ceiling + 1))
+    if not total:
+        return 0.0, (lower, upper)
+
+    if upper is None:
+        mass = sum(pmf(count) for count in range(lower, ceiling + 1))
+    else:
+        mass = sum(pmf(count) for count in range(lower, upper + 1))
+    return min(max(mass / total, 0.0), 1.0), (lower, upper)
+
+
+def poisson_three_way(home_expected: float, away_expected: float) -> dict[str, float]:
+    """Independent count 1X2: home count wins, equal count, or away count wins."""
+    home_expected = max(1e-6, float(home_expected))
+    away_expected = max(1e-6, float(away_expected))
+    ceiling = max(30, int(max(home_expected, away_expected) * 4) + 12)
+
+    def pmf(rate: float, count: int) -> float:
+        return math.exp(-rate) * rate**count / math.factorial(count)
+
+    home_pmf = [pmf(home_expected, count) for count in range(0, ceiling + 1)]
+    away_pmf = [pmf(away_expected, count) for count in range(0, ceiling + 1)]
+    total = sum(home_pmf) * sum(away_pmf)
+    if not total:
+        return {"home": 0.0, "draw": 0.0, "away": 0.0}
+
+    home = draw = away = 0.0
+    for home_count, home_prob in enumerate(home_pmf):
+        for away_count, away_prob in enumerate(away_pmf):
+            mass = home_prob * away_prob
+            if home_count > away_count:
+                home += mass
+            elif home_count == away_count:
+                draw += mass
+            else:
+                away += mass
+
+    return {
+        "home": min(max(home / total, 0.0), 1.0),
+        "draw": min(max(draw / total, 0.0), 1.0),
+        "away": min(max(away / total, 0.0), 1.0),
+    }
+
+
+def poisson_handicap(home_expected: float, away_expected: float, line: float) -> dict[str, float]:
+    """
+    Two-way count handicap from the home side's perspective.
+
+    ``line=-1.5`` means home corners minus 1.5 versus away corners. The returned
+    push mass is non-zero only for whole-number lines.
+    """
+    home_expected = max(1e-6, float(home_expected))
+    away_expected = max(1e-6, float(away_expected))
+    line = float(line)
+    ceiling = max(30, int(max(home_expected, away_expected) * 4) + 12)
+
+    def pmf(rate: float, count: int) -> float:
+        return math.exp(-rate) * rate**count / math.factorial(count)
+
+    home_pmf = [pmf(home_expected, count) for count in range(0, ceiling + 1)]
+    away_pmf = [pmf(away_expected, count) for count in range(0, ceiling + 1)]
+    total = sum(home_pmf) * sum(away_pmf)
+    if not total:
+        return {"home": 0.0, "away": 0.0, "push": 0.0}
+
+    home = away = push = 0.0
+    for home_count, home_prob in enumerate(home_pmf):
+        for away_count, away_prob in enumerate(away_pmf):
+            mass = home_prob * away_prob
+            adjusted = home_count + line - away_count
+            if abs(adjusted) < 1e-12:
+                push += mass
+            elif adjusted > 0:
+                home += mass
+            else:
+                away += mass
+
+    return {
+        "home": min(max(home / total, 0.0), 1.0),
+        "away": min(max(away / total, 0.0), 1.0),
+        "push": min(max(push / total, 0.0), 1.0),
+    }

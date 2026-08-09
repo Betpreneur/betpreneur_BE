@@ -36,9 +36,9 @@ class DataCapability(StrEnum):
     MARKET_ODDS = "market_odds"
 
 
-# What each StatPal snapshot actually yields, verified against live responses on
-# 2026-08-08. Note there is no xG capability: StatPal exposes none on any endpoint,
-# so goal models are shots-informed at best and confidence caps must reflect that.
+# What each StatPal snapshot yields. The league match-stats endpoint now fills the
+# detailed-stats snapshot with fixture xG, corners, fouls, cards/events, referee and
+# lineup/player-stat context when available.
 STATPAL_SNAPSHOT_CAPABILITIES: dict[str, tuple[DataCapability, ...]] = {
     "team_stats": (
         DataCapability.TEAM_GOALS_FOR,

@@ -6,6 +6,8 @@ must never influence dispatch — that is what sent `First to Score H`, a team m
 into the player-props model.
 """
 
+from unittest.mock import patch
+
 from django.test import SimpleTestCase, TestCase
 
 from apps.algo.data.capability import (
@@ -24,6 +26,7 @@ from apps.algo.evaluators.registry import (
     modelled_families,
     required_capabilities,
 )
+from apps.algo.data.planner import capability_for_descriptor
 from apps.algo.market_taxonomy import describe_market
 from apps.algo.statpal_advisory import statpal_market_advisory
 
@@ -35,7 +38,12 @@ class AssessmentTypeTests(SimpleTestCase):
 
     def test_result_families_are_quantitative_since_the_score_matrix_landed(self):
         # These were heuristic (a constant plus nudges) until ADR-001 shipped.
-        for family in ["match_result", "double_chance", "draw_no_bet", "btts", "clean_sheet"]:
+        for family in [
+            "match_result", "double_chance", "draw_no_bet", "btts", "clean_sheet",
+            "result_total_goals", "result_btts", "total_btts",
+            "double_chance_btts", "double_chance_total_goals",
+            "result_or_total_goals", "result_or_btts", "result_or_clean_sheet",
+        ]:
             self.assertEqual(assessment_type_for(family), QUANTITATIVE, family)
 
     def test_unmodelled_families_report_no_model(self):
@@ -162,3 +170,20 @@ class CapabilityPlannerTests(SimpleTestCase):
 
         self.assertIn(DataCapability.LINEUP_CONFIRMED, needed)
         self.assertIn(DataCapability.PLAYER_SEASON_STATS, needed)
+
+    def test_count_market_capability_accepts_detailed_stats_snapshot_fallback(self):
+        context = {
+            "snapshots": {
+                "detailed_stats": {
+                    "summary": {
+                        "home_corners": 6,
+                        "away_corners": 5,
+                    }
+                }
+            }
+        }
+        with patch("apps.algo.scoring.rate_profiles.team_rate_profile_service.profile_for", return_value=None):
+            capability = capability_for_descriptor(describe_market("Corners Over 9.5"), fixture={}, statpal_context=context)
+
+        self.assertTrue(capability["scoreable"])
+        self.assertEqual(capability["data_quality"], "limited")

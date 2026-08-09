@@ -104,11 +104,40 @@ class StatPalClient:
     def soccer_leagues(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
         return self.soccer_endpoint("SOCCER_LEAGUES", params=params)
 
+    def soccer_league_seasons(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        return self.soccer_endpoint("SOCCER_LEAGUE_SEASONS", params=params)
+
     def soccer_daily_matches(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
         return self.soccer_endpoint("SOCCER_MATCHES_DAILY", params=params)
 
     def soccer_league_matches(self, league_id: str | int, params: dict[str, Any] | None = None) -> dict[str, Any]:
         return self.soccer_endpoint("SOCCER_LEAGUE_MATCHES", params=params, league_id=league_id)
+
+    def soccer_league_match_stats(self, league_id: str | int, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        return self.soccer_endpoint("SOCCER_LEAGUE_MATCH_STATS", params=params, league_id=league_id)
+
+    def soccer_league_standings(self, league_id: str | int, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        return self.soccer_endpoint("SOCCER_LEAGUE_STANDINGS", params=params, league_id=league_id)
+
+    def soccer_league_stats(self, league_id: str | int, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        return self.soccer_endpoint("SOCCER_LEAGUE_STATS", params=params, league_id=league_id)
+
+    def soccer_head_to_head(self, team1_id: str | int, team2_id: str | int, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        request_params = {**(params or {}), "team1_id": team1_id, "team2_id": team2_id}
+        return self.soccer_endpoint("SOCCER_HEAD_TO_HEAD", params=request_params)
+
+    def soccer_injuries_suspensions(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        return self.soccer_endpoint("SOCCER_INJURIES_SUSPENSIONS", params=params)
+
+    def soccer_team(self, team_id: str | int, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        return self.soccer_endpoint("SOCCER_TEAM", params=params, team_id=team_id)
+
+    def soccer_player(self, player_id: str | int, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        return self.soccer_endpoint("SOCCER_PLAYER", params=params, player_id=player_id)
+
+    def soccer_team_lineups(self, match_id: str | int, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        request_params = {**(params or {}), "match_id": match_id}
+        return self.soccer_endpoint("SOCCER_TEAM_LINEUPS", params=request_params)
 
     def soccer_predictions(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
         return self.soccer_endpoint("SOCCER_PREDICTIONS", params=params)

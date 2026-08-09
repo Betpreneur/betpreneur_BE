@@ -105,6 +105,184 @@ def total_goals(matrix: ScoreMatrix, line: float, side: str = "over") -> MarketO
     return MarketOutcome(win=win, push=push)
 
 
+def result_total_goals(matrix: ScoreMatrix, line: float, side: str) -> MarketOutcome:
+    """Combined 1X2 and total-goals market, e.g. Home & Over 2.5."""
+    result_side, _, total_side = str(side or "").partition("_")
+    line = float(line)
+
+    def result_matches(home: int, away: int) -> bool:
+        if result_side == "home":
+            return home > away
+        if result_side == "draw":
+            return home == away
+        if result_side == "away":
+            return home < away
+        return False
+
+    def total_matches(home: int, away: int) -> bool:
+        total = home + away
+        if total_side == "over":
+            return total > line
+        if total_side == "under":
+            return total < line
+        return False
+
+    push = matrix.sum_where(lambda home, away: home + away == line) if _is_whole(line) else 0.0
+    win = matrix.sum_where(lambda home, away: result_matches(home, away) and total_matches(home, away))
+    return MarketOutcome(win=win, push=push)
+
+
+def result_btts(matrix: ScoreMatrix, side: str) -> float:
+    """Combined 1X2 and BTTS market, e.g. Home & Yes."""
+    result_side, _, btts_side = str(side or "").partition("_")
+
+    def result_matches(home: int, away: int) -> bool:
+        if result_side == "home":
+            return home > away
+        if result_side == "draw":
+            return home == away
+        if result_side == "away":
+            return home < away
+        return False
+
+    def btts_matches(home: int, away: int) -> bool:
+        both_score = home > 0 and away > 0
+        return both_score if btts_side == "yes" else not both_score if btts_side == "no" else False
+
+    return matrix.sum_where(lambda home, away: result_matches(home, away) and btts_matches(home, away))
+
+
+def total_btts(matrix: ScoreMatrix, line: float, side: str) -> MarketOutcome:
+    """Combined total-goals and BTTS market, e.g. Over 2.5 & Yes."""
+    total_side, _, btts_side = str(side or "").partition("_")
+    line = float(line)
+
+    def total_matches(home: int, away: int) -> bool:
+        total = home + away
+        if total_side == "over":
+            return total > line
+        if total_side == "under":
+            return total < line
+        return False
+
+    def btts_matches(home: int, away: int) -> bool:
+        both_score = home > 0 and away > 0
+        return both_score if btts_side == "yes" else not both_score if btts_side == "no" else False
+
+    push = matrix.sum_where(lambda home, away: home + away == line) if _is_whole(line) else 0.0
+    win = matrix.sum_where(lambda home, away: total_matches(home, away) and btts_matches(home, away))
+    return MarketOutcome(win=win, push=push)
+
+
+def double_chance_btts(matrix: ScoreMatrix, side: str) -> float:
+    """Combined double-chance and BTTS market, e.g. Home/Draw & Yes."""
+    dc_side, _, btts_side = str(side or "").rpartition("_")
+
+    def dc_matches(home: int, away: int) -> bool:
+        if dc_side == "home_or_draw":
+            return home >= away
+        if dc_side == "home_or_away":
+            return home != away
+        if dc_side == "draw_or_away":
+            return home <= away
+        return False
+
+    def btts_matches(home: int, away: int) -> bool:
+        both_score = home > 0 and away > 0
+        return both_score if btts_side == "yes" else not both_score if btts_side == "no" else False
+
+    return matrix.sum_where(lambda home, away: dc_matches(home, away) and btts_matches(home, away))
+
+
+def double_chance_total_goals(matrix: ScoreMatrix, line: float, side: str) -> MarketOutcome:
+    """Combined double-chance and total-goals market, e.g. Home/Draw & Over 2.5."""
+    dc_side, _, total_side = str(side or "").rpartition("_")
+    line = float(line)
+
+    def dc_matches(home: int, away: int) -> bool:
+        if dc_side == "home_or_draw":
+            return home >= away
+        if dc_side == "home_or_away":
+            return home != away
+        if dc_side == "draw_or_away":
+            return home <= away
+        return False
+
+    def total_matches(home: int, away: int) -> bool:
+        total = home + away
+        if total_side == "over":
+            return total > line
+        if total_side == "under":
+            return total < line
+        return False
+
+    push = matrix.sum_where(lambda home, away: home + away == line) if _is_whole(line) else 0.0
+    win = matrix.sum_where(lambda home, away: dc_matches(home, away) and total_matches(home, away))
+    return MarketOutcome(win=win, push=push)
+
+
+def _result_matches(result_side: str, home: int, away: int) -> bool:
+    if result_side == "home":
+        return home > away
+    if result_side == "draw":
+        return home == away
+    if result_side == "away":
+        return home < away
+    return False
+
+
+def result_or_total_goals(matrix: ScoreMatrix, line: float, side: str) -> MarketOutcome:
+    """Either selected 1X2 result happens or the selected total-goals side happens."""
+    combo_side, _, answer = str(side or "").rpartition("_")
+    result_side, _, total_side = combo_side.partition("_")
+    line = float(line)
+
+    def total_matches(home: int, away: int) -> bool:
+        total = home + away
+        if total_side == "over":
+            return total > line
+        if total_side == "under":
+            return total < line
+        return False
+
+    def union_matches(home: int, away: int) -> bool:
+        return _result_matches(result_side, home, away) or total_matches(home, away)
+
+    push = matrix.sum_where(lambda home, away: home + away == line) if _is_whole(line) else 0.0
+    if answer == "yes":
+        win = matrix.sum_where(lambda home, away: union_matches(home, away))
+    else:
+        win = matrix.sum_where(lambda home, away: not union_matches(home, away) and home + away != line)
+    return MarketOutcome(win=win, push=push)
+
+
+def result_or_btts(matrix: ScoreMatrix, side: str) -> float:
+    """Either selected 1X2 result happens or both teams score."""
+    combo_side, _, answer = str(side or "").rpartition("_")
+    result_side, _, _btts = combo_side.partition("_")
+
+    def union_matches(home: int, away: int) -> bool:
+        return _result_matches(result_side, home, away) or (home > 0 and away > 0)
+
+    if answer == "yes":
+        return matrix.sum_where(union_matches)
+    return matrix.sum_where(lambda home, away: not union_matches(home, away))
+
+
+def result_or_clean_sheet(matrix: ScoreMatrix, side: str) -> float:
+    """Either selected 1X2 result happens or at least one team keeps a clean sheet."""
+    combo_side, _, answer = str(side or "").rpartition("_")
+    result_side, _, _clean_sheet = combo_side.partition("_")
+
+    def union_matches(home: int, away: int) -> bool:
+        any_clean_sheet = home == 0 or away == 0
+        return _result_matches(result_side, home, away) or any_clean_sheet
+
+    if answer == "yes":
+        return matrix.sum_where(union_matches)
+    return matrix.sum_where(lambda home, away: not union_matches(home, away))
+
+
 def team_total_goals(matrix: ScoreMatrix, line: float, *, team: str, side: str = "over") -> MarketOutcome:
     line = float(line)
     distribution = matrix.home_goal_distribution() if team == "home" else matrix.away_goal_distribution()
@@ -191,6 +369,14 @@ DERIVED_FAMILIES = (
     "double_chance",
     "draw_no_bet",
     "total_goals",
+    "result_total_goals",
+    "result_btts",
+    "total_btts",
+    "double_chance_btts",
+    "double_chance_total_goals",
+    "result_or_total_goals",
+    "result_or_btts",
+    "result_or_clean_sheet",
     "team_total_goals",
     "btts",
     "clean_sheet",

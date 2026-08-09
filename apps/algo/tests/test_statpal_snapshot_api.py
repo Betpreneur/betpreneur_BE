@@ -29,7 +29,11 @@ class StatPalSnapshotApiTests(TestCase):
             snapshot_type=StatPalFixtureSnapshot.SnapshotType.LINEUPS,
             source_endpoint="SOCCER_LINEUPS",
             summary={"home_confirmed": True},
-            payload={"large": "raw provider payload should not be returned"},
+            payload={
+                "id": "statpal:lineups:statpal-match-1",
+                "raw": {"large": "raw provider payload should not be returned"},
+                "home": {"starting_xi": [{"id": "p1", "raw": {"hidden": True}}]},
+            },
         )
         self.client.force_authenticate(self.user)
 
@@ -39,8 +43,12 @@ class StatPalSnapshotApiTests(TestCase):
         body = response.json()
         self.assertEqual(body["match_id"], "1581037")
         self.assertTrue(body["context"]["available"])
-        self.assertEqual(body["context"]["snapshots"]["lineups"]["summary"]["home_confirmed"], True)
-        self.assertNotIn("payload", body["context"]["snapshots"]["lineups"])
+        lineups = body["context"]["snapshots"]["lineups"]
+        self.assertEqual(lineups["summary"]["home_confirmed"], True)
+        self.assertTrue(lineups["payload_available"])
+        self.assertEqual(lineups["payload"]["id"], "statpal:lineups:statpal-match-1")
+        self.assertNotIn("raw", lineups["payload"])
+        self.assertNotIn("raw", lineups["payload"]["home"]["starting_xi"][0])
 
     def test_fixture_context_requires_fixture_identifier(self):
         self.client.force_authenticate(self.user)

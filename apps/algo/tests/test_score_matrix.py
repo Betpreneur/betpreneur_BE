@@ -15,13 +15,21 @@ from apps.algo.scoring.derive import (
     clean_sheet,
     correct_score,
     double_chance,
+    double_chance_btts,
+    double_chance_total_goals,
     draw,
     draw_no_bet,
     european_handicap,
     exact_goals,
     home_win,
     odd_even,
+    result_or_btts,
+    result_or_clean_sheet,
+    result_or_total_goals,
+    result_btts,
+    result_total_goals,
     team_total_goals,
+    total_btts,
     total_goals,
     winning_margin,
 )
@@ -128,6 +136,80 @@ class ResultMarketTests(SimpleTestCase):
         expected = home_win(self.matrix) / (home_win(self.matrix) + away_win(self.matrix))
 
         self.assertAlmostEqual(outcome.probability, expected, places=6)
+
+    def test_result_total_goals_partitions_result_and_total(self):
+        parts = [
+            result_total_goals(self.matrix, 2.5, "home_under").win,
+            result_total_goals(self.matrix, 2.5, "home_over").win,
+            result_total_goals(self.matrix, 2.5, "draw_under").win,
+            result_total_goals(self.matrix, 2.5, "draw_over").win,
+            result_total_goals(self.matrix, 2.5, "away_under").win,
+            result_total_goals(self.matrix, 2.5, "away_over").win,
+        ]
+
+        self.assertAlmostEqual(sum(parts), 1.0, places=9)
+
+    def test_result_total_goals_respects_the_selected_line(self):
+        low_line = result_total_goals(self.matrix, 1.5, "home_over")
+        high_line = result_total_goals(self.matrix, 4.5, "home_over")
+
+        self.assertGreater(low_line.probability, high_line.probability)
+
+    def test_result_btts_partitions_the_result_space(self):
+        parts = [
+            result_btts(self.matrix, "home_yes"),
+            result_btts(self.matrix, "home_no"),
+            result_btts(self.matrix, "draw_yes"),
+            result_btts(self.matrix, "draw_no"),
+            result_btts(self.matrix, "away_yes"),
+            result_btts(self.matrix, "away_no"),
+        ]
+
+        self.assertAlmostEqual(sum(parts), 1.0, places=9)
+
+    def test_total_btts_partitions_total_and_btts_space(self):
+        parts = [
+            total_btts(self.matrix, 2.5, "over_yes").win,
+            total_btts(self.matrix, 2.5, "over_no").win,
+            total_btts(self.matrix, 2.5, "under_yes").win,
+            total_btts(self.matrix, 2.5, "under_no").win,
+        ]
+
+        self.assertAlmostEqual(sum(parts), 1.0, places=9)
+
+    def test_double_chance_btts_matches_double_chance_components(self):
+        combined = (
+            double_chance_btts(self.matrix, "home_or_draw_yes")
+            + double_chance_btts(self.matrix, "home_or_draw_no")
+        )
+
+        self.assertAlmostEqual(combined, double_chance(self.matrix, "home_or_draw"), places=9)
+
+    def test_double_chance_total_goals_matches_double_chance_components(self):
+        combined = (
+            double_chance_total_goals(self.matrix, 2.5, "draw_or_away_over").win
+            + double_chance_total_goals(self.matrix, 2.5, "draw_or_away_under").win
+        )
+
+        self.assertAlmostEqual(combined, double_chance(self.matrix, "draw_or_away"), places=9)
+
+    def test_result_or_total_yes_no_partition_the_space(self):
+        yes = result_or_total_goals(self.matrix, 2.5, "home_over_yes")
+        no = result_or_total_goals(self.matrix, 2.5, "home_over_no")
+
+        self.assertAlmostEqual(yes.win + no.win, 1.0, places=9)
+
+    def test_result_or_btts_yes_no_partition_the_space(self):
+        yes = result_or_btts(self.matrix, "draw_btts_yes")
+        no = result_or_btts(self.matrix, "draw_btts_no")
+
+        self.assertAlmostEqual(yes + no, 1.0, places=9)
+
+    def test_result_or_clean_sheet_yes_no_partition_the_space(self):
+        yes = result_or_clean_sheet(self.matrix, "away_clean_sheet_yes")
+        no = result_or_clean_sheet(self.matrix, "away_clean_sheet_no")
+
+        self.assertAlmostEqual(yes + no, 1.0, places=9)
 
 
 class TotalsTests(SimpleTestCase):

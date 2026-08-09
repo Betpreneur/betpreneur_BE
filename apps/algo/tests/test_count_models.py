@@ -6,11 +6,13 @@ not carry, so they returned a constant that ignored the line while claiming to b
 quantitative. `Corners Over 9.5` and `Corners Over 12.5` scored identically.
 """
 
+from unittest.mock import patch
+
 from django.test import SimpleTestCase, TestCase
 
 from apps.algo.evaluators import count_market_evaluator
 from apps.algo.evaluators.registry import COUNT_MODEL_ENGINE, evaluator_for
-from apps.algo.market_taxonomy import describe_market
+from apps.algo.market_taxonomy import MarketDescriptor, describe_market
 from apps.algo.models import TeamRateProfile
 from apps.algo.scoring import counts
 from apps.algo.scoring.rate_profiles import parse_team_payload
@@ -39,6 +41,37 @@ class PoissonLineTests(SimpleTestCase):
         busy, _ = counts.poisson_over_under(13.0, 10.5, "over")
 
         self.assertGreater(busy, quiet)
+
+    def test_range_probability_uses_inclusive_bucket(self):
+        exact_mass, _ = counts.poisson_range(10.0, "9-11")
+        low_tail, _ = counts.poisson_range(10.0, "0-8")
+        high_tail, parsed = counts.poisson_range(10.0, "12+")
+
+        self.assertGreater(exact_mass, 0)
+        self.assertGreater(low_tail, 0)
+        self.assertGreater(high_tail, 0)
+        self.assertEqual(parsed, (12, None))
+        self.assertAlmostEqual(exact_mass + low_tail + high_tail, 1.0, places=5)
+
+    def test_invalid_range_reports_no_probability(self):
+        probability, parsed = counts.poisson_range(10.0, "many")
+
+        self.assertIsNone(probability)
+        self.assertEqual(parsed, (None, None))
+
+    def test_three_way_count_probabilities_sum_to_one(self):
+        probabilities = counts.poisson_three_way(6.0, 4.0)
+
+        self.assertGreater(probabilities["home"], probabilities["away"])
+        self.assertAlmostEqual(sum(probabilities.values()), 1.0, places=5)
+
+    def test_count_handicap_probabilities_sum_to_one(self):
+        probabilities = counts.poisson_handicap(3.0, 2.0, -0.5)
+
+        self.assertGreater(probabilities["home"], 0)
+        self.assertGreater(probabilities["away"], 0)
+        self.assertEqual(probabilities["push"], 0.0)
+        self.assertAlmostEqual(sum(probabilities.values()), 1.0, places=5)
 
 
 class ForecastTests(SimpleTestCase):
@@ -108,6 +141,73 @@ class TeamPayloadParsingTests(SimpleTestCase):
         self.assertEqual(parse_team_payload({}), {})
 
 
+class CountEvaluatorSnapshotFallbackTests(SimpleTestCase):
+    def _descriptor(self, family, selection, *, line="", team="", period="match"):
+        return MarketDescriptor(
+            raw=f"{family} {selection}",
+            canonical=f"{family} {selection}",
+            code=f"{family}:{selection}",
+            family=family,
+            category=family,
+            selection=selection,
+            side=selection,
+            line=line,
+            team=team,
+            period=period,
+            requires_corner_stats=True,
+        )
+
+    def test_corner_market_can_use_statpal_detailed_stats_snapshot_without_team_rates(self):
+        fixture = {
+            "hname": "Nobody",
+            "aname": "Nowhere",
+            "statpal_context": {
+                "snapshots": {
+                    "detailed_stats": {
+                        "summary": {
+                            "home_corners": 6,
+                            "away_corners": 5,
+                        }
+                    }
+                }
+            },
+        }
+
+        with patch("apps.algo.evaluators.count_market_evaluator._profiles", return_value=(None, None)):
+            result = count_market_evaluator.evaluate(describe_market("Corners Over 9.5"), fixture=fixture)
+
+        self.assertTrue(result["available"])
+        self.assertEqual(result["basis"], "corners_count_model")
+        self.assertEqual(result["evidence"]["expected_corners"], 11)
+        self.assertEqual(result["evidence"]["sources"], ["statpal_detailed_stats"])
+
+    def test_team_cards_can_use_statpal_detailed_stats_snapshot_without_team_rates(self):
+        fixture = {
+            "hname": "Nobody",
+            "aname": "Nowhere",
+            "statpal_context": {
+                "snapshots": {
+                    "detailed_stats": {
+                        "summary": {
+                            "home_yellow_cards": 2,
+                            "home_red_cards": 1,
+                            "away_yellow_cards": 1,
+                            "away_red_cards": 0,
+                        }
+                    }
+                }
+            },
+        }
+        descriptor = self._descriptor("team_cards", "over", line="2.5", team="home")
+
+        with patch("apps.algo.evaluators.count_market_evaluator._profiles", return_value=(None, None)):
+            result = count_market_evaluator.evaluate(descriptor, fixture=fixture)
+
+        self.assertTrue(result["available"])
+        self.assertEqual(result["evidence"]["expected_cards"], 3)
+        self.assertEqual(result["evidence"]["sources"], ["statpal_detailed_stats"])
+
+
 class CountEvaluatorTests(TestCase):
     def setUp(self):
         TeamRateProfile.objects.create(
@@ -124,6 +224,34 @@ class CountEvaluatorTests(TestCase):
 
     def _evaluate(self, market):
         return count_market_evaluator.evaluate(describe_market(market), fixture=self.fixture)
+
+    def _range_descriptor(self, family, bucket, *, team=""):
+        return MarketDescriptor(
+            raw=f"{family} {bucket}",
+            canonical=f"{family} {bucket}",
+            code=f"{family}:{bucket}",
+            family=family,
+            category=family,
+            selection=bucket,
+            side=bucket,
+            team=team,
+            requires_corner_stats=True,
+        )
+
+    def _descriptor(self, family, selection, *, line="", team="", period="match"):
+        return MarketDescriptor(
+            raw=f"{family} {selection}",
+            canonical=f"{family} {selection}",
+            code=f"{family}:{selection}",
+            family=family,
+            category=family,
+            selection=selection,
+            side=selection,
+            line=line,
+            team=team,
+            period=period,
+            requires_corner_stats=True,
+        )
 
     def test_corner_lines_no_longer_score_identically(self):
         low = self._evaluate("Corners Over 9.5")
@@ -145,6 +273,101 @@ class CountEvaluatorTests(TestCase):
 
         self.assertIn("expected_corners", evidence)
         self.assertEqual(evidence["sources"], ["home_team_profile", "away_team_profile"])
+
+    def test_corner_range_uses_range_probability(self):
+        descriptor = self._range_descriptor("corner_range", "9-11")
+
+        result = count_market_evaluator.evaluate(descriptor, fixture=self.fixture)
+
+        self.assertTrue(result["available"])
+        self.assertEqual(result["basis"], "corners_range_count_model")
+        self.assertEqual(result["evidence"]["range_lower"], 9)
+        self.assertEqual(result["evidence"]["range_upper"], 11)
+        self.assertGreater(result["probability"], 0)
+
+    def test_team_corner_range_uses_selected_team_profile(self):
+        home = self._range_descriptor("team_corner_range", "7+", team="home")
+        away = self._range_descriptor("team_corner_range", "7+", team="away")
+
+        home_result = count_market_evaluator.evaluate(home, fixture=self.fixture)
+        away_result = count_market_evaluator.evaluate(away, fixture=self.fixture)
+
+        self.assertTrue(home_result["available"])
+        self.assertTrue(away_result["available"])
+        self.assertGreater(home_result["probability"], away_result["probability"])
+        self.assertEqual(home_result["evidence"]["expected_corners"], 6.5)
+        self.assertEqual(away_result["evidence"]["expected_corners"], 4.0)
+
+    def test_invalid_corner_range_declines(self):
+        descriptor = self._range_descriptor("corner_range", "many")
+
+        result = count_market_evaluator.evaluate(descriptor, fixture=self.fixture)
+
+        self.assertFalse(result["available"])
+        self.assertEqual(result["basis"], "count_market_invalid_range")
+        self.assertIn("invalid_range", result["warnings"])
+
+    def test_first_half_corner_total_is_period_adjusted(self):
+        full = self._descriptor("corners_total", "over", line="5.5")
+        first_half = self._descriptor("corners_total", "over", line="5.5", period="1st_half")
+
+        full_result = count_market_evaluator.evaluate(full, fixture=self.fixture)
+        first_half_result = count_market_evaluator.evaluate(first_half, fixture=self.fixture)
+
+        self.assertLess(first_half_result["evidence"]["expected_corners"], full_result["evidence"]["expected_corners"])
+        self.assertEqual(first_half_result["evidence"]["period_factor"], 0.45)
+        self.assertIn("period_expectation_scaled", first_half_result["warnings"])
+
+    def test_first_half_team_corner_total_is_period_adjusted(self):
+        full = self._descriptor("team_corners", "over", line="2.5", team="home")
+        first_half = self._descriptor("team_corners", "over", line="2.5", team="home", period="1st_half")
+
+        full_result = count_market_evaluator.evaluate(full, fixture=self.fixture)
+        first_half_result = count_market_evaluator.evaluate(first_half, fixture=self.fixture)
+
+        self.assertLess(first_half_result["evidence"]["expected_corners"], full_result["evidence"]["expected_corners"])
+        self.assertEqual(first_half_result["evidence"]["period_factor"], 0.45)
+        self.assertIn("period_expectation_scaled", first_half_result["warnings"])
+
+    def test_corner_result_uses_team_corner_poisson_1x2(self):
+        home = self._descriptor("corners_result", "home")
+        away = self._descriptor("corners_result", "away")
+
+        home_result = count_market_evaluator.evaluate(home, fixture=self.fixture)
+        away_result = count_market_evaluator.evaluate(away, fixture=self.fixture)
+
+        self.assertTrue(home_result["available"])
+        self.assertEqual(home_result["basis"], "corners_result_count_model")
+        self.assertGreater(home_result["probability"], away_result["probability"])
+        self.assertIn("draw_probability", home_result["evidence"])
+
+    def test_cards_result_uses_team_card_poisson_1x2(self):
+        home = self._descriptor("cards_result", "home")
+        away = self._descriptor("cards_result", "away")
+
+        home_result = count_market_evaluator.evaluate(home, fixture=self.fixture)
+        away_result = count_market_evaluator.evaluate(away, fixture=self.fixture)
+
+        self.assertTrue(home_result["available"])
+        self.assertEqual(home_result["basis"], "cards_result_count_model")
+        self.assertGreater(home_result["probability"], 0)
+        self.assertGreater(away_result["probability"], 0)
+        self.assertIn("expected_home_cards", home_result["evidence"])
+        self.assertIn("draw_probability", home_result["evidence"])
+
+    def test_corner_handicap_uses_team_corner_poisson_handicap(self):
+        home = self._descriptor("corner_handicap", "home", line="-0.5", period="1st_half")
+        away = self._descriptor("corner_handicap", "away", line="-0.5", period="1st_half")
+
+        home_result = count_market_evaluator.evaluate(home, fixture=self.fixture)
+        away_result = count_market_evaluator.evaluate(away, fixture=self.fixture)
+
+        self.assertTrue(home_result["available"])
+        self.assertEqual(home_result["basis"], "corners_handicap_count_model")
+        self.assertGreater(home_result["probability"], 0)
+        self.assertGreater(away_result["probability"], 0)
+        self.assertAlmostEqual(home_result["probability"] + away_result["probability"], 1.0, places=5)
+        self.assertEqual(home_result["evidence"]["period_factor"], 0.45)
 
     def test_over_and_under_are_complementary(self):
         over = self._evaluate("Corners Over 9.5")["probability"]
@@ -172,7 +395,11 @@ class CountEvaluatorTests(TestCase):
 
 class CountRegistryTests(SimpleTestCase):
     def test_count_families_use_the_count_engine(self):
-        for family in ["corners_total", "team_corners", "cards_total", "team_cards", "booking_points"]:
+        for family in [
+            "corners_total", "team_corners", "corner_range", "team_corner_range",
+            "corners_result", "corner_handicap",
+            "cards_total", "cards_result", "team_cards", "booking_points",
+        ]:
             self.assertEqual(evaluator_for(family).engine, COUNT_MODEL_ENGINE, family)
 
     def test_only_one_entry_exists_per_family(self):

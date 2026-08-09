@@ -24,8 +24,9 @@ from .capability import snapshots_for_capabilities
 
 DEFAULT_CALL_BUDGET = 120
 
-# Ceilings for a model-backed assessment. Deliberately below the snapshot-era 88:
-# StatPal exposes no xG, so even a well-fitted league is shots-informed at best.
+# Ceilings for a model-backed assessment. These are deliberately below perfect
+# certainty because fitted rates and fixture snapshots can still be thin or live-state
+# dependent.
 MODEL_CONFIDENCE_CAPS = {"strong": 85, "medium": 75, "limited": 62, "poor": 0}
 
 
@@ -66,6 +67,20 @@ def model_backed_capability(family: str, data_quality: str) -> dict:
     }
 
 
+def _detailed_stats_supports_count_market(family: str, statpal_context) -> bool:
+    summary = ((((statpal_context or {}).get("snapshots") or {}).get("detailed_stats") or {}).get("summary") or {})
+    if not summary:
+        return False
+    if family in {"corners_total", "team_corners", "corner_range", "team_corner_range", "corners_result", "corner_handicap"}:
+        return summary.get("home_corners") is not None and summary.get("away_corners") is not None
+    if family in {"cards_total", "team_cards", "booking_points", "cards", "cards_result"}:
+        return any(
+            summary.get(key) is not None
+            for key in ("home_yellow_cards", "away_yellow_cards", "home_red_cards", "away_red_cards", "total_cards", "booking_points")
+        )
+    return False
+
+
 def capability_for_descriptor(descriptor, *, fixture=None, statpal_context=None):
     """
     Capability for a market, routed by whichever engine actually serves it.
@@ -96,6 +111,7 @@ def capability_for_descriptor(descriptor, *, fixture=None, statpal_context=None)
         from ..scoring.rate_profiles import team_rate_profile_service
 
         game = fixture or {}
+        context = statpal_context or game.get("statpal_context") or {}
         home = team_rate_profile_service.profile_for(
             team_id=str(game.get("hid") or ""), team_name=game.get("hname") or game.get("home_team") or ""
         )
@@ -103,7 +119,9 @@ def capability_for_descriptor(descriptor, *, fixture=None, statpal_context=None)
             team_id=str(game.get("aid") or ""), team_name=game.get("aname") or game.get("away_team") or ""
         )
         available = [profile for profile in (home, away) if profile is not None]
-        if not available:
+        if not available and _detailed_stats_supports_count_market(descriptor.family, context):
+            quality = "limited"
+        elif not available:
             quality = "poor"
         elif len(available) == 2 and min(profile.matches for profile in available) >= 8:
             quality = "medium"
@@ -163,6 +181,8 @@ class FixtureHydrator:
         match_id="",
         provider_match_id="",
         provider_competition_id="",
+        home_team_id="",
+        away_team_id="",
     ) -> dict:
         family = getattr(descriptor, "family", "") or ""
         needed = snapshots_for_family(family)
@@ -171,7 +191,12 @@ class FixtureHydrator:
             self.stats.served_by_model += 1
             return dict(_EMPTY_BUNDLE)
 
-        key = (str(match_id or provider_match_id or ""), tuple(sorted(needed)))
+        key = (
+            str(match_id or provider_match_id or ""),
+            tuple(sorted(needed)),
+            str(home_team_id or ""),
+            str(away_team_id or ""),
+        )
         if key in self._cache:
             self.stats.served_from_cache += 1
             return self._cache[key]
@@ -187,6 +212,17 @@ class FixtureHydrator:
             provider_competition_id=provider_competition_id,
         )
         self.stats.calls_used += 1
+        if "team_stats" in needed and (home_team_id or away_team_id) and self.stats.calls_used < self._budget:
+            team_refresh = self.service.refresh_fixture_team_stats(
+                match_id=match_id,
+                provider_match_id=provider_match_id,
+                provider_competition_id=provider_competition_id,
+                home_team_id=home_team_id,
+                away_team_id=away_team_id,
+            )
+            bundle["team_stats_refresh"] = team_refresh
+            bundle["context"] = self.service.fixture_context(match_id=match_id, provider_match_id=provider_match_id)
+            self.stats.calls_used += int((team_refresh.get("api_usage") or {}).get("attempted_calls") or 0)
         self.stats.fixtures_hydrated.add(key[0])
         self._cache[key] = bundle
         return bundle

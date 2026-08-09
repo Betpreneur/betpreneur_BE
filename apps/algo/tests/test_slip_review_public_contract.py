@@ -1,8 +1,8 @@
 from django.contrib.auth import get_user_model
-from django.test import TestCase
+from django.test import SimpleTestCase, TestCase
 
 from apps.algo.models import SlipReview
-from apps.algo.views import _manual_review_summary, _slip_review_payload
+from apps.algo.views import _manual_review_summary, _public_price_check_from_card, _slip_review_payload
 
 
 def _sample_replace_result():
@@ -28,6 +28,16 @@ def _sample_replace_result():
             "advisory_evidence": {
                 "historical_accuracy": 41.2,
                 "sample_size": 713,
+                "statpal": {
+                    "odds_value": {
+                        "offered_odds": 1.80,
+                        "statpal_reference_odds": 2.00,
+                        "value_edge_pct": -10.0,
+                        "matched_market": "1X2",
+                        "matched_outcome": "Away",
+                        "bookmaker": "10Bet",
+                    }
+                },
             },
         },
         "replacement_market": {
@@ -119,6 +129,80 @@ def _sample_market_not_found_without_replacement_but_scored():
     return result
 
 
+class PublicPriceCheckTests(SimpleTestCase):
+    def test_public_price_check_summarizes_positive_edge(self):
+        price_check = _public_price_check_from_card(
+            {
+                "evidence": {
+                    "statpal": {
+                        "odds_value": {
+                            "offered_odds": 2.20,
+                            "statpal_reference_odds": 2.00,
+                            "statpal_reference_min_odds": 1.90,
+                            "statpal_reference_max_odds": 2.20,
+                            "statpal_reference_bookmaker_count": 3,
+                            "statpal_reference_spread_pct": 15.0,
+                            "value_edge_pct": 10.0,
+                            "reference_method": "median_bookmaker_odds",
+                            "reference_reliability": "solid",
+                            "matched_market": "Over/Under",
+                            "matched_outcome": "Over",
+                            "bookmaker": "10Bet",
+                        }
+                    }
+                }
+            }
+        )
+
+        self.assertEqual(price_check["status"], "positive_edge")
+        self.assertEqual(price_check["edge_percent"], 10.0)
+        self.assertEqual(price_check["reference_bookmaker_count"], 3)
+        self.assertEqual(price_check["reference_spread_percent"], 15.0)
+        self.assertEqual(price_check["reference_method"], "median_bookmaker_odds")
+        self.assertEqual(price_check["reference_reliability"], "solid")
+        self.assertIn("better than the StatPal reference", price_check["message"])
+
+    def test_public_price_check_warns_on_volatile_reference(self):
+        price_check = _public_price_check_from_card(
+            {
+                "evidence": {
+                    "odds_value": {
+                        "offered_odds": 2.20,
+                        "statpal_reference_odds": 2.00,
+                        "statpal_reference_min_odds": 1.50,
+                        "statpal_reference_max_odds": 2.70,
+                        "statpal_reference_bookmaker_count": 3,
+                        "statpal_reference_spread_pct": 60.0,
+                        "value_edge_pct": 10.0,
+                        "reference_method": "median_bookmaker_odds",
+                        "reference_reliability": "volatile",
+                    }
+                }
+            }
+        )
+
+        self.assertEqual(price_check["status"], "positive_edge")
+        self.assertEqual(price_check["reference_reliability"], "volatile")
+        self.assertIn("edge is unreliable", price_check["message"])
+
+    def test_public_price_check_summarizes_short_price(self):
+        price_check = _public_price_check_from_card(
+            {
+                "evidence": {
+                    "odds_value": {
+                        "offered_odds": 1.80,
+                        "statpal_reference_odds": 2.00,
+                        "value_edge_pct": -10.0,
+                    }
+                }
+            }
+        )
+
+        self.assertEqual(price_check["status"], "short_price")
+        self.assertEqual(price_check["edge_percent"], -10.0)
+        self.assertIn("shorter than the StatPal reference", price_check["message"])
+
+
 class SlipReviewPublicContractTests(TestCase):
     def test_public_review_contract_is_frontend_friendly(self):
         summary = _manual_review_summary([_sample_replace_result()])
@@ -146,6 +230,11 @@ class SlipReviewPublicContractTests(TestCase):
         self.assertEqual(selection["your_pick"]["confidence_cap"], 88)
         self.assertNotIn("taxonomy", selection["your_pick"])
         self.assertNotIn("statpal_advisory", selection["your_pick"])
+        self.assertEqual(selection["price_check"]["status"], "short_price")
+        self.assertEqual(selection["price_check"]["edge_percent"], -10.0)
+        self.assertEqual(selection["price_check"]["reference_odds"], 2.0)
+        self.assertIn("price_edge", selection["reason_codes"])
+        self.assertTrue(any("shorter than the StatPal reference" in reason for reason in selection["why"]))
         self.assertEqual(selection["ai_pick"]["market"], "Over 1.5")
         self.assertEqual(selection["ai_pick"]["replacement_scope"], "broad_fallback")
         self.assertIn(
@@ -169,6 +258,26 @@ class SlipReviewPublicContractTests(TestCase):
         self.assertEqual(public["counts"]["replace"], 1)
         self.assertEqual(public["counts"]["unmatched"], 0)
         self.assertEqual(public["selections"][0]["verdict"]["code"], "replace")
+
+    def test_public_review_exposes_positive_price_edge_without_internal_payload(self):
+        result = _sample_replace_result()
+        result["selected_market"]["advisory_evidence"]["statpal"]["odds_value"] = {
+            "offered_odds": 2.20,
+            "statpal_reference_odds": 2.00,
+            "value_edge_pct": 10.0,
+            "matched_market": "Over/Under",
+            "matched_outcome": "Over",
+            "bookmaker": "10Bet",
+        }
+
+        selection = _manual_review_summary([result])["public"]["selections"][0]
+
+        self.assertEqual(selection["price_check"]["status"], "positive_edge")
+        self.assertEqual(selection["price_check"]["offered_odds"], 2.2)
+        self.assertEqual(selection["price_check"]["reference_odds"], 2.0)
+        self.assertIn("price_edge", selection["reason_codes"])
+        self.assertTrue(any("better than the StatPal reference" in reason for reason in selection["why"]))
+        self.assertNotIn("statpal_advisory", selection["your_pick"])
 
     def test_market_not_found_without_replacement_but_scored_counts_as_analysed(self):
         summary = _manual_review_summary([_sample_market_not_found_without_replacement_but_scored()])

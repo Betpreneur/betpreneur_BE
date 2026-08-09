@@ -72,8 +72,28 @@ MARKET_EVALUATORS: dict[str, EvaluatorSpec] = {
         "team_corners", "", QUANTITATIVE, (Cap.TEAM_CORNERS,),
         (Cap.MARKET_ODDS, Cap.TEAM_POSSESSION), engine=COUNT_MODEL_ENGINE,
     ),
+    "corner_range": EvaluatorSpec(
+        "corner_range", "", QUANTITATIVE, (Cap.TEAM_CORNERS,),
+        (Cap.MARKET_ODDS, Cap.TEAM_POSSESSION), engine=COUNT_MODEL_ENGINE,
+    ),
+    "team_corner_range": EvaluatorSpec(
+        "team_corner_range", "", QUANTITATIVE, (Cap.TEAM_CORNERS,),
+        (Cap.MARKET_ODDS, Cap.TEAM_POSSESSION), engine=COUNT_MODEL_ENGINE,
+    ),
+    "corners_result": EvaluatorSpec(
+        "corners_result", "", QUANTITATIVE, (Cap.TEAM_CORNERS,),
+        (Cap.MARKET_ODDS, Cap.TEAM_POSSESSION), engine=COUNT_MODEL_ENGINE,
+    ),
+    "corner_handicap": EvaluatorSpec(
+        "corner_handicap", "", QUANTITATIVE, (Cap.TEAM_CORNERS,),
+        (Cap.MARKET_ODDS, Cap.TEAM_POSSESSION), engine=COUNT_MODEL_ENGINE,
+    ),
     "cards_total": EvaluatorSpec(
         "cards_total", "", QUANTITATIVE, _CARD_CORE,
+        (Cap.REFEREE, Cap.LINEUP_PROJECTED, Cap.MARKET_ODDS), engine=COUNT_MODEL_ENGINE,
+    ),
+    "cards_result": EvaluatorSpec(
+        "cards_result", "", QUANTITATIVE, _CARD_CORE,
         (Cap.REFEREE, Cap.LINEUP_PROJECTED, Cap.MARKET_ODDS), engine=COUNT_MODEL_ENGINE,
     ),
     "team_cards": EvaluatorSpec(
@@ -125,7 +145,15 @@ MARKET_EVALUATORS: dict[str, EvaluatorSpec] = {
             "double_chance",
             "draw_no_bet",
             "btts",
+            "result_btts",
             "clean_sheet",
+            "result_total_goals",
+            "total_btts",
+            "double_chance_btts",
+            "double_chance_total_goals",
+            "result_or_total_goals",
+            "result_or_btts",
+            "result_or_clean_sheet",
             "odd_even",
             "asian_handicap",
             "handicap",

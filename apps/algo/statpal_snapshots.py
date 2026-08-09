@@ -9,6 +9,13 @@ from .market_taxonomy import MarketDescriptor, describe_market
 from .models import FixtureCache, ProviderFixtureMap, StatPalFixtureSnapshot
 from .services import json_safe, normalize_fixture_text
 from .statpal import StatPalClient, StatPalError
+from .statpal_provider import (
+    normalize_injuries_suspensions,
+    normalize_match_stats,
+    normalize_prematch_odds,
+    normalize_team,
+    normalize_team_lineups,
+)
 
 
 def _as_list(value):
@@ -23,6 +30,8 @@ def _as_list(value):
 
 class StatPalSnapshotService:
     DEFAULT_TTL = timedelta(hours=6)
+    CONTEXT_LIST_LIMIT = 50
+    CONTEXT_MAX_DEPTH = 8
     FIXTURE_ENDPOINTS = {
         StatPalFixtureSnapshot.SnapshotType.PREMATCH_ODDS: "SOCCER_PREMATCH_ODDS",
         StatPalFixtureSnapshot.SnapshotType.LINEUPS: "SOCCER_LINEUPS",
@@ -444,21 +453,73 @@ class StatPalSnapshotService:
             return {"available": False, "snapshots": {}}
 
         by_type = {}
+        team_rows = []
         for row in snapshots.order_by("snapshot_type", "-fetched_at", "-updated_at"):
+            if row.snapshot_type == StatPalFixtureSnapshot.SnapshotType.TEAM_STATS:
+                team_rows.append(row)
+                continue
             by_type.setdefault(row.snapshot_type, row)
+        snapshot_context = {key: self._snapshot_context(row) for key, row in by_type.items()}
+        if team_rows:
+            snapshot_context[StatPalFixtureSnapshot.SnapshotType.TEAM_STATS] = self._team_stats_context(team_rows)
         return {
-            "available": bool(by_type),
-            "snapshots": {
-                key: {
-                    "status": row.status,
-                    "summary": row.summary,
-                    "fetched_at": row.fetched_at,
-                    "expires_at": row.expires_at,
-                    "source_endpoint": row.source_endpoint,
-                }
-                for key, row in by_type.items()
-            },
+            "available": bool(snapshot_context),
+            "snapshots": snapshot_context,
         }
+
+    def _snapshot_context(self, row: StatPalFixtureSnapshot) -> dict[str, Any]:
+        return {
+            "status": row.status,
+            "summary": row.summary,
+            "payload": self._compact_context_payload(row.payload),
+            "payload_available": bool(row.payload),
+            "fetched_at": row.fetched_at,
+            "expires_at": row.expires_at,
+            "source_endpoint": row.source_endpoint,
+        }
+
+    def _team_stats_context(self, rows: list[StatPalFixtureSnapshot]) -> dict[str, Any]:
+        teams = []
+        payloads = []
+        fetched_at = None
+        expires_at = None
+        for row in rows:
+            side = (row.summary or {}).get("fixture_side") or (row.payload or {}).get("fixture_side") or ""
+            summary = {**(row.summary or {}), "fixture_side": side}
+            payload = self._compact_context_payload(row.payload)
+            teams.append(summary)
+            payloads.append(payload)
+            fetched_at = max(filter(None, [fetched_at, row.fetched_at]), default=None)
+            expires_at = min(filter(None, [expires_at, row.expires_at]), default=None)
+        summary = {
+            "team_count": len(teams),
+            "teams": teams,
+            "home": next((team for team in teams if team.get("fixture_side") == "home"), {}),
+            "away": next((team for team in teams if team.get("fixture_side") == "away"), {}),
+        }
+        return {
+            "status": "available",
+            "summary": summary,
+            "payload": {"teams": payloads},
+            "payload_available": bool(payloads),
+            "fetched_at": fetched_at,
+            "expires_at": expires_at,
+            "source_endpoint": "SOCCER_TEAM",
+        }
+
+    @classmethod
+    def _compact_context_payload(cls, value: Any, *, depth: int = 0) -> Any:
+        if depth > cls.CONTEXT_MAX_DEPTH:
+            return None
+        if isinstance(value, dict):
+            return {
+                key: cls._compact_context_payload(child, depth=depth + 1)
+                for key, child in value.items()
+                if key != "raw"
+            }
+        if isinstance(value, list):
+            return [cls._compact_context_payload(item, depth=depth + 1) for item in value[: cls.CONTEXT_LIST_LIMIT]]
+        return value
 
     @staticmethod
     def _is_expired(snapshot: StatPalFixtureSnapshot) -> bool:
@@ -475,25 +536,21 @@ class StatPalSnapshotService:
 
     def save_injuries_suspensions_payload(self, payload: dict[str, Any]) -> list[StatPalFixtureSnapshot]:
         rows = []
-        root = (payload or {}).get("injuries_suspensions") or payload or {}
-        leagues = _as_list(root.get("league"))
-        for league in leagues:
-            provider_competition_id = str(league.get("id") or "")
-            for match in _as_list(league.get("match")):
-                provider_match_id = str(match.get("main_id") or match.get("fallback_id_1") or "")
-                provider_fixture = self._provider_fixture(provider_match_id=provider_match_id)
-                fixture = self._fixture(provider_fixture=provider_fixture)
-                row = self.save_snapshot(
-                    snapshot_type=StatPalFixtureSnapshot.SnapshotType.INJURIES_SUSPENSIONS,
-                    payload={"league": league, "match": match},
-                    match_id=(fixture.match_id if fixture else ""),
-                    provider_match_id=provider_match_id,
-                    provider_competition_id=provider_competition_id,
-                    source_endpoint="SOCCER_INJURIES_SUSPENSIONS",
-                    provider_fixture=provider_fixture,
-                    fixture=fixture,
-                )
-                rows.append(row)
+        for item in normalize_injuries_suspensions(payload):
+            provider_match_id = str(item.get("provider_match_id") or "")
+            provider_fixture = self._provider_fixture(match_id=item.get("match_id") or "", provider_match_id=provider_match_id)
+            fixture = self._fixture(match_id=item.get("match_id") or "", provider_fixture=provider_fixture)
+            row = self.save_snapshot(
+                snapshot_type=StatPalFixtureSnapshot.SnapshotType.INJURIES_SUSPENSIONS,
+                payload=item,
+                match_id=(fixture.match_id if fixture else item.get("match_id") or ""),
+                provider_match_id=provider_match_id,
+                provider_competition_id=str(item.get("provider_competition_id") or ""),
+                source_endpoint="SOCCER_INJURIES_SUSPENSIONS",
+                provider_fixture=provider_fixture,
+                fixture=fixture,
+            )
+            rows.append(row)
         return rows
 
     def save_team_stats(self, *, team_id: str, payload: dict[str, Any]) -> StatPalFixtureSnapshot:
@@ -503,6 +560,99 @@ class StatPalSnapshotService:
             provider_match_id=str(team_id or ""),
             source_endpoint="SOCCER_TEAM_STATS",
             ttl=timedelta(hours=12),
+        )
+
+    def refresh_fixture_team_stats(
+        self,
+        *,
+        match_id: str = "",
+        provider_match_id: str = "",
+        provider_competition_id: str = "",
+        home_team_id: str = "",
+        away_team_id: str = "",
+        force: bool = False,
+    ) -> dict[str, Any]:
+        match_id = str(match_id or (f"statpal:{provider_match_id}" if provider_match_id else "") or "")
+        provider_match_id = str(provider_match_id or "").strip()
+        provider_competition_id = str(provider_competition_id or "").strip()
+        teams = [("home", str(home_team_id or "").strip()), ("away", str(away_team_id or "").strip())]
+        result = {
+            "snapshot_type": StatPalFixtureSnapshot.SnapshotType.TEAM_STATS,
+            "attempted": [],
+            "refreshed": [],
+            "skipped": [],
+            "errors": [],
+            "api_usage": {
+                "provider": "statpal",
+                "attempted_calls": 0,
+                "successful_calls": 0,
+                "failed_calls": 0,
+                "skipped_by_cache": 0,
+                "skipped_without_call": 0,
+            },
+        }
+        for side, team_id in teams:
+            if not team_id:
+                result["api_usage"]["skipped_without_call"] += 1
+                result["skipped"].append({"side": side, "reason": "missing_team_id"})
+                continue
+            team_provider_match_id = self._team_stats_provider_match_id(
+                match_id=match_id,
+                provider_match_id=provider_match_id,
+                side=side,
+                team_id=team_id,
+            )
+            existing = self._fixture_team_stats_snapshot(match_id=match_id, provider_match_id=team_provider_match_id)
+            if existing and not force and not self._is_expired(existing):
+                result["api_usage"]["skipped_by_cache"] += 1
+                result["skipped"].append({"side": side, "team_id": team_id, "reason": "fresh_snapshot_exists", "snapshot_id": existing.id})
+                continue
+            result["attempted"].append({"side": side, "team_id": team_id})
+            result["api_usage"]["attempted_calls"] += 1
+            try:
+                raw_payload = self.client.soccer_endpoint("SOCCER_TEAM", team_id=team_id)
+                payload = normalize_team(raw_payload) or raw_payload or {}
+                if isinstance(payload, dict):
+                    payload = {
+                        **payload,
+                        "fixture_side": side,
+                        "fixture_provider_match_id": provider_match_id,
+                    }
+                row = self.save_snapshot(
+                    snapshot_type=StatPalFixtureSnapshot.SnapshotType.TEAM_STATS,
+                    payload=payload,
+                    match_id=match_id,
+                    provider_match_id=team_provider_match_id,
+                    provider_competition_id=provider_competition_id,
+                    source_endpoint="SOCCER_TEAM",
+                    ttl=timedelta(hours=12),
+                )
+                result["api_usage"]["successful_calls"] += 1
+                result["refreshed"].append({"side": side, "team_id": team_id, "snapshot_id": row.id})
+            except StatPalError as exc:
+                result["api_usage"]["failed_calls"] += 1
+                result["errors"].append({"side": side, "team_id": team_id, "error": str(exc)})
+            except Exception as exc:
+                result["api_usage"]["failed_calls"] += 1
+                result["errors"].append({"side": side, "team_id": team_id, "error": str(exc)})
+        return result
+
+    @staticmethod
+    def _team_stats_provider_match_id(*, match_id: str, provider_match_id: str, side: str, team_id: str) -> str:
+        base = str(provider_match_id or match_id or "fixture").replace("statpal:", "", 1)
+        return f"{base}:{side}:{team_id}"
+
+    @staticmethod
+    def _fixture_team_stats_snapshot(*, match_id: str, provider_match_id: str) -> StatPalFixtureSnapshot | None:
+        return (
+            StatPalFixtureSnapshot.objects.filter(
+                match_id=str(match_id or ""),
+                provider_match_id=str(provider_match_id or ""),
+                snapshot_type=StatPalFixtureSnapshot.SnapshotType.TEAM_STATS,
+                status="available",
+            )
+            .order_by("-fetched_at", "-updated_at")
+            .first()
         )
 
     def save_endpoint_payload(
@@ -515,6 +665,12 @@ class StatPalSnapshotService:
         provider_match_id: str = "",
         provider_competition_id: str = "",
     ) -> StatPalFixtureSnapshot:
+        payload = self._normalized_endpoint_payload(
+            snapshot_type=snapshot_type,
+            endpoint_name=endpoint_name,
+            payload=payload,
+            provider_match_id=provider_match_id,
+        )
         return self.save_snapshot(
             snapshot_type=snapshot_type,
             payload=payload,
@@ -523,6 +679,54 @@ class StatPalSnapshotService:
             provider_competition_id=provider_competition_id,
             source_endpoint=endpoint_name,
         )
+
+    def _normalized_endpoint_payload(
+        self,
+        *,
+        snapshot_type: str,
+        endpoint_name: str,
+        payload: dict[str, Any],
+        provider_match_id="",
+    ) -> dict[str, Any]:
+        if snapshot_type == StatPalFixtureSnapshot.SnapshotType.DETAILED_STATS:
+            return self._normalized_detailed_stats_payload(payload, provider_match_id=provider_match_id)
+        if snapshot_type == StatPalFixtureSnapshot.SnapshotType.LINEUPS:
+            return normalize_team_lineups(payload) or payload
+        if snapshot_type == StatPalFixtureSnapshot.SnapshotType.PREMATCH_ODDS:
+            rows = normalize_prematch_odds(payload)
+            return self._select_match_payload(rows, provider_match_id=provider_match_id) or payload
+        if snapshot_type == StatPalFixtureSnapshot.SnapshotType.INJURIES_SUSPENSIONS:
+            rows = normalize_injuries_suspensions(payload)
+            return self._select_match_payload(rows, provider_match_id=provider_match_id) or payload
+        if snapshot_type == StatPalFixtureSnapshot.SnapshotType.TEAM_STATS and endpoint_name in {"SOCCER_TEAM", "SOCCER_TEAM_STATS"}:
+            return normalize_team(payload) or payload
+        return payload
+
+    @staticmethod
+    def _select_match_payload(rows: list[dict[str, Any]], *, provider_match_id="") -> dict[str, Any]:
+        if not rows:
+            return {}
+        target = str(provider_match_id or "").strip()
+        if target:
+            for row in rows:
+                if target == str(row.get("provider_match_id") or "") or target in (row.get("fallback_match_ids") or []):
+                    return row
+        return rows[0]
+
+    @staticmethod
+    def _normalized_detailed_stats_payload(payload: dict[str, Any], *, provider_match_id="") -> dict[str, Any]:
+        matches = normalize_match_stats(payload)
+        if not matches:
+            return payload
+        target = str(provider_match_id or "").strip()
+        selected = None
+        if target:
+            for match in matches:
+                if target == str(match.get("provider_match_id") or "") or target in (match.get("fallback_match_ids") or []):
+                    selected = match
+                    break
+        selected = selected or matches[0]
+        return selected
 
     def summarize(self, *, snapshot_type: str, payload: dict[str, Any], match_id="", provider_match_id="") -> dict[str, Any]:
         if snapshot_type == StatPalFixtureSnapshot.SnapshotType.INJURIES_SUSPENSIONS:
@@ -535,6 +739,8 @@ class StatPalSnapshotService:
             return self._summarize_detailed_stats(payload, match_id=match_id, provider_match_id=provider_match_id)
         if snapshot_type == StatPalFixtureSnapshot.SnapshotType.PREMATCH_ODDS:
             return self._summarize_odds(payload, match_id=match_id, provider_match_id=provider_match_id)
+        if snapshot_type == StatPalFixtureSnapshot.SnapshotType.LINEUPS:
+            return self._summarize_lineups(payload, match_id=match_id, provider_match_id=provider_match_id)
         return {
             "match_id": match_id,
             "provider_match_id": provider_match_id,
@@ -543,6 +749,29 @@ class StatPalSnapshotService:
 
     @staticmethod
     def _summarize_injuries(payload: dict[str, Any]) -> dict[str, Any]:
+        if isinstance(payload, dict) and "total_to_miss_count" in payload:
+            return {
+                "league": payload.get("league") or "",
+                "provider_match_id": payload.get("provider_match_id") or "",
+                "date": str(payload.get("date") or ""),
+                "time": payload.get("kickoff") or "",
+                "home": {
+                    "team_id": (payload.get("home") or {}).get("team_id", ""),
+                    "team_name": (payload.get("home") or {}).get("team_name", ""),
+                    "to_miss_count": (payload.get("home") or {}).get("to_miss_count", 0),
+                    "questionable_count": (payload.get("home") or {}).get("questionable_count", 0),
+                    "availability_risk": (payload.get("home") or {}).get("availability_risk", "low"),
+                },
+                "away": {
+                    "team_id": (payload.get("away") or {}).get("team_id", ""),
+                    "team_name": (payload.get("away") or {}).get("team_name", ""),
+                    "to_miss_count": (payload.get("away") or {}).get("to_miss_count", 0),
+                    "questionable_count": (payload.get("away") or {}).get("questionable_count", 0),
+                    "availability_risk": (payload.get("away") or {}).get("availability_risk", "low"),
+                },
+                "total_to_miss_count": payload.get("total_to_miss_count", 0),
+                "total_questionable_count": payload.get("total_questionable_count", 0),
+            }
         match = (payload or {}).get("match") or payload or {}
         home = match.get("home") or {}
         away = match.get("away") or {}
@@ -582,14 +811,70 @@ class StatPalSnapshotService:
 
     @staticmethod
     def _summarize_team_stats(payload: dict[str, Any]) -> dict[str, Any]:
+        if isinstance(payload, dict) and payload.get("provider_team_id"):
+            league_stats = _as_list(payload.get("league_stats"))
+            current = StatPalSnapshotService._team_history_row(league_stats)
+            fulltime = current.get("fulltime") or {}
+            firsthalf = current.get("firsthalf") or {}
+            secondhalf = current.get("secondhalf") or {}
+            games_played = StatPalSnapshotService._team_phase_value(fulltime, "win")
+            games_played = (games_played or 0) + (StatPalSnapshotService._team_phase_value(fulltime, "draw") or 0) + (StatPalSnapshotService._team_phase_value(fulltime, "lost") or 0)
+            goals_for_avg = StatPalSnapshotService._team_phase_value(fulltime, "avg_goals_per_game_scored")
+            goals_against_avg = StatPalSnapshotService._team_phase_value(fulltime, "avg_goals_per_game_conceded")
+            avg_total_goals = None
+            if goals_for_avg is not None or goals_against_avg is not None:
+                avg_total_goals = round((goals_for_avg or 0) + (goals_against_avg or 0), 2)
+            return {
+                "team_id": payload.get("provider_team_id") or "",
+                "team_name": payload.get("name") or "",
+                "normalized_team_name": normalize_fixture_text(payload.get("name") or ""),
+                "fixture_side": payload.get("fixture_side") or "",
+                "squad_count": payload.get("squad_count"),
+                "league_count": len(league_stats),
+                "sample_size": int(games_played) if games_played is not None else None,
+                "current_league": current.get("league") or "",
+                "current_season": current.get("season") or "",
+                "avg_goals_for": goals_for_avg,
+                "avg_goals_against": goals_against_avg,
+                "avg_total_goals": avg_total_goals,
+                "clean_sheets": StatPalSnapshotService._team_phase_value(fulltime, "clean_sheet"),
+                "failed_to_score": StatPalSnapshotService._team_phase_value(fulltime, "failed_to_score"),
+                "avg_corners": StatPalSnapshotService._team_phase_value(fulltime, "avg_corners"),
+                "avg_yellowcards": StatPalSnapshotService._team_phase_value(fulltime, "avg_yellowcards"),
+                "firsthalf_avg_goals_for": StatPalSnapshotService._team_phase_value(firsthalf, "avg_goals_per_game_scored"),
+                "firsthalf_avg_goals_against": StatPalSnapshotService._team_phase_value(firsthalf, "avg_goals_per_game_conceded"),
+                "secondhalf_avg_goals_for": StatPalSnapshotService._team_phase_value(secondhalf, "avg_goals_per_game_scored"),
+                "secondhalf_avg_goals_against": StatPalSnapshotService._team_phase_value(secondhalf, "avg_goals_per_game_conceded"),
+                "top_level_keys": sorted(payload.keys()),
+            }
         team = (payload or {}).get("team") or {}
         stats = (payload or {}).get("stats") or (payload or {}).get("statistics") or payload or {}
         return {
             "team_id": team.get("id") or stats.get("team_id") or "",
             "team_name": team.get("name") or stats.get("team_name") or "",
             "normalized_team_name": normalize_fixture_text(team.get("name") or stats.get("team_name") or ""),
+            "fixture_side": stats.get("fixture_side") or "",
             "top_level_keys": sorted((payload or {}).keys()) if isinstance(payload, dict) else [],
         }
+
+    @staticmethod
+    def _team_history_row(rows) -> dict[str, Any]:
+        for row in rows:
+            if isinstance(row, dict) and row.get("league"):
+                return row
+        for row in rows:
+            if isinstance(row, dict):
+                return row
+        return {}
+
+    @staticmethod
+    def _team_phase_value(phase: dict[str, Any], field: str, scope: str = "total"):
+        if not isinstance(phase, dict):
+            return None
+        bucket = phase.get(field)
+        if not isinstance(bucket, dict):
+            return None
+        return StatPalSnapshotService._to_number(bucket.get(scope))
 
     @staticmethod
     def _summarize_predictions(payload: dict[str, Any], match_id="", provider_match_id="") -> dict[str, Any]:
@@ -609,70 +894,114 @@ class StatPalSnapshotService:
 
     @staticmethod
     def _summarize_detailed_stats(payload: dict[str, Any], match_id="", provider_match_id="") -> dict[str, Any]:
-        home_xg = StatPalSnapshotService._find_numeric(payload, "home_xg", "xg_home", "home_expected_goals")
-        away_xg = StatPalSnapshotService._find_numeric(payload, "away_xg", "xg_away", "away_expected_goals")
+        team_stats = (payload or {}).get("team_stats") if isinstance(payload, dict) else {}
+        event_summary = (payload or {}).get("event_summary") if isinstance(payload, dict) else {}
+        home_xg = (
+            StatPalSnapshotService._team_metric(team_stats, "home", "expected_goals")
+            or StatPalSnapshotService._find_numeric(payload, "home_xg", "xg_home", "home_expected_goals")
+        )
+        away_xg = (
+            StatPalSnapshotService._team_metric(team_stats, "away", "expected_goals")
+            or StatPalSnapshotService._find_numeric(payload, "away_xg", "xg_away", "away_expected_goals")
+        )
         total_xg = StatPalSnapshotService._find_numeric(payload, "expected_goals", "xg_total", "total_xg")
         if total_xg is None and home_xg is not None and away_xg is not None:
             total_xg = round(home_xg + away_xg, 2)
+        home_yellows = (
+            StatPalSnapshotService._find_numeric(payload, "home_yellow_cards", "yellow_cards_home", "home_yellowcards", "yellowcards_home")
+            or StatPalSnapshotService._event_count(event_summary, "yellowcards", "home")
+        )
+        away_yellows = (
+            StatPalSnapshotService._find_numeric(payload, "away_yellow_cards", "yellow_cards_away", "away_yellowcards", "yellowcards_away")
+            or StatPalSnapshotService._event_count(event_summary, "yellowcards", "away")
+        )
+        home_reds = (
+            StatPalSnapshotService._find_numeric(payload, "home_red_cards", "red_cards_home", "home_redcards", "redcards_home")
+            or StatPalSnapshotService._event_count(event_summary, "redcards", "home")
+        )
+        away_reds = (
+            StatPalSnapshotService._find_numeric(payload, "away_red_cards", "red_cards_away", "away_redcards", "redcards_away")
+            or StatPalSnapshotService._event_count(event_summary, "redcards", "away")
+        )
+        total_cards = StatPalSnapshotService._find_numeric(payload, "total_cards", "cards_total")
+        if total_cards is None and any(value is not None for value in (home_yellows, away_yellows, home_reds, away_reds)):
+            total_cards = (home_yellows or 0) + (away_yellows or 0) + (home_reds or 0) + (away_reds or 0)
+        booking_points = StatPalSnapshotService._find_numeric(payload, "booking_points", "total_booking_points")
+        if booking_points is None and any(value is not None for value in (home_yellows, away_yellows, home_reds, away_reds)):
+            booking_points = ((home_yellows or 0) + (away_yellows or 0)) * 10 + ((home_reds or 0) + (away_reds or 0)) * 25
         return {
             "match_id": match_id,
-            "provider_match_id": provider_match_id,
+            "provider_match_id": provider_match_id or (payload or {}).get("provider_match_id", ""),
             "home_xg": home_xg,
             "away_xg": away_xg,
             "expected_goals": total_xg,
             "home_shots": StatPalSnapshotService._find_numeric(payload, "home_shots", "shots_home", "home_total_shots"),
             "away_shots": StatPalSnapshotService._find_numeric(payload, "away_shots", "shots_away", "away_total_shots"),
-            "home_corners": StatPalSnapshotService._find_numeric(
-                payload,
-                "home_corners",
-                "corners_home",
-                "home_corner_kicks",
-                "home_avg_corners",
-                "avg_corners_home",
+            "home_corners": (
+                StatPalSnapshotService._team_metric(team_stats, "home", "corners")
+                or StatPalSnapshotService._find_numeric(payload, "home_corners", "corners_home", "home_corner_kicks", "home_avg_corners", "avg_corners_home")
             ),
-            "away_corners": StatPalSnapshotService._find_numeric(
-                payload,
-                "away_corners",
-                "corners_away",
-                "away_corner_kicks",
-                "away_avg_corners",
-                "avg_corners_away",
+            "away_corners": (
+                StatPalSnapshotService._team_metric(team_stats, "away", "corners")
+                or StatPalSnapshotService._find_numeric(payload, "away_corners", "corners_away", "away_corner_kicks", "away_avg_corners", "avg_corners_away")
             ),
-            "home_yellow_cards": StatPalSnapshotService._find_numeric(
-                payload,
-                "home_yellow_cards",
-                "yellow_cards_home",
-                "home_yellowcards",
-                "yellowcards_home",
+            "home_fouls": (
+                StatPalSnapshotService._team_metric(team_stats, "home", "fouls")
+                or StatPalSnapshotService._find_numeric(payload, "home_fouls", "fouls_home")
             ),
-            "away_yellow_cards": StatPalSnapshotService._find_numeric(
-                payload,
-                "away_yellow_cards",
-                "yellow_cards_away",
-                "away_yellowcards",
-                "yellowcards_away",
+            "away_fouls": (
+                StatPalSnapshotService._team_metric(team_stats, "away", "fouls")
+                or StatPalSnapshotService._find_numeric(payload, "away_fouls", "fouls_away")
             ),
-            "home_red_cards": StatPalSnapshotService._find_numeric(
-                payload,
-                "home_red_cards",
-                "red_cards_home",
-                "home_redcards",
-                "redcards_home",
-            ),
-            "away_red_cards": StatPalSnapshotService._find_numeric(
-                payload,
-                "away_red_cards",
-                "red_cards_away",
-                "away_redcards",
-                "redcards_away",
-            ),
-            "total_cards": StatPalSnapshotService._find_numeric(payload, "total_cards", "cards_total"),
-            "booking_points": StatPalSnapshotService._find_numeric(payload, "booking_points", "total_booking_points"),
+            "home_yellow_cards": home_yellows,
+            "away_yellow_cards": away_yellows,
+            "home_red_cards": home_reds,
+            "away_red_cards": away_reds,
+            "total_cards": total_cards,
+            "booking_points": booking_points,
+            "goal_events": len((event_summary or {}).get("goals") or []),
+            "yellowcard_events": len((event_summary or {}).get("yellowcards") or []),
+            "redcard_events": len((event_summary or {}).get("redcards") or []),
+            "var_events": len((event_summary or {}).get("var") or []),
+            "has_lineups": bool(((payload or {}).get("lineups") or {}).get("home") or ((payload or {}).get("lineups") or {}).get("away")),
+            "has_player_stats": bool(((payload or {}).get("player_stats") or {}).get("home") or ((payload or {}).get("player_stats") or {}).get("away")),
             "top_level_keys": sorted((payload or {}).keys()) if isinstance(payload, dict) else [],
         }
 
     @staticmethod
+    def _team_metric(team_stats, side: str, metric: str, field: str = "total"):
+        if not isinstance(team_stats, dict):
+            return None
+        bucket = ((team_stats.get(side) or {}).get(metric) or {})
+        if not isinstance(bucket, dict):
+            return None
+        return StatPalSnapshotService._to_number(bucket.get(field))
+
+    @staticmethod
+    def _event_count(event_summary, kind: str, side: str) -> int | None:
+        if not isinstance(event_summary, dict):
+            return None
+        events = event_summary.get(kind)
+        if not isinstance(events, list):
+            return None
+        return sum(1 for item in events if isinstance(item, dict) and item.get("team") == side)
+
+    @staticmethod
     def _summarize_odds(payload: dict[str, Any], match_id="", provider_match_id="") -> dict[str, Any]:
+        if isinstance(payload, dict) and isinstance(payload.get("markets"), list):
+            simple = StatPalSnapshotService._simple_market_odds(payload)
+            return {
+                "match_id": match_id or payload.get("match_id", ""),
+                "provider_match_id": provider_match_id or payload.get("provider_match_id", ""),
+                "market_count": payload.get("market_count", len(payload.get("markets") or [])),
+                "bookmaker_count": sum(len(market.get("bookmakers") or []) for market in payload.get("markets") or []),
+                "home_odds": simple.get("home"),
+                "draw_odds": simple.get("draw"),
+                "away_odds": simple.get("away"),
+                "over25_odds": simple.get("over25"),
+                "under25_odds": simple.get("under25"),
+                "top_level_keys": sorted(payload.keys()),
+            }
         return {
             "match_id": match_id,
             "provider_match_id": provider_match_id,
@@ -681,6 +1010,57 @@ class StatPalSnapshotService:
             "away_odds": StatPalSnapshotService._find_numeric(payload, "away_odds", "away_win_odds", "odds_away"),
             "over25_odds": StatPalSnapshotService._find_numeric(payload, "over25_odds", "over_2_5_odds"),
             "under35_odds": StatPalSnapshotService._find_numeric(payload, "under35_odds", "under_3_5_odds"),
+            "top_level_keys": sorted((payload or {}).keys()) if isinstance(payload, dict) else [],
+        }
+
+    @staticmethod
+    def _simple_market_odds(payload: dict[str, Any]) -> dict[str, float | None]:
+        values = {}
+        for market in payload.get("markets") or []:
+            market_name = normalize_fixture_text(market.get("name") or "")
+            for bookmaker in market.get("bookmakers") or []:
+                for odd in bookmaker.get("odds") or []:
+                    odd_name = normalize_fixture_text(odd.get("name") or "")
+                    if odd_name in {"home", "draw", "away"} and odd_name not in values:
+                        values[odd_name] = odd.get("value")
+                for total in bookmaker.get("totals") or []:
+                    if total.get("line") != 2.5:
+                        continue
+                    for odd in total.get("odds") or []:
+                        odd_name = normalize_fixture_text(odd.get("name") or "")
+                        if odd_name == "over":
+                            values.setdefault("over25", odd.get("value"))
+                        elif odd_name == "under":
+                            values.setdefault("under25", odd.get("value"))
+            if {"1x2", "1 x 2"} & {market_name} and all(key in values for key in ("home", "draw", "away")):
+                continue
+        return {
+            "home": values.get("home"),
+            "draw": values.get("draw"),
+            "away": values.get("away"),
+            "over25": values.get("over25"),
+            "under25": values.get("under25"),
+        }
+
+    @staticmethod
+    def _summarize_lineups(payload: dict[str, Any], match_id="", provider_match_id="") -> dict[str, Any]:
+        home = (payload or {}).get("home") or {}
+        away = (payload or {}).get("away") or {}
+        return {
+            "match_id": match_id or (payload or {}).get("match_id", ""),
+            "provider_match_id": provider_match_id or (payload or {}).get("provider_match_id", ""),
+            "status": (payload or {}).get("lineup_status") or (payload or {}).get("status", ""),
+            "home_team": home.get("team_name", ""),
+            "away_team": away.get("team_name", ""),
+            "home_formation": home.get("formation", ""),
+            "away_formation": away.get("formation", ""),
+            "home_confidence": home.get("confidence"),
+            "away_confidence": away.get("confidence"),
+            "starting_count": (payload or {}).get("starting_count"),
+            "bench_count": (payload or {}).get("bench_count"),
+            "sidelined_count": (payload or {}).get("sidelined_count"),
+            "home_sidelined_count": home.get("sidelined_count"),
+            "away_sidelined_count": away.get("sidelined_count"),
             "top_level_keys": sorted((payload or {}).keys()) if isinstance(payload, dict) else [],
         }
 
