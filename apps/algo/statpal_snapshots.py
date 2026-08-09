@@ -840,6 +840,10 @@ class StatPalSnapshotService:
             avg_total_goals = None
             if goals_for_avg is not None or goals_against_avg is not None:
                 avg_total_goals = round((goals_for_avg or 0) + (goals_against_avg or 0), 2)
+            shots_on_target_home = StatPalSnapshotService._team_count_per_game(fulltime, "shots_on_goal", "home", games_played)
+            shots_on_target_away = StatPalSnapshotService._team_count_per_game(fulltime, "shots_on_goal", "away", games_played)
+            shots_total_home = StatPalSnapshotService._team_count_per_game(fulltime, "shots_total", "home", games_played)
+            shots_total_away = StatPalSnapshotService._team_count_per_game(fulltime, "shots_total", "away", games_played)
             return {
                 "team_id": payload.get("provider_team_id") or "",
                 "team_name": payload.get("name") or "",
@@ -857,12 +861,20 @@ class StatPalSnapshotService:
                 "failed_to_score": StatPalSnapshotService._team_phase_value(fulltime, "failed_to_score"),
                 "avg_corners": StatPalSnapshotService._team_phase_value(fulltime, "avg_corners"),
                 "avg_yellowcards": StatPalSnapshotService._team_phase_value(fulltime, "avg_yellowcards"),
-                "shots_on_target_home": StatPalSnapshotService._team_phase_value(fulltime, "shots_on_goal", scope="home"),
-                "shots_on_target_away": StatPalSnapshotService._team_phase_value(fulltime, "shots_on_goal", scope="away"),
-                "shots_on_target_total": StatPalSnapshotService._team_phase_value(fulltime, "shots_on_goal"),
-                "shots_total_home": StatPalSnapshotService._team_phase_value(fulltime, "shots_total", scope="home"),
-                "shots_total_away": StatPalSnapshotService._team_phase_value(fulltime, "shots_total", scope="away"),
-                "shots_total": StatPalSnapshotService._team_phase_value(fulltime, "shots_total"),
+                "shots_on_target_home": shots_on_target_home,
+                "shots_on_target_away": shots_on_target_away,
+                "shots_on_target_total": (
+                    round((shots_on_target_home or 0) + (shots_on_target_away or 0), 3)
+                    if shots_on_target_home is not None or shots_on_target_away is not None
+                    else None
+                ),
+                "shots_total_home": shots_total_home,
+                "shots_total_away": shots_total_away,
+                "shots_total": (
+                    round((shots_total_home or 0) + (shots_total_away or 0), 3)
+                    if shots_total_home is not None or shots_total_away is not None
+                    else None
+                ),
                 "firsthalf_avg_goals_for": StatPalSnapshotService._team_goal_average_value(firsthalf, "avg_goals_per_game_scored"),
                 "firsthalf_avg_goals_against": StatPalSnapshotService._team_goal_average_value(firsthalf, "avg_goals_per_game_conceded"),
                 "secondhalf_avg_goals_for": StatPalSnapshotService._team_goal_average_value(secondhalf, "avg_goals_per_game_scored"),
@@ -907,6 +919,16 @@ class StatPalSnapshotService:
         if value is not None and value > 10:
             return None
         return value
+
+    @staticmethod
+    def _team_count_per_game(phase: dict[str, Any], field: str, scope: str, games_played):
+        value = StatPalSnapshotService._team_phase_value(phase, field, scope=scope)
+        games = StatPalSnapshotService._to_number(games_played) or 0
+        if value is None:
+            return None
+        if games > 0:
+            return round(value / games, 3)
+        return value if value <= 20 else None
 
     @staticmethod
     def _summarize_predictions(payload: dict[str, Any], match_id="", provider_match_id="") -> dict[str, Any]:

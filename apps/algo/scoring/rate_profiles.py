@@ -38,6 +38,16 @@ def _split(node, key):
     return _num(value.get("home")), _num(value.get("away")), _num(value.get("total"))
 
 
+def _per_game(value, matches):
+    value = _num(value)
+    matches = _num(matches)
+    if value is None:
+        return None
+    if matches and matches > 0:
+        return round(value / matches, 3)
+    return value if value <= 20 else None
+
+
 def parse_team_payload(payload) -> dict:
     """
     Pull per-game corner, card and shots-on-target rates out of a StatPal team response.
@@ -54,21 +64,23 @@ def parse_team_payload(payload) -> dict:
     current = leagues[0]
     fulltime = current.get("fulltime") or {}
 
+    win, draw, lost = (
+        _split(fulltime, "win")[2], _split(fulltime, "draw")[2], _split(fulltime, "lost")[2]
+    )
+    matches = int((win or 0) + (draw or 0) + (lost or 0))
+
     corners_home, corners_away, _ = _split(fulltime, "avg_corners")
     yellow_home, yellow_away, _ = _split(fulltime, "avg_yellowcards")
     red_home, red_away, _ = _split(fulltime, "avg_redcards")
-    shots_on_target_home, shots_on_target_away, _ = _split(fulltime, "shots_on_goal")
+    shots_on_target_home_total, shots_on_target_away_total, _ = _split(fulltime, "shots_on_goal")
+    shots_on_target_home = _per_game(shots_on_target_home_total, matches)
+    shots_on_target_away = _per_game(shots_on_target_away_total, matches)
     _, _, fouls_total = _split(fulltime, "fouls")
 
     def bookings(yellow, red):
         if yellow is None and red is None:
             return None
         return (yellow or 0) + (red or 0) * 2
-
-    win, draw, lost = (
-        _split(fulltime, "win")[2], _split(fulltime, "draw")[2], _split(fulltime, "lost")[2]
-    )
-    matches = int((win or 0) + (draw or 0) + (lost or 0))
 
     return {
         "team_id": str(team.get("id") or ""),

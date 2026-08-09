@@ -42,6 +42,13 @@ class PoissonLineTests(SimpleTestCase):
 
         self.assertGreater(busy, quiet)
 
+    def test_absurd_expected_count_is_clamped(self):
+        probability, push = counts.poisson_over_under(500.0, 9.5, "over")
+
+        self.assertGreaterEqual(probability, 0)
+        self.assertLessEqual(probability, 1)
+        self.assertEqual(push, 0.0)
+
     def test_range_probability_uses_inclusive_bucket(self):
         exact_mass, _ = counts.poisson_range(10.0, "9-11")
         low_tail, _ = counts.poisson_range(10.0, "0-8")
@@ -147,8 +154,8 @@ class TeamPayloadParsingTests(SimpleTestCase):
     def test_shots_on_target_rates_are_read_per_side(self):
         parsed = parse_team_payload(self._payload())
 
-        self.assertAlmostEqual(parsed["shots_on_target_home"], 5.8)
-        self.assertAlmostEqual(parsed["shots_on_target_away"], 4.3)
+        self.assertAlmostEqual(parsed["shots_on_target_home"], 5.8 / 18, places=3)
+        self.assertAlmostEqual(parsed["shots_on_target_away"], 4.3 / 18, places=3)
 
     def test_match_count_comes_from_the_result_record(self):
         self.assertEqual(parse_team_payload(self._payload())["matches"], 18)

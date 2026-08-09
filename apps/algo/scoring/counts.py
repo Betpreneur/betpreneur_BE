@@ -28,6 +28,8 @@ LEAGUE_SHOTS_ON_TARGET_PER_TEAM = 4.2
 SHRINKAGE_MATCHES = 5
 
 RED_CARD_BOOKINGS = 2
+MAX_POISSON_EXPECTED = 40.0
+MAX_TEAM_SHOTS_ON_TARGET_RATE = 20.0
 
 
 @dataclass(frozen=True)
@@ -46,6 +48,15 @@ def _shrink(observed: float | None, matches: float, prior: float) -> float:
         return prior
     matches = max(0.0, matches)
     return (matches * observed + SHRINKAGE_MATCHES * prior) / (matches + SHRINKAGE_MATCHES)
+
+
+def _rate_or_none(value, *, maximum=MAX_TEAM_SHOTS_ON_TARGET_RATE):
+    try:
+        if value is None or value < 0 or value > maximum:
+            return None
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def expected_corners(home_profile, away_profile) -> CountForecast:
@@ -128,12 +139,12 @@ def expected_shots_on_target(home_profile, away_profile) -> CountForecast:
     home_rate = away_rate = None
     home_matches = away_matches = 0
     if home_profile is not None:
-        home_rate = getattr(home_profile, "shots_on_target_home", None)
+        home_rate = _rate_or_none(getattr(home_profile, "shots_on_target_home", None))
         home_matches = home_profile.matches
         if home_rate is not None:
             sources.append("home_team_profile")
     if away_profile is not None:
-        away_rate = getattr(away_profile, "shots_on_target_away", None)
+        away_rate = _rate_or_none(getattr(away_profile, "shots_on_target_away", None))
         away_matches = away_profile.matches
         if away_rate is not None:
             sources.append("away_team_profile")
@@ -151,7 +162,11 @@ def expected_shots_on_target(home_profile, away_profile) -> CountForecast:
 def expected_team_shots_on_target(profile, *, side: str) -> CountForecast:
     if profile is None:
         return CountForecast(expected=LEAGUE_SHOTS_ON_TARGET_PER_TEAM, sources=(), matches=0)
-    rate = getattr(profile, "shots_on_target_home", None) if side == "home" else getattr(profile, "shots_on_target_away", None)
+    rate = _rate_or_none(
+        getattr(profile, "shots_on_target_home", None)
+        if side == "home"
+        else getattr(profile, "shots_on_target_away", None)
+    )
     return CountForecast(
         expected=round(max(0.2, _shrink(rate, profile.matches, LEAGUE_SHOTS_ON_TARGET_PER_TEAM)), 3),
         sources=("team_profile",) if rate is not None else (),
@@ -166,17 +181,22 @@ def poisson_over_under(expected: float, line: float, side: str = "over") -> tupl
     Returns `(win, push)` so a whole-line market is never settled as a loss when it
     lands exactly on the number.
     """
-    expected = max(1e-6, float(expected))
+    expected = min(MAX_POISSON_EXPECTED, max(1e-6, float(expected)))
     line = float(line)
     ceiling = max(30, int(expected * 4) + 12)
 
-    def pmf(count: int) -> float:
-        return math.exp(-expected) * expected**count / math.factorial(count)
+    masses = []
+    mass = math.exp(-expected)
+    for count in range(0, ceiling + 1):
+        if count == 0:
+            masses.append(mass)
+        else:
+            mass = mass * expected / count
+            masses.append(mass)
 
-    at_or_below = sum(pmf(count) for count in range(0, int(math.floor(line)) + 1))
-    push = pmf(int(line)) if float(line).is_integer() else 0.0
-
-    total = sum(pmf(count) for count in range(0, ceiling + 1))
+    at_or_below = sum(masses[: int(math.floor(line)) + 1])
+    push = masses[int(line)] if float(line).is_integer() and int(line) < len(masses) else 0.0
+    total = sum(masses)
     at_or_below = min(at_or_below / total, 1.0) if total else 0.0
     push = min(push / total, 1.0) if total else 0.0
 
