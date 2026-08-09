@@ -20,6 +20,7 @@ class DataCapability(StrEnum):
     TEAM_GOALS_FOR = "team_goals_for"
     TEAM_GOALS_AGAINST = "team_goals_against"
     TEAM_SHOTS = "team_shots"
+    TEAM_SHOTS_ON_TARGET = "team_shots_on_target"
     TEAM_POSSESSION = "team_possession"
     TEAM_CORNERS = "team_corners"
     TEAM_CARDS = "team_cards"
@@ -53,6 +54,8 @@ STATPAL_SNAPSHOT_CAPABILITIES: dict[str, tuple[DataCapability, ...]] = {
         DataCapability.CARD_MINUTE_DIST,
     ),
     "detailed_stats": (
+        DataCapability.TEAM_SHOTS,
+        DataCapability.TEAM_SHOTS_ON_TARGET,
         DataCapability.REFEREE,
         DataCapability.CARD_MINUTE_DIST,
         DataCapability.GOAL_MINUTE_DIST,

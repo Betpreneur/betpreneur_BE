@@ -1,5 +1,5 @@
 """
-Corner and card markets, modelled from cached team rates.
+Corner, card and shots-on-target markets, modelled from cached team rates.
 
 Replaces the previous corners/cards evaluators that published constants when the
 expected-count inputs were missing. Team rate profiles remain the main source, while a
@@ -26,6 +26,7 @@ RESULT_FAMILIES = {"corners_result"}
 HANDICAP_FAMILIES = {"corner_handicap"}
 CARD_RESULT_FAMILIES = {"cards_result"}
 CARD_FAMILIES = {"cards_total", "team_cards", "booking_points", "cards", "cards_result"}
+SOT_FAMILIES = {"shots_on_target_total", "team_shots_on_target"}
 
 # Booking points are scored 10 per yellow and 25 per red on the standard scale; the
 # line arrives in points, so convert it to an equivalent booking count.
@@ -74,6 +75,14 @@ def _summary_number(summary, *keys):
     return None
 
 
+def _kind_label(kind: str) -> str:
+    return {
+        "corners": "corner",
+        "cards": "card",
+        "shots_on_target": "shots-on-target",
+    }.get(kind, kind)
+
+
 def _statpal_forecast(descriptor, fixture, *, kind: str, team: str = ""):
     summary = _detailed_summary(fixture)
     if not summary:
@@ -81,6 +90,9 @@ def _statpal_forecast(descriptor, fixture, *, kind: str, team: str = ""):
     if kind == "corners":
         home = _summary_number(summary, "home_corners")
         away = _summary_number(summary, "away_corners")
+    elif kind == "shots_on_target":
+        home = _summary_number(summary, "home_shots_on_target", "home_sot")
+        away = _summary_number(summary, "away_shots_on_target", "away_sot")
     else:
         home_yellows = _summary_number(summary, "home_yellow_cards")
         home_reds = _summary_number(summary, "home_red_cards")
@@ -134,6 +146,9 @@ def _forecast(descriptor, home_profile, away_profile):
             profile = home_profile if team == "home" else away_profile
             return counts.expected_team_cards(profile, side=team), "cards"
         return counts.expected_cards(home_profile, away_profile), "cards"
+
+    if family in SOT_FAMILIES:
+        return counts.CountForecast(expected=0.0, sources=(), matches=0), "shots_on_target"
 
     return None, ""
 
@@ -203,7 +218,7 @@ def evaluate(descriptor, *, fixture=None, **_ignored) -> dict:
                 "basis": "count_market_no_team_rates",
                 "evidence": {"market_family": descriptor.family},
                 "warnings": ["no_team_rate_profile"],
-                "message": "No corner or card history is available for these teams yet.",
+                "message": f"No {_kind_label(kind)} history is available for these teams yet.",
             }
         side = (descriptor.selection or descriptor.side or "").lower()
         if is_handicap_market:
@@ -228,7 +243,7 @@ def evaluate(descriptor, *, fixture=None, **_ignored) -> dict:
                 "basis": invalid_basis,
                 "evidence": {"market_family": descriptor.family, "side": side},
                 "warnings": [invalid_warning],
-                "message": f"This {kind} count market has an invalid side.",
+                "message": f"This {_kind_label(kind)} count market has an invalid side.",
             }
 
         warnings = []
@@ -262,7 +277,7 @@ def evaluate(descriptor, *, fixture=None, **_ignored) -> dict:
             },
             "warnings": warnings,
             "message": (
-                f"Expected {kind}: home {home_forecast.expected}, away {away_forecast.expected}."
+                f"Expected {_kind_label(kind)} counts: home {home_forecast.expected}, away {away_forecast.expected}."
             ),
         }
 
@@ -277,7 +292,7 @@ def evaluate(descriptor, *, fixture=None, **_ignored) -> dict:
         }
 
     if not forecast.sources:
-        team = descriptor.team if descriptor.team in {"home", "away"} and descriptor.family in {"team_corners", "team_cards"} else ""
+        team = descriptor.team if descriptor.team in {"home", "away"} and descriptor.family in {"team_corners", "team_cards", "team_shots_on_target"} else ""
         statpal_forecast = _statpal_forecast(descriptor, fixture, kind=kind, team=team)
         if statpal_forecast is not None:
             forecast = statpal_forecast
@@ -289,7 +304,7 @@ def evaluate(descriptor, *, fixture=None, **_ignored) -> dict:
             "basis": "count_market_no_team_rates",
             "evidence": {"market_family": descriptor.family, "line": line},
             "warnings": ["no_team_rate_profile"],
-            "message": "No corner or card history is available for these teams yet.",
+            "message": f"No {_kind_label(kind)} history is available for these teams yet.",
         }
 
     forecast, period_factor = _period_adjusted(forecast, descriptor)
@@ -334,7 +349,7 @@ def evaluate(descriptor, *, fixture=None, **_ignored) -> dict:
             },
             "warnings": warnings,
             "message": (
-                f"Expected {forecast.expected} {kind}; selected range is {bucket}."
+                f"Expected {forecast.expected} {_kind_label(kind)} events; selected range is {bucket}."
             ),
         }
 
@@ -350,7 +365,7 @@ def evaluate(descriptor, *, fixture=None, **_ignored) -> dict:
     warnings = []
     if forecast.thin:
         warnings.append("thin_team_sample")
-    if len(forecast.sources) < 2 and descriptor.family in {"corners_total", "cards_total"}:
+    if len(forecast.sources) < 2 and descriptor.family in {"corners_total", "cards_total", "shots_on_target_total"}:
         warnings.append("one_sided_team_rates")
     if period_factor != 1.0:
         warnings.append("period_expectation_scaled")
@@ -373,6 +388,6 @@ def evaluate(descriptor, *, fixture=None, **_ignored) -> dict:
         },
         "warnings": warnings,
         "message": (
-            f"Expected {forecast.expected} {kind} against a line of {line}."
+            f"Expected {forecast.expected} {_kind_label(kind)} events against a line of {line}."
         ),
     }

@@ -378,6 +378,8 @@ class StatPalSnapshotServiceTests(TestCase):
                     "home_xg": 1.7,
                     "away_xg": 1.2,
                     "home_shots": 12,
+                    "home_shots_on_target": 5,
+                    "away_shots_on_goal": 4,
                     "away_corners": 5,
                     "home_yellow_cards": 2,
                     "away_yellow_cards": 3,
@@ -392,6 +394,8 @@ class StatPalSnapshotServiceTests(TestCase):
         self.assertEqual(summary["away_xg"], 1.2)
         self.assertEqual(summary["expected_goals"], 2.9)
         self.assertEqual(summary["home_shots"], 12)
+        self.assertEqual(summary["home_shots_on_target"], 5)
+        self.assertEqual(summary["away_shots_on_target"], 4)
         self.assertEqual(summary["away_corners"], 5)
         self.assertEqual(summary["home_yellow_cards"], 2)
         self.assertEqual(summary["away_yellow_cards"], 3)

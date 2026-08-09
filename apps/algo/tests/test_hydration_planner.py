@@ -42,6 +42,9 @@ class SnapshotRequirementTests(SimpleTestCase):
 
     def test_specialised_families_still_need_snapshots(self):
         self.assertTrue(snapshots_for_family("cards_total"))
+        self.assertTrue(snapshots_for_family("both_halves_total_goals"))
+        self.assertTrue(snapshots_for_family("shots_on_target_total"))
+        self.assertTrue(snapshots_for_family("team_shots_on_target"))
         self.assertTrue(snapshots_for_family("player_goal"))
 
     def test_unmodelled_family_needs_nothing(self):

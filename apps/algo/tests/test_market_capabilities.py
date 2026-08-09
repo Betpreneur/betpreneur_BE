@@ -78,11 +78,11 @@ class MarketCapabilityTests(SimpleTestCase):
         self.assertEqual(capability.data_quality, "unsupported")
         self.assertEqual(capability.confidence_cap, 0)
 
-    def test_team_shots_on_target_is_recognized_but_not_scoreable_yet(self):
+    def test_team_shots_on_target_is_recognized_and_scoreable(self):
         capability = market_capability_service.assess("Home Team Shots on Target Over 9.5")
 
-        self.assertFalse(capability.scoreable)
+        self.assertTrue(capability.scoreable)
         self.assertEqual(capability.market["family"], "team_shots_on_target")
-        self.assertEqual(capability.support_level, "unsupported")
-        self.assertEqual(capability.confidence_cap, 0)
-        self.assertIn("unsupported_market_family", capability.warnings)
+        self.assertEqual(capability.support_level, "medium")
+        self.assertGreater(capability.confidence_cap, 0)
+        self.assertNotIn("unsupported_market_family", capability.warnings)

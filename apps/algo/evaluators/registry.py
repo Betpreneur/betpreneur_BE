@@ -51,6 +51,7 @@ _GOAL_CORE = (Cap.TEAM_GOALS_FOR, Cap.TEAM_GOALS_AGAINST)
 _GOAL_RICH = (Cap.TEAM_SHOTS, Cap.TEAM_POSSESSION, Cap.MARKET_ODDS, Cap.INJURIES)
 _CARD_CORE = (Cap.TEAM_CARDS, Cap.TEAM_FOULS)
 _PLAYER_CORE = (Cap.PLAYER_SEASON_STATS,)
+_SOT_CORE = (Cap.TEAM_SHOTS_ON_TARGET,)
 
 
 MARKET_EVALUATORS: dict[str, EvaluatorSpec] = {
@@ -60,6 +61,14 @@ MARKET_EVALUATORS: dict[str, EvaluatorSpec] = {
     ),
     "team_total_goals": EvaluatorSpec(
         "team_total_goals", "_evaluate_team_goal_market", QUANTITATIVE, _GOAL_CORE, _GOAL_RICH
+    ),
+    "both_halves_total_goals": EvaluatorSpec(
+        "both_halves_total_goals",
+        "_evaluate_both_halves_total_goal_market",
+        QUANTITATIVE,
+        _GOAL_CORE,
+        _GOAL_RICH,
+        notes="approximated from first-half and second-half goal rates",
     ),
     # Corners and cards come from cached team rate profiles, not snapshots. The old
     # evaluators read fields the match-stats endpoint does not carry, so they returned a
@@ -107,6 +116,14 @@ MARKET_EVALUATORS: dict[str, EvaluatorSpec] = {
     "booking_points": EvaluatorSpec(
         "booking_points", "", QUANTITATIVE, _CARD_CORE,
         (Cap.REFEREE, Cap.LINEUP_PROJECTED, Cap.MARKET_ODDS), engine=COUNT_MODEL_ENGINE,
+    ),
+    "shots_on_target_total": EvaluatorSpec(
+        "shots_on_target_total", "", QUANTITATIVE, _SOT_CORE,
+        (Cap.MARKET_ODDS,), engine=COUNT_MODEL_ENGINE,
+    ),
+    "team_shots_on_target": EvaluatorSpec(
+        "team_shots_on_target", "", QUANTITATIVE, _SOT_CORE,
+        (Cap.MARKET_ODDS,), engine=COUNT_MODEL_ENGINE,
     ),
     "player_goal": EvaluatorSpec(
         "player_goal", "_evaluate_player_market", QUANTITATIVE, _PLAYER_CORE,

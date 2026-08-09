@@ -47,7 +47,7 @@ class AssessmentTypeTests(SimpleTestCase):
             self.assertEqual(assessment_type_for(family), QUANTITATIVE, family)
 
     def test_unmodelled_families_report_no_model(self):
-        for family in ["correct_score", "exact_goals", "winning_margin", "last_to_score", "team_shots_on_target"]:
+        for family in ["correct_score", "exact_goals", "winning_margin", "last_to_score"]:
             self.assertEqual(assessment_type_for(family), NONE, family)
 
     def test_only_quantitative_evaluators_may_publish_a_probability(self):
@@ -106,13 +106,26 @@ class DispatchTests(TestCase):
         self.assertEqual(result["basis"], "no_model_for_family")
         self.assertFalse(result["available"])
 
-    def test_team_shots_on_target_is_unmodelled_not_player_routed(self):
-        result = self._evaluate("Home Team Shots on Target Over 9.5")
+    def test_team_shots_on_target_is_count_model_not_player_routed(self):
+        descriptor = describe_market("Home Team Shots on Target Over 9.5")
+        fixture = {
+            "statpal_context": {
+                "snapshots": {
+                    "detailed_stats": {
+                        "summary": {
+                            "home_shots_on_target": 7,
+                            "away_shots_on_target": 4,
+                        }
+                    }
+                }
+            }
+        }
+        result = statpal_market_advisory.evaluate_market(descriptor, fixture=fixture)
 
-        self.assertEqual(result["assessment_type"], NONE)
-        self.assertEqual(result["basis"], "no_model_for_family")
+        self.assertEqual(result["assessment_type"], QUANTITATIVE)
+        self.assertEqual(result["basis"], "shots_on_target_count_model")
         self.assertEqual(result["market_family"], "team_shots_on_target")
-        self.assertFalse(result["available"])
+        self.assertTrue(result["available"])
 
     def test_every_result_states_its_family(self):
         self.assertEqual(self._evaluate("Over 2.5")["market_family"], "total_goals")

@@ -129,7 +129,13 @@ class StatPalMarketAdvisoryService:
         handler = getattr(self, spec.handler)
         if spec.handler == "_evaluate_player_market":
             advisory = handler(descriptor, fixture=fixture, statpal_payload=statpal_payload)
-        elif spec.handler in {"_evaluate_cards_market", "_evaluate_corners_market", "_evaluate_total_goal_market", "_evaluate_team_goal_market"}:
+        elif spec.handler in {
+            "_evaluate_cards_market",
+            "_evaluate_corners_market",
+            "_evaluate_total_goal_market",
+            "_evaluate_team_goal_market",
+            "_evaluate_both_halves_total_goal_market",
+        }:
             advisory = handler(descriptor, fixture=fixture, provider_payload=provider_payload)
         else:
             advisory = handler(descriptor, fixture=fixture)
@@ -465,6 +471,82 @@ class StatPalMarketAdvisoryService:
             evidence=evidence,
             warnings=warnings,
             message=self._team_goal_message(descriptor, expected_team, line, probability, team_side),
+        )
+
+    def _evaluate_both_halves_total_goal_market(self, descriptor: MarketDescriptor, *, fixture=None, provider_payload=None) -> StatPalAdvisory:
+        line = _num(descriptor.line, 0.5)
+        side = str(descriptor.selection or descriptor.side or "").lower()
+        direction, _, answer = side.partition("_")
+        direction = direction if direction in {"over", "under"} else "over"
+        answer = answer if answer in {"yes", "no"} else "yes"
+
+        first_expected, first_evidence, first_warnings = self._expected_total_goals(fixture, period="first_half")
+        second_expected, second_evidence, second_warnings = self._expected_total_goals(fixture, period="second_half")
+        warnings = list(dict.fromkeys([*first_warnings, *second_warnings, "period_split_approximation"]))
+
+        if first_expected <= 0 or second_expected <= 0:
+            return StatPalAdvisory(
+                available=False,
+                score=None,
+                status="needs_data",
+                basis="both_halves_goal_profile_missing",
+                evidence={
+                    "market_family": descriptor.family,
+                    "line": line,
+                    "direction": direction,
+                    "answer": answer,
+                    "first_half_expected_goals": first_expected or None,
+                    "second_half_expected_goals": second_expected or None,
+                    "estimated_probability": None,
+                },
+                warnings=list(dict.fromkeys(warnings)),
+                message="Expected-goals inputs are unavailable for this both-halves market.",
+            )
+
+        first_probability = self._goal_line_probability(first_expected, line, direction)
+        second_probability = self._goal_line_probability(second_expected, line, direction)
+        yes_probability = first_probability * second_probability
+        probability = yes_probability if answer == "yes" else 1.0 - yes_probability
+        score = round(max(0, min(100, probability * 100)), 1)
+        payload = {
+            "available": True,
+            "score": score,
+            "status": _status(score),
+            "basis": "statpal_both_halves_goal_model",
+            "evidence": {
+                "market_family": descriptor.family,
+                "line": line,
+                "direction": direction,
+                "answer": answer,
+                "first_half_expected_goals": first_expected,
+                "second_half_expected_goals": second_expected,
+                "first_half_probability": round(first_probability * 100, 1),
+                "second_half_probability": round(second_probability * 100, 1),
+                "estimated_probability": round(probability * 100, 1),
+                "first_half_sources": first_evidence.get("goal_model_sources") or [],
+                "second_half_sources": second_evidence.get("goal_model_sources") or [],
+                "recognized": True,
+            },
+            "warnings": warnings,
+        }
+        payload = self._apply_odds_overlay(
+            payload,
+            descriptor=descriptor,
+            fixture=fixture,
+            provider_payload=provider_payload,
+        )
+        score = round(max(0, min(100, _num(payload.get("score"), score))), 1)
+        return StatPalAdvisory(
+            available=True,
+            score=score,
+            status=_status(score),
+            basis="statpal_both_halves_goal_model",
+            evidence=payload.get("evidence") or {},
+            warnings=list(dict.fromkeys(payload.get("warnings") or [])),
+            message=(
+                f"Both-halves {direction} {line} is estimated from first-half goals "
+                f"{first_expected} and second-half goals {second_expected}."
+            ),
         )
 
     def _score_matrix_fallback(self, descriptor: MarketDescriptor, *, fixture=None, provider_payload=None) -> dict[str, Any] | None:

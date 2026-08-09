@@ -97,6 +97,20 @@ class StatPalSnapshotService:
             StatPalFixtureSnapshot.SnapshotType.DETAILED_STATS,
             StatPalFixtureSnapshot.SnapshotType.PREMATCH_ODDS,
         ),
+        "both_halves_total_goals": (
+            StatPalFixtureSnapshot.SnapshotType.TEAM_STATS,
+            StatPalFixtureSnapshot.SnapshotType.PREDICTIONS,
+            StatPalFixtureSnapshot.SnapshotType.DETAILED_STATS,
+            StatPalFixtureSnapshot.SnapshotType.PREMATCH_ODDS,
+        ),
+        "shots_on_target_total": (
+            StatPalFixtureSnapshot.SnapshotType.DETAILED_STATS,
+            StatPalFixtureSnapshot.SnapshotType.PREMATCH_ODDS,
+        ),
+        "team_shots_on_target": (
+            StatPalFixtureSnapshot.SnapshotType.DETAILED_STATS,
+            StatPalFixtureSnapshot.SnapshotType.PREMATCH_ODDS,
+        ),
         "cards_total": (
             StatPalFixtureSnapshot.SnapshotType.DETAILED_STATS,
             StatPalFixtureSnapshot.SnapshotType.LINEUPS,
@@ -949,6 +963,30 @@ class StatPalSnapshotService:
             "expected_goals": total_xg,
             "home_shots": StatPalSnapshotService._find_numeric(payload, "home_shots", "shots_home", "home_total_shots"),
             "away_shots": StatPalSnapshotService._find_numeric(payload, "away_shots", "shots_away", "away_total_shots"),
+            "home_shots_on_target": (
+                StatPalSnapshotService._team_metric(team_stats, "home", "shots_on_goal")
+                or StatPalSnapshotService._team_metric(team_stats, "home", "shots_on_target")
+                or StatPalSnapshotService._find_numeric(
+                    payload,
+                    "home_shots_on_target",
+                    "home_shots_on_goal",
+                    "shots_on_target_home",
+                    "shots_on_goal_home",
+                    "home_sot",
+                )
+            ),
+            "away_shots_on_target": (
+                StatPalSnapshotService._team_metric(team_stats, "away", "shots_on_goal")
+                or StatPalSnapshotService._team_metric(team_stats, "away", "shots_on_target")
+                or StatPalSnapshotService._find_numeric(
+                    payload,
+                    "away_shots_on_target",
+                    "away_shots_on_goal",
+                    "shots_on_target_away",
+                    "shots_on_goal_away",
+                    "away_sot",
+                )
+            ),
             "home_corners": (
                 StatPalSnapshotService._team_metric(team_stats, "home", "corners")
                 or StatPalSnapshotService._find_numeric(payload, "home_corners", "corners_home", "home_corner_kicks", "home_avg_corners", "avg_corners_home")

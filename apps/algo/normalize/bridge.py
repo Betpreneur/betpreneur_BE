@@ -55,6 +55,9 @@ FAMILY_TO_TAXONOMY = {
     "goalscorer_last": "player_goal",
     "player_shots": "player_shots",
     "player_shots_on_target": "player_shots_on_target",
+    "both_halves_total_goals": "both_halves_total_goals",
+    "team_shots_on_target": "team_shots_on_target",
+    "shots_on_target_total": "shots_on_target_total",
     "nth_goal": "first_to_score",
     "team_goals_odd_even": "odd_even",
 }

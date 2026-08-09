@@ -1009,6 +1009,77 @@ class StatPalAdvisoryUnitTests(SimpleTestCase):
         self.assertEqual(result["evidence"]["statpal_team_history_goals_for"], 2.2)
         self.assertIn("score_matrix_fit_missing", result["warnings"])
 
+    def test_both_halves_total_goals_uses_period_team_history(self):
+        descriptor = MarketDescriptor(
+            raw="Both Halves Over 1.5 - Yes",
+            canonical="Both Halves Over 1.5 - Yes",
+            code="both_halves_total_goals",
+            family="both_halves_total_goals",
+            category="Goals",
+            selection="over_yes",
+            side="over_yes",
+            line="1.5",
+            period="match",
+        )
+        fixture = {
+            "statpal_context": {
+                "available": True,
+                "snapshots": {
+                    "team_stats": {
+                        "summary": {
+                            "team_count": 2,
+                            "home": {
+                                "fixture_side": "home",
+                                "team_name": "Home",
+                                "sample_size": 20,
+                                "firsthalf_avg_goals_for": 1.1,
+                                "firsthalf_avg_goals_against": 0.5,
+                                "secondhalf_avg_goals_for": 1.4,
+                                "secondhalf_avg_goals_against": 0.7,
+                            },
+                            "away": {
+                                "fixture_side": "away",
+                                "team_name": "Away",
+                                "sample_size": 20,
+                                "firsthalf_avg_goals_for": 0.6,
+                                "firsthalf_avg_goals_against": 1.0,
+                                "secondhalf_avg_goals_for": 0.8,
+                                "secondhalf_avg_goals_against": 1.2,
+                            },
+                            "teams": [
+                                {
+                                    "fixture_side": "home",
+                                    "team_name": "Home",
+                                    "sample_size": 20,
+                                    "firsthalf_avg_goals_for": 1.1,
+                                    "firsthalf_avg_goals_against": 0.5,
+                                    "secondhalf_avg_goals_for": 1.4,
+                                    "secondhalf_avg_goals_against": 0.7,
+                                },
+                                {
+                                    "fixture_side": "away",
+                                    "team_name": "Away",
+                                    "sample_size": 20,
+                                    "firsthalf_avg_goals_for": 0.6,
+                                    "firsthalf_avg_goals_against": 1.0,
+                                    "secondhalf_avg_goals_for": 0.8,
+                                    "secondhalf_avg_goals_against": 1.2,
+                                },
+                            ],
+                        }
+                    }
+                },
+            },
+        }
+
+        result = statpal_market_advisory.evaluate_market(descriptor, fixture=fixture)
+
+        self.assertTrue(result["available"])
+        self.assertEqual(result["basis"], "statpal_both_halves_goal_model")
+        self.assertEqual(result["assessment_type"], "quantitative_model")
+        self.assertGreater(result["evidence"]["first_half_expected_goals"], 0)
+        self.assertGreater(result["evidence"]["second_half_expected_goals"], 0)
+
     def test_team_goal_market_declines_when_expected_profile_is_zero(self):
         descriptor = describe_market("Home Team Goals Over 1.5")
 

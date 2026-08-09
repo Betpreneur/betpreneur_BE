@@ -102,6 +102,8 @@ def _detailed_stats_supports_count_market(family: str, statpal_context) -> bool:
             summary.get(key) is not None
             for key in ("home_yellow_cards", "away_yellow_cards", "home_red_cards", "away_red_cards", "total_cards", "booking_points")
         )
+    if family in {"shots_on_target_total", "team_shots_on_target"}:
+        return summary.get("home_shots_on_target") is not None and summary.get("away_shots_on_target") is not None
     return False
 
 
