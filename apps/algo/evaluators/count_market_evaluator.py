@@ -64,6 +64,11 @@ def _detailed_summary(fixture):
     return ((snapshots.get("detailed_stats") or {}).get("summary") or {})
 
 
+def _team_stats_summary(fixture):
+    snapshots = (((fixture or {}).get("statpal_context") or {}).get("snapshots") or {})
+    return ((snapshots.get("team_stats") or {}).get("summary") or {})
+
+
 def _summary_number(summary, *keys):
     for key in keys:
         try:
@@ -83,17 +88,43 @@ def _kind_label(kind: str) -> str:
     }.get(kind, kind)
 
 
+def _team_stats_side_rate(summary, side: str, *keys):
+    side_summary = (summary or {}).get(side) or {}
+    value = _summary_number(side_summary, *keys)
+    if value is not None:
+        return value
+    teams = (summary or {}).get("teams") or []
+    for team in teams:
+        if isinstance(team, dict) and team.get("fixture_side") == side:
+            return _summary_number(team, *keys)
+    return None
+
+
 def _statpal_forecast(descriptor, fixture, *, kind: str, team: str = ""):
     summary = _detailed_summary(fixture)
-    if not summary:
-        return None
+    source = "statpal_detailed_stats"
     if kind == "corners":
+        if not summary:
+            return None
         home = _summary_number(summary, "home_corners")
         away = _summary_number(summary, "away_corners")
     elif kind == "shots_on_target":
+        team_summary = _team_stats_summary(fixture)
         home = _summary_number(summary, "home_shots_on_target", "home_sot")
         away = _summary_number(summary, "away_shots_on_target", "away_sot")
+        if home is None:
+            home = _team_stats_side_rate(team_summary, "home", "shots_on_target_home", "shots_on_target_total")
+            if home is not None:
+                source = "statpal_team_stats"
+        if away is None:
+            away = _team_stats_side_rate(team_summary, "away", "shots_on_target_away", "shots_on_target_total")
+            if away is not None:
+                source = "statpal_team_stats"
+        if home is None and away is None:
+            return None
     else:
+        if not summary:
+            return None
         home_yellows = _summary_number(summary, "home_yellow_cards")
         home_reds = _summary_number(summary, "home_red_cards")
         away_yellows = _summary_number(summary, "away_yellow_cards")
@@ -126,7 +157,7 @@ def _statpal_forecast(descriptor, fixture, *, kind: str, team: str = ""):
         return None
     return counts.CountForecast(
         expected=round(max(0.1, expected), 3),
-        sources=("statpal_detailed_stats",),
+        sources=(source,),
         matches=counts.SHRINKAGE_MATCHES,
     )
 

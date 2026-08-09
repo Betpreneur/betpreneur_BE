@@ -255,6 +255,37 @@ class CountEvaluatorSnapshotFallbackTests(SimpleTestCase):
         self.assertEqual(result["evidence"]["expected_shots_on_target"], 11)
         self.assertEqual(result["evidence"]["sources"], ["statpal_detailed_stats"])
 
+    def test_shots_on_target_total_can_use_statpal_team_stats_snapshot(self):
+        fixture = {
+            "hname": "Nobody",
+            "aname": "Nowhere",
+            "statpal_context": {
+                "snapshots": {
+                    "team_stats": {
+                        "summary": {
+                            "home": {
+                                "fixture_side": "home",
+                                "shots_on_target_home": 5.4,
+                            },
+                            "away": {
+                                "fixture_side": "away",
+                                "shots_on_target_away": 4.9,
+                            },
+                        }
+                    }
+                }
+            },
+        }
+        descriptor = self._descriptor("shots_on_target_total", "over", line="9.5")
+
+        with patch("apps.algo.evaluators.count_market_evaluator._profiles", return_value=(None, None)):
+            result = count_market_evaluator.evaluate(descriptor, fixture=fixture)
+
+        self.assertTrue(result["available"])
+        self.assertEqual(result["basis"], "shots_on_target_count_model")
+        self.assertEqual(result["evidence"]["expected_shots_on_target"], 10.3)
+        self.assertEqual(result["evidence"]["sources"], ["statpal_team_stats"])
+
     def test_api_team_ids_are_not_used_as_statpal_profile_ids(self):
         fixture = {"hid": "1025", "aid": "571", "hname": "Wolfsberger AC", "aname": "Salzburg"}
 
