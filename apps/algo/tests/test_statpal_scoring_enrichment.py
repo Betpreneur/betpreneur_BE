@@ -72,6 +72,36 @@ class StatPalScoringEnrichmentTests(SimpleTestCase):
         self.assertLess(adjusted["Over 2.5"], base_scores["Over 2.5"])
 
 
+class StatPalFixtureMappingPureTests(SimpleTestCase):
+    def test_serialized_enriched_fixture_keeps_statpal_team_ids(self):
+        cached = FixtureCache(
+            match_date=date(2026, 8, 7),
+            fixture="Norway vs England",
+            home_team="Norway",
+            away_team="England",
+            home_team_normalized="norway",
+            away_team_normalized="england",
+            match_id="1581037",
+            source="api_football",
+            api_payload={
+                "provider_competition_id": "999",
+                "provider_home_team_id": "10",
+                "provider_away_team_id": "20",
+                "statpal_provider_match_id": "sp-100",
+                "statpal_provider_competition_id": "1",
+                "statpal_home_team_id": "2339730",
+                "statpal_away_team_id": "2346325",
+            },
+        )
+
+        fixture = FixtureSearchService()._serialize_fixture(cached, 100, "direct")
+
+        self.assertEqual(fixture["statpal_provider_match_id"], "sp-100")
+        self.assertEqual(fixture["statpal_provider_competition_id"], "1")
+        self.assertEqual(fixture["statpal_home_team_id"], "2339730")
+        self.assertEqual(fixture["statpal_away_team_id"], "2346325")
+
+
 class StatPalFixtureMappingTests(TestCase):
     def test_attach_statpal_fixture_context_matches_same_day_teams(self):
         FixtureCache.objects.create(
@@ -86,6 +116,8 @@ class StatPalFixtureMappingTests(TestCase):
             api_payload={
                 "provider_match_id": "sp-100",
                 "provider_competition_id": "1",
+                "provider_home_team_id": "2339730",
+                "provider_away_team_id": "2346325",
             },
         )
         fixtures = [
@@ -104,3 +136,5 @@ class StatPalFixtureMappingTests(TestCase):
         self.assertEqual(enriched[0]["statpal_match_id"], "statpal:sp-100")
         self.assertEqual(enriched[0]["statpal_provider_match_id"], "sp-100")
         self.assertEqual(enriched[0]["statpal_provider_competition_id"], "1")
+        self.assertEqual(enriched[0]["statpal_home_team_id"], "2339730")
+        self.assertEqual(enriched[0]["statpal_away_team_id"], "2346325")

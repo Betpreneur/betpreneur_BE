@@ -320,12 +320,34 @@ class ProviderMappingService:
 
     @staticmethod
     def _mapping_candidate(mapping: ProviderFixtureMap) -> dict[str, Any]:
+        candidate = ((mapping.payload or {}).get("candidate") or {}) if isinstance(mapping.payload, dict) else {}
+        cached_payload = {}
+        if not (candidate.get("home_team_id") and candidate.get("away_team_id")):
+            try:
+                cached_payload = (
+                    FixtureCache.objects.filter(match_id=str(mapping.api_fixture_id or ""))
+                    .values_list("api_payload", flat=True)
+                    .first()
+                    or {}
+                )
+            except Exception:
+                cached_payload = {}
         return {
             "match_id": mapping.api_fixture_id,
-            "provider_match_id": ((mapping.payload or {}).get("candidate") or {}).get("provider_match_id", ""),
+            "provider_match_id": candidate.get("provider_match_id") or cached_payload.get("provider_match_id") or "",
+            "fallback_match_ids": candidate.get("fallback_match_ids") or cached_payload.get("fallback_match_ids") or [],
+            "provider_competition_id": str(
+                candidate.get("provider_competition_id") or cached_payload.get("provider_competition_id") or mapping.api_league_id or ""
+            ),
             "league": mapping.api_league_name,
+            "country": str(candidate.get("country") or cached_payload.get("country") or ""),
             "home_team": mapping.api_home_team,
             "away_team": mapping.api_away_team,
+            "home_team_id": str(candidate.get("home_team_id") or cached_payload.get("provider_home_team_id") or cached_payload.get("hid") or ""),
+            "away_team_id": str(candidate.get("away_team_id") or cached_payload.get("provider_away_team_id") or cached_payload.get("aid") or ""),
+            "kickoff_utc": mapping.kickoff_at,
+            "match_date": mapping.kickoff_at.date() if mapping.kickoff_at else candidate.get("match_date"),
+            "source": "statpal",
             "match_score": float(mapping.confidence or 0),
         }
 

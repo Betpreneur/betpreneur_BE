@@ -375,9 +375,13 @@ class FixtureSearchService:
             row = by_pair.get(key)
             if row:
                 payload = row.api_payload or {}
+                home_team_id = payload.get("provider_home_team_id") or payload.get("hid") or ""
+                away_team_id = payload.get("provider_away_team_id") or payload.get("aid") or ""
                 item["statpal_match_id"] = row.match_id
                 item["statpal_provider_match_id"] = payload.get("provider_match_id") or row.match_id.replace("statpal:", "", 1)
                 item["statpal_provider_competition_id"] = payload.get("provider_competition_id") or payload.get("code") or ""
+                item["statpal_home_team_id"] = str(home_team_id or "")
+                item["statpal_away_team_id"] = str(away_team_id or "")
                 item["statpal_payload"] = payload
             enriched.append(item)
         return enriched
@@ -889,6 +893,9 @@ class FixtureSearchService:
         home_team_id = payload.get("provider_home_team_id") or payload.get("hid") or payload.get("home_team_id")
         away_team_id = payload.get("provider_away_team_id") or payload.get("aid") or payload.get("away_team_id")
         league_id = payload.get("provider_competition_id") or payload.get("code") or payload.get("league_id")
+        statpal_home_team_id = payload.get("statpal_home_team_id") or (home_team_id if fixture.source == "statpal" else "")
+        statpal_away_team_id = payload.get("statpal_away_team_id") or (away_team_id if fixture.source == "statpal" else "")
+        statpal_provider_competition_id = payload.get("statpal_provider_competition_id") or (league_id if fixture.source == "statpal" else "")
         return {
             "match_id": fixture.match_id,
             "match_date": fixture.match_date,
@@ -897,8 +904,10 @@ class FixtureSearchService:
             "away_team": fixture.away_team,
             "home_team_id": home_team_id,
             "away_team_id": away_team_id,
-            "statpal_home_team_id": home_team_id if fixture.source == "statpal" else "",
-            "statpal_away_team_id": away_team_id if fixture.source == "statpal" else "",
+            "statpal_home_team_id": statpal_home_team_id,
+            "statpal_away_team_id": statpal_away_team_id,
+            "statpal_provider_match_id": payload.get("statpal_provider_match_id") or "",
+            "statpal_provider_competition_id": statpal_provider_competition_id,
             "provider_match_id": payload.get("provider_match_id") or payload.get("main_id") or "",
             "hid": home_team_id,
             "aid": away_team_id,

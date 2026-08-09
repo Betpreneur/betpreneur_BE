@@ -1,9 +1,40 @@
 from datetime import datetime, timezone as py_timezone
 
-from django.test import TestCase
+from django.test import SimpleTestCase, TestCase
 
 from apps.algo.models import FixtureCache, ProviderFixtureMap, ProviderPlayerMap, ProviderTeamMap, TeamAliasMap
 from apps.algo.provider_mapping import provider_mapping_service
+
+
+class ProviderMappingPureTests(SimpleTestCase):
+    def test_mapping_candidate_keeps_statpal_ids_from_payload(self):
+        mapping = ProviderFixtureMap(
+            api_fixture_id="statpal:2026080912345",
+            api_league_id=37,
+            api_league_name="Eredivisie",
+            api_home_team="Sparta Rotterdam",
+            api_away_team="Feyenoord",
+            kickoff_at=datetime(2026, 8, 9, 15, 15, tzinfo=py_timezone.utc),
+            confidence=100,
+            payload={
+                "candidate": {
+                    "provider_match_id": "2026080912345",
+                    "fallback_match_ids": ["6024103"],
+                    "provider_competition_id": "37",
+                    "home_team_id": "2339001",
+                    "away_team_id": "2339002",
+                    "country": "netherlands",
+                }
+            },
+        )
+
+        candidate = provider_mapping_service._mapping_candidate(mapping)
+
+        self.assertEqual(candidate["provider_match_id"], "2026080912345")
+        self.assertEqual(candidate["provider_competition_id"], "37")
+        self.assertEqual(candidate["home_team_id"], "2339001")
+        self.assertEqual(candidate["away_team_id"], "2339002")
+        self.assertEqual(candidate["source"], "statpal")
 
 
 class ProviderMappingServiceTests(TestCase):
@@ -67,6 +98,18 @@ class ProviderMappingServiceTests(TestCase):
         self.assertEqual(mapping.api_away_team, "Feyenoord")
         self.assertEqual(mapping.resolution_method, "sportybet_statpal_team_date_direct")
         self.assertEqual(mapping.payload["candidate"]["provider_match_id"], "2026080912345")
+
+    def test_existing_sportybet_statpal_mapping_keeps_statpal_team_ids(self):
+        self._statpal_fixture()
+        provider_mapping_service.match_sportybet_to_statpal(self._sportybet_event())
+
+        result = provider_mapping_service.match_sportybet_to_statpal(self._sportybet_event())
+
+        self.assertTrue(result["matched"])
+        self.assertTrue(result["existing"])
+        self.assertEqual(result["candidate"]["provider_competition_id"], "37")
+        self.assertEqual(result["candidate"]["home_team_id"], "2339001")
+        self.assertEqual(result["candidate"]["away_team_id"], "2339002")
 
     def test_match_sportybet_to_statpal_rejects_weak_candidate(self):
         self._statpal_fixture(
