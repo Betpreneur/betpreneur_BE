@@ -7,12 +7,15 @@ from django.test import SimpleTestCase, TestCase
 from apps.algo.models import SlipReview
 from apps.algo.ticket_risk import SCORE_BANDS, Calibration
 from apps.algo.views import (
+    _has_statpal_hydration_identity,
     _manual_review_summary,
     _matched_fixture_with_statpal,
     _public_price_check_from_card,
+    _should_skip_core_on_demand,
     _slip_review_payload,
     _ticket_killers_message,
 )
+from apps.algo.market_taxonomy import describe_market
 
 
 def _sample_replace_result():
@@ -256,6 +259,35 @@ class MatchedFixtureStatPalPayloadTests(SimpleTestCase):
         self.assertEqual(payload["statpal_provider_competition_id"], "3038")
         self.assertEqual(payload["statpal_home_team_id"], "2340001")
         self.assertEqual(payload["statpal_away_team_id"], "2340002")
+
+    def test_statpal_hydration_identity_detects_provider_or_team_ids(self):
+        self.assertTrue(_has_statpal_hydration_identity({"match_id": "statpal:123"}))
+        self.assertTrue(_has_statpal_hydration_identity({"statpal_home_team_id": "home-1"}))
+        self.assertTrue(_has_statpal_hydration_identity({}, {"provider_match_id": "202608091"}))
+        self.assertTrue(_has_statpal_hydration_identity({}, {}, {"provider": "statpal", "provider_event_id": "202608091"}))
+
+    def test_statpal_hydration_identity_rejects_plain_api_fixture_only(self):
+        self.assertFalse(_has_statpal_hydration_identity({"match_id": "1494240", "home_team": "A", "away_team": "B"}))
+
+    def test_skip_core_requires_existing_game_or_statpal_identity_for_any_skip_market(self):
+        for market in ["Home Win", "Cards Over 3.5", "Florian Wirtz To Score"]:
+            descriptor = describe_market(market)
+
+            self.assertFalse(
+                _should_skip_core_on_demand(
+                    descriptor,
+                    candidate={"match_id": "1494240", "home_team": "A", "away_team": "B"},
+                ),
+                market,
+            )
+            self.assertTrue(_should_skip_core_on_demand(descriptor, game={"markets": []}), market)
+            self.assertTrue(
+                _should_skip_core_on_demand(
+                    descriptor,
+                    candidate={"match_id": "statpal:1494240", "home_team": "A", "away_team": "B"},
+                ),
+                market,
+            )
 
 
 class SlipReviewPublicContractTests(SimpleTestCase):

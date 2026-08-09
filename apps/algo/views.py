@@ -2519,6 +2519,37 @@ def _market_can_skip_core_on_demand(descriptor):
     return spec.engine in {SCORE_MATRIX_ENGINE, COUNT_MODEL_ENGINE} or descriptor.family.startswith("player_")
 
 
+def _has_statpal_hydration_identity(candidate=None, statpal_candidate=None, provider_metadata=None):
+    candidate = candidate or {}
+    statpal_candidate = statpal_candidate or {}
+    provider_metadata = provider_metadata or {}
+    if str(provider_metadata.get("provider") or "").lower() == "statpal":
+        if provider_metadata.get("provider_event_id"):
+            return True
+    for payload in (statpal_candidate, candidate):
+        if not isinstance(payload, dict):
+            continue
+        if (
+            payload.get("provider_match_id")
+            or payload.get("statpal_provider_match_id")
+            or str(payload.get("match_id") or "").startswith("statpal:")
+            or payload.get("home_team_id")
+            or payload.get("away_team_id")
+            or payload.get("statpal_home_team_id")
+            or payload.get("statpal_away_team_id")
+        ):
+            return True
+    return False
+
+
+def _should_skip_core_on_demand(descriptor, *, game=None, candidate=None, statpal_candidate=None, provider_metadata=None):
+    if not _market_can_skip_core_on_demand(descriptor):
+        return False
+    if game:
+        return True
+    return _has_statpal_hydration_identity(candidate, statpal_candidate, provider_metadata)
+
+
 def _consume_review_force_fresh(review_scoring_context):
     if review_scoring_context is None:
         return True
@@ -4042,12 +4073,30 @@ def _analyse_manual_selection(
     if skip_core_on_demand:
         game = _manual_fixture_game(candidate["match_id"], candidate["match_date"], request=request)
         if not game:
-            game = _minimal_game_from_candidate(candidate)
-            on_demand = {
-                "status": "skipped",
-                "reason": "market_served_by_match_checker_advisory",
-                "market_family": market_descriptor.family,
-            }
+            if _should_skip_core_on_demand(
+                market_descriptor,
+                game=game,
+                candidate=candidate,
+                statpal_candidate=statpal_candidate,
+                provider_metadata=provider_metadata,
+            ):
+                game = _minimal_game_from_candidate(candidate)
+                on_demand = {
+                    "status": "skipped",
+                    "reason": "market_served_by_match_checker_advisory",
+                    "market_family": market_descriptor.family,
+                }
+            else:
+                effective_force_fresh = _consume_review_force_fresh(review_scoring_context)
+                on_demand = algo_runner_service.score_cached_fixture_on_demand(
+                    candidate["match_id"],
+                    match_date=candidate.get("match_date"),
+                    reason="slip_review_market_context",
+                    force=effective_force_fresh,
+                )
+                game = _manual_fixture_game(candidate["match_id"], candidate["match_date"], request=request)
+                if not game:
+                    game = _minimal_game_from_candidate(candidate)
     elif force_fresh:
         effective_force_fresh = _consume_review_force_fresh(review_scoring_context)
         on_demand = algo_runner_service.score_cached_fixture_on_demand(
