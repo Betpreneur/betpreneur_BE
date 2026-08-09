@@ -101,6 +101,42 @@ class StatPalSnapshotContextPayloadTests(SimpleTestCase):
         self.assertEqual(summary["avg_corners"], 6.2)
         self.assertEqual(summary["firsthalf_avg_goals_for"], 0.9)
 
+    def test_team_stats_summary_ignores_impossible_half_goal_averages(self):
+        summary = StatPalSnapshotService._summarize_team_stats(
+            {
+                "provider_team_id": "2340835",
+                "name": "Arsenal FC",
+                "league_stats": [
+                    {
+                        "league": "UEFA Champions League",
+                        "season": "2025/2026",
+                        "fulltime": {
+                            "win": {"total": 10},
+                            "draw": {"total": 3},
+                            "lost": {"total": 2},
+                            "avg_goals_per_game_scored": {"total": 2.0},
+                            "avg_goals_per_game_conceded": {"total": 0.53},
+                        },
+                        "firsthalf": {
+                            "avg_goals_per_game_scored": {"total": 25},
+                            "avg_goals_per_game_conceded": {"total": 19},
+                        },
+                        "secondhalf": {
+                            "avg_goals_per_game_scored": {"total": 70},
+                            "avg_goals_per_game_conceded": {"total": 55},
+                        },
+                    }
+                ],
+            }
+        )
+
+        self.assertEqual(summary["avg_goals_for"], 2.0)
+        self.assertEqual(summary["avg_goals_against"], 0.53)
+        self.assertIsNone(summary["firsthalf_avg_goals_for"])
+        self.assertIsNone(summary["firsthalf_avg_goals_against"])
+        self.assertIsNone(summary["secondhalf_avg_goals_for"])
+        self.assertIsNone(summary["secondhalf_avg_goals_against"])
+
     def test_team_stats_context_combines_home_and_away_profiles(self):
         service = StatPalSnapshotService()
         rows = [

@@ -2,7 +2,12 @@ from django.contrib.auth import get_user_model
 from django.test import SimpleTestCase, TestCase
 
 from apps.algo.models import SlipReview
-from apps.algo.views import _manual_review_summary, _public_price_check_from_card, _slip_review_payload
+from apps.algo.views import (
+    _manual_review_summary,
+    _matched_fixture_with_statpal,
+    _public_price_check_from_card,
+    _slip_review_payload,
+)
 
 
 def _sample_replace_result():
@@ -201,6 +206,29 @@ class PublicPriceCheckTests(SimpleTestCase):
         self.assertEqual(price_check["status"], "short_price")
         self.assertEqual(price_check["edge_percent"], -10.0)
         self.assertIn("shorter than the StatPal reference", price_check["message"])
+
+
+class MatchedFixtureStatPalPayloadTests(SimpleTestCase):
+    def test_matched_fixture_keeps_statpal_ids_for_debug_and_hydration(self):
+        payload = _matched_fixture_with_statpal(
+            {"match_id": "1558588", "home_team": "Anderlecht", "away_team": "RAAL La Louviere"},
+            {"fixture": "Anderlecht vs RAAL La Louviere"},
+            {
+                "match_id": "statpal:202608091558588",
+                "provider_match_id": "202608091558588",
+                "provider_competition_id": "3038",
+                "home_team_id": "2340001",
+                "away_team_id": "2340002",
+                "home_team": "Anderlecht",
+                "away_team": "RAAL La Louviere",
+            },
+        )
+
+        self.assertEqual(payload["match_id"], "1558588")
+        self.assertEqual(payload["statpal_provider_match_id"], "202608091558588")
+        self.assertEqual(payload["statpal_provider_competition_id"], "3038")
+        self.assertEqual(payload["statpal_home_team_id"], "2340001")
+        self.assertEqual(payload["statpal_away_team_id"], "2340002")
 
 
 class SlipReviewPublicContractTests(TestCase):

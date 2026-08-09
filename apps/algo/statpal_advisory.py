@@ -383,10 +383,19 @@ class StatPalMarketAdvisoryService:
             "selection": descriptor.selection or descriptor.side,
             "market_family": descriptor.family,
             "recognized": True,
-            "estimated_probability": probability,
         })
         if expected_total <= 0:
             warnings.append("goal_profile_missing")
+            return StatPalAdvisory(
+                available=False,
+                score=None,
+                status="needs_data",
+                basis="goal_profile_missing",
+                evidence={**evidence, "estimated_probability": None},
+                warnings=list(dict.fromkeys(warnings)),
+                message="Expected-goals inputs are unavailable for this fixture.",
+            )
+        evidence["estimated_probability"] = probability
         if abs(expected_total - line) < 0.35:
             warnings.append("thin_goal_edge")
             score -= 5
@@ -422,10 +431,19 @@ class StatPalMarketAdvisoryService:
             "team": team_side,
             "market_family": descriptor.family,
             "recognized": True,
-            "estimated_probability": probability,
         }
         if expected_team <= 0:
             warnings = ["team_goal_profile_missing"]
+            return StatPalAdvisory(
+                available=False,
+                score=None,
+                status="needs_data",
+                basis="team_goal_profile_missing",
+                evidence={**evidence, "estimated_probability": None},
+                warnings=list(dict.fromkeys(warnings)),
+                message="Team expected-goals inputs are unavailable for this fixture.",
+            )
+        evidence["estimated_probability"] = probability
         if abs(expected_team - line) < 0.25:
             warnings.append("thin_team_goal_edge")
             score -= 4

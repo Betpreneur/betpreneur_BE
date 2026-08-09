@@ -2351,6 +2351,29 @@ def _minimal_game_from_candidate(candidate):
     }
 
 
+def _matched_fixture_with_statpal(candidate, game=None, statpal_candidate=None, *, provider_match_id="", provider_competition_id="", home_team_id="", away_team_id=""):
+    candidate = candidate or {}
+    game = game or {}
+    statpal_candidate = statpal_candidate or {}
+    return {
+        **candidate,
+        "match_id": game.get("match_id") or candidate.get("match_id"),
+        "fixture": game.get("fixture") or candidate.get("fixture"),
+        "home_team": game.get("home_team") or candidate.get("home_team"),
+        "away_team": game.get("away_team") or candidate.get("away_team"),
+        "league": game.get("league") or candidate.get("league"),
+        "country": game.get("country") or candidate.get("country"),
+        "kickoff": game.get("kickoff") or candidate.get("kickoff"),
+        "statpal_match_id": statpal_candidate.get("match_id") or "",
+        "statpal_provider_match_id": provider_match_id or statpal_candidate.get("provider_match_id") or "",
+        "statpal_provider_competition_id": provider_competition_id or statpal_candidate.get("provider_competition_id") or "",
+        "statpal_home_team_id": home_team_id or statpal_candidate.get("home_team_id") or "",
+        "statpal_away_team_id": away_team_id or statpal_candidate.get("away_team_id") or "",
+        "statpal_home_team": statpal_candidate.get("home_team") or "",
+        "statpal_away_team": statpal_candidate.get("away_team") or "",
+    }
+
+
 def _resolved_taxonomy(selection):
     """
     The descriptor the importer already resolved from the bookmaker's market ids.
@@ -4008,6 +4031,15 @@ def _analyse_manual_selection(
         "statpal_home_team_id": statpal_home_team_id,
         "statpal_away_team_id": statpal_away_team_id,
     }
+    matched_fixture_payload = _matched_fixture_with_statpal(
+        candidate,
+        scoring_game,
+        statpal_candidate,
+        provider_match_id=statpal_provider_match_id,
+        provider_competition_id=statpal_provider_competition_id,
+        home_team_id=statpal_home_team_id,
+        away_team_id=statpal_away_team_id,
+    )
     hydrator = hydration_cache or FixtureHydrator()
     statpal_bundle = hydrator.bundle_for(
         market_descriptor,
@@ -4070,7 +4102,7 @@ def _analyse_manual_selection(
             "fixture_orientation": candidate.get("match_orientation", ""),
             "status": resolution_status,
             **verdict,
-            "matched_fixture": candidate,
+            "matched_fixture": matched_fixture_payload,
             "available_markets": [market.get("market") for market in markets],
             "selected_market": submitted_market,
             "best_market": game.get("best_market"),
@@ -4112,18 +4144,7 @@ def _analyse_manual_selection(
         "fixture_orientation": candidate.get("match_orientation", ""),
         "status": "analysed",
         **verdict,
-        "matched_fixture": {
-            "match_id": game.get("match_id"),
-            "match_date": candidate.get("match_date"),
-            "fixture": game.get("fixture"),
-            "home_team": game.get("home_team"),
-            "away_team": game.get("away_team"),
-            "league": game.get("league"),
-            "country": game.get("country"),
-            "kickoff": game.get("kickoff"),
-            "match_score": candidate.get("match_score"),
-            "match_orientation": candidate.get("match_orientation", ""),
-        },
+        "matched_fixture": matched_fixture_payload,
         "selected_market": selected_market,
         "best_market": best_market,
         "recommended_market": recommended_market,

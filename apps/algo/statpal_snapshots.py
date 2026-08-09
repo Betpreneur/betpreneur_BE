@@ -66,12 +66,14 @@ class StatPalSnapshotService:
             StatPalFixtureSnapshot.SnapshotType.PREMATCH_ODDS,
         ),
         "total_goals": (
+            StatPalFixtureSnapshot.SnapshotType.TEAM_STATS,
             StatPalFixtureSnapshot.SnapshotType.PREDICTIONS,
             StatPalFixtureSnapshot.SnapshotType.DETAILED_STATS,
             StatPalFixtureSnapshot.SnapshotType.PREMATCH_ODDS,
             StatPalFixtureSnapshot.SnapshotType.INJURIES_SUSPENSIONS,
         ),
         "team_total_goals": (
+            StatPalFixtureSnapshot.SnapshotType.TEAM_STATS,
             StatPalFixtureSnapshot.SnapshotType.PREDICTIONS,
             StatPalFixtureSnapshot.SnapshotType.DETAILED_STATS,
             StatPalFixtureSnapshot.SnapshotType.PREMATCH_ODDS,
@@ -819,8 +821,8 @@ class StatPalSnapshotService:
             secondhalf = current.get("secondhalf") or {}
             games_played = StatPalSnapshotService._team_phase_value(fulltime, "win")
             games_played = (games_played or 0) + (StatPalSnapshotService._team_phase_value(fulltime, "draw") or 0) + (StatPalSnapshotService._team_phase_value(fulltime, "lost") or 0)
-            goals_for_avg = StatPalSnapshotService._team_phase_value(fulltime, "avg_goals_per_game_scored")
-            goals_against_avg = StatPalSnapshotService._team_phase_value(fulltime, "avg_goals_per_game_conceded")
+            goals_for_avg = StatPalSnapshotService._team_goal_average_value(fulltime, "avg_goals_per_game_scored")
+            goals_against_avg = StatPalSnapshotService._team_goal_average_value(fulltime, "avg_goals_per_game_conceded")
             avg_total_goals = None
             if goals_for_avg is not None or goals_against_avg is not None:
                 avg_total_goals = round((goals_for_avg or 0) + (goals_against_avg or 0), 2)
@@ -841,10 +843,10 @@ class StatPalSnapshotService:
                 "failed_to_score": StatPalSnapshotService._team_phase_value(fulltime, "failed_to_score"),
                 "avg_corners": StatPalSnapshotService._team_phase_value(fulltime, "avg_corners"),
                 "avg_yellowcards": StatPalSnapshotService._team_phase_value(fulltime, "avg_yellowcards"),
-                "firsthalf_avg_goals_for": StatPalSnapshotService._team_phase_value(firsthalf, "avg_goals_per_game_scored"),
-                "firsthalf_avg_goals_against": StatPalSnapshotService._team_phase_value(firsthalf, "avg_goals_per_game_conceded"),
-                "secondhalf_avg_goals_for": StatPalSnapshotService._team_phase_value(secondhalf, "avg_goals_per_game_scored"),
-                "secondhalf_avg_goals_against": StatPalSnapshotService._team_phase_value(secondhalf, "avg_goals_per_game_conceded"),
+                "firsthalf_avg_goals_for": StatPalSnapshotService._team_goal_average_value(firsthalf, "avg_goals_per_game_scored"),
+                "firsthalf_avg_goals_against": StatPalSnapshotService._team_goal_average_value(firsthalf, "avg_goals_per_game_conceded"),
+                "secondhalf_avg_goals_for": StatPalSnapshotService._team_goal_average_value(secondhalf, "avg_goals_per_game_scored"),
+                "secondhalf_avg_goals_against": StatPalSnapshotService._team_goal_average_value(secondhalf, "avg_goals_per_game_conceded"),
                 "top_level_keys": sorted(payload.keys()),
             }
         team = (payload or {}).get("team") or {}
@@ -875,6 +877,16 @@ class StatPalSnapshotService:
         if not isinstance(bucket, dict):
             return None
         return StatPalSnapshotService._to_number(bucket.get(scope))
+
+    @staticmethod
+    def _team_goal_average_value(phase: dict[str, Any], field: str, scope: str = "total"):
+        value = StatPalSnapshotService._team_phase_value(phase, field, scope=scope)
+        # StatPal occasionally returns percentage-like values in half-specific goal
+        # buckets. A team averaging 25 first-half goals is not a football signal; it is
+        # malformed for this model, so do not let it drive recommendations.
+        if value is not None and value > 10:
+            return None
+        return value
 
     @staticmethod
     def _summarize_predictions(payload: dict[str, Any], match_id="", provider_match_id="") -> dict[str, Any]:

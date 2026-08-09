@@ -254,7 +254,7 @@ class StatPalAdvisoryUnitTests(SimpleTestCase):
         self.assertEqual(result["basis"], "statpal_corner_market_model")
         self.assertEqual(result["evidence"]["expected_total_corners"], 5.8)
 
-    def test_injury_snapshot_can_help_under_goal_market(self):
+    def test_injury_snapshot_alone_cannot_price_under_goal_market(self):
         descriptor = describe_market("Under 3.5")
         fixture = {
             "statpal_context": {
@@ -272,9 +272,10 @@ class StatPalAdvisoryUnitTests(SimpleTestCase):
 
         result = statpal_market_advisory._evaluate_total_goal_market(descriptor, fixture=fixture).to_dict()
 
-        self.assertEqual(result["basis"], "statpal_goal_market_model")
-        self.assertGreater(result["evidence"]["injury_adjustment"], 0)
-        self.assertIn("team_news_affects_goal_market", result["warnings"])
+        self.assertFalse(result["available"])
+        self.assertEqual(result["basis"], "goal_profile_missing")
+        self.assertIsNone(result["score"])
+        self.assertIn("goal_profile_missing", result["warnings"])
 
     def test_total_goal_market_uses_expected_goals_and_line_probability(self):
         descriptor = describe_market("Over 3.5")
@@ -891,6 +892,26 @@ class StatPalAdvisoryUnitTests(SimpleTestCase):
         self.assertEqual(result["evidence"]["team_goal_model_source"], "statpal_team_history")
         self.assertEqual(result["evidence"]["statpal_team_history_goals_for"], 2.2)
         self.assertIn("score_matrix_fit_missing", result["warnings"])
+
+    def test_team_goal_market_declines_when_expected_profile_is_zero(self):
+        descriptor = describe_market("Home Team Goals Over 1.5")
+
+        result = statpal_market_advisory._evaluate_team_goal_market(descriptor, fixture={}).to_dict()
+
+        self.assertFalse(result["available"])
+        self.assertIsNone(result["score"])
+        self.assertEqual(result["basis"], "team_goal_profile_missing")
+        self.assertIn("team_goal_profile_missing", result["warnings"])
+
+    def test_total_goal_market_declines_when_expected_profile_is_zero(self):
+        descriptor = describe_market("Over 2.5")
+
+        result = statpal_market_advisory._evaluate_total_goal_market(descriptor, fixture={}).to_dict()
+
+        self.assertFalse(result["available"])
+        self.assertIsNone(result["score"])
+        self.assertEqual(result["basis"], "goal_profile_missing")
+        self.assertIn("goal_profile_missing", result["warnings"])
 
 
 class StatPalAdvisoryMappingTests(TestCase):
