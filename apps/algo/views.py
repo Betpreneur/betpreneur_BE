@@ -2333,14 +2333,14 @@ def _minimal_game_from_candidate(candidate):
         "kickoff": candidate.get("kickoff", ""),
         "match_id": str(candidate.get("match_id") or ""),
         "match_date": candidate.get("match_date"),
-        "statpal_home_team_id": candidate.get("statpal_home_team_id") or candidate.get("hid") or "",
-        "statpal_away_team_id": candidate.get("statpal_away_team_id") or candidate.get("aid") or "",
+        "statpal_home_team_id": candidate.get("statpal_home_team_id") or "",
+        "statpal_away_team_id": candidate.get("statpal_away_team_id") or "",
         "code": candidate.get("code") or candidate.get("league_id") or "",
         "league_id": candidate.get("league_id") or candidate.get("code") or "",
         "hname": candidate.get("hname") or candidate.get("home_team", ""),
         "aname": candidate.get("aname") or candidate.get("away_team", ""),
-        "hid": candidate.get("hid") or candidate.get("statpal_home_team_id") or "",
-        "aid": candidate.get("aid") or candidate.get("statpal_away_team_id") or "",
+        "hid": candidate.get("hid") or "",
+        "aid": candidate.get("aid") or "",
         "markets": [],
         "market_count": 0,
         "recommendation_status": "no_edge",
@@ -3999,14 +3999,23 @@ def _analyse_manual_selection(
     elif isinstance(statpal_candidate, dict):
         statpal_provider_match_id = statpal_candidate.get("provider_match_id") or str(statpal_candidate.get("match_id") or "").replace("statpal:", "", 1)
         statpal_provider_competition_id = statpal_candidate.get("provider_competition_id") or statpal_provider_competition_id
+    statpal_home_team_id = (statpal_candidate.get("home_team_id") if isinstance(statpal_candidate, dict) else "") or game.get("statpal_home_team_id") or ""
+    statpal_away_team_id = (statpal_candidate.get("away_team_id") if isinstance(statpal_candidate, dict) else "") or game.get("statpal_away_team_id") or ""
+    scoring_game = {
+        **game,
+        "statpal_provider_match_id": statpal_provider_match_id,
+        "statpal_provider_competition_id": statpal_provider_competition_id,
+        "statpal_home_team_id": statpal_home_team_id,
+        "statpal_away_team_id": statpal_away_team_id,
+    }
     hydrator = hydration_cache or FixtureHydrator()
     statpal_bundle = hydrator.bundle_for(
         market_descriptor,
         match_id=(statpal_candidate.get("match_id") if isinstance(statpal_candidate, dict) and statpal_candidate.get("match_id") else candidate.get("match_id")),
         provider_match_id=statpal_provider_match_id,
         provider_competition_id=statpal_provider_competition_id,
-        home_team_id=(statpal_candidate.get("home_team_id") if isinstance(statpal_candidate, dict) else "") or candidate.get("statpal_home_team_id") or candidate.get("hid") or "",
-        away_team_id=(statpal_candidate.get("away_team_id") if isinstance(statpal_candidate, dict) else "") or candidate.get("statpal_away_team_id") or candidate.get("aid") or "",
+        home_team_id=statpal_home_team_id,
+        away_team_id=statpal_away_team_id,
     )
     statpal_refresh = statpal_bundle.get("refreshed") or {}
     statpal_context = statpal_bundle.get("context") or {}
@@ -4014,17 +4023,17 @@ def _analyse_manual_selection(
     # Snapshot coverage is only the right yardstick for the StatPal advisory path;
     # matrix- and count-model markets are judged on the data that actually serves them.
     market_capability = capability_for_descriptor(
-        market_descriptor, fixture=game, statpal_context=statpal_context
+        market_descriptor, fixture=scoring_game, statpal_context=statpal_context
     )
     statpal_advisory = statpal_market_advisory.evaluate_market(
         market_descriptor,
-        fixture={**game, "statpal_context": statpal_context},
+        fixture={**scoring_game, "statpal_context": statpal_context},
         provider_payload=selection.get("provider_payload") or {},
         statpal_payload=selection.get("statpal_payload"),
     )
     generated_markets = _generated_match_checker_markets(
         market_descriptor,
-        game=game,
+        game=scoring_game,
         statpal_context=statpal_context,
         provider_payload=selection.get("provider_payload") or {},
         statpal_payload=selection.get("statpal_payload"),

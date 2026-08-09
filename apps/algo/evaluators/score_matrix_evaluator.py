@@ -28,11 +28,11 @@ def _line(descriptor) -> float | None:
 def _fixture_ids(fixture):
     fixture = fixture or {}
     return {
-        "league_id": str(fixture.get("code") or fixture.get("league_id") or ""),
+        "league_id": str(fixture.get("statpal_provider_competition_id") or fixture.get("code") or fixture.get("league_id") or ""),
         "home_team_name": fixture.get("hname") or fixture.get("home_team") or "",
         "away_team_name": fixture.get("aname") or fixture.get("away_team") or "",
-        "home_team_id": str(fixture.get("statpal_home_team_id") or fixture.get("hid") or ""),
-        "away_team_id": str(fixture.get("statpal_away_team_id") or fixture.get("aid") or ""),
+        "home_team_id": str(fixture.get("statpal_home_team_id") or ""),
+        "away_team_id": str(fixture.get("statpal_away_team_id") or ""),
     }
 
 

@@ -1717,8 +1717,8 @@ class AlgoRunnerService:
                 provider_match_id=provider_match_id,
                 provider_competition_id=provider_competition_id,
             )
-            home_team_id = str(fixture.get("statpal_home_team_id") or fixture.get("hid") or "").strip()
-            away_team_id = str(fixture.get("statpal_away_team_id") or fixture.get("aid") or "").strip()
+            home_team_id = str(fixture.get("statpal_home_team_id") or "").strip()
+            away_team_id = str(fixture.get("statpal_away_team_id") or "").strip()
             if home_team_id or away_team_id:
                 team_refresh = statpal_snapshot_service.refresh_fixture_team_stats(
                     match_id=match_id,

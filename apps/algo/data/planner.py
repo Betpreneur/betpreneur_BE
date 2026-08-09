@@ -101,7 +101,7 @@ def capability_for_descriptor(descriptor, *, fixture=None, statpal_context=None)
 
         game = fixture or {}
         rates = score_model_service.rates_for_fixture(
-            league_id=game.get("code") or game.get("league_id") or "",
+            league_id=game.get("statpal_provider_competition_id") or game.get("code") or game.get("league_id") or "",
             home_team_name=game.get("hname") or game.get("home_team") or "",
             away_team_name=game.get("aname") or game.get("away_team") or "",
         )
@@ -113,10 +113,10 @@ def capability_for_descriptor(descriptor, *, fixture=None, statpal_context=None)
         game = fixture or {}
         context = statpal_context or game.get("statpal_context") or {}
         home = team_rate_profile_service.profile_for(
-            team_id=str(game.get("hid") or ""), team_name=game.get("hname") or game.get("home_team") or ""
+            team_id=str(game.get("statpal_home_team_id") or ""), team_name=game.get("hname") or game.get("home_team") or ""
         )
         away = team_rate_profile_service.profile_for(
-            team_id=str(game.get("aid") or ""), team_name=game.get("aname") or game.get("away_team") or ""
+            team_id=str(game.get("statpal_away_team_id") or ""), team_name=game.get("aname") or game.get("away_team") or ""
         )
         available = [profile for profile in (home, away) if profile is not None]
         if not available and _detailed_stats_supports_count_market(descriptor.family, context):

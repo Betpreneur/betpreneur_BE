@@ -48,11 +48,11 @@ def _line(descriptor):
 def _profiles(fixture):
     fixture = fixture or {}
     home = team_rate_profile_service.profile_for(
-        team_id=str(fixture.get("statpal_home_team_id") or fixture.get("hid") or ""),
+        team_id=str(fixture.get("statpal_home_team_id") or ""),
         team_name=fixture.get("hname") or fixture.get("home_team") or "",
     )
     away = team_rate_profile_service.profile_for(
-        team_id=str(fixture.get("statpal_away_team_id") or fixture.get("aid") or ""),
+        team_id=str(fixture.get("statpal_away_team_id") or ""),
         team_name=fixture.get("aname") or fixture.get("away_team") or "",
     )
     return home, away

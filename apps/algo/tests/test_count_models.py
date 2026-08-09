@@ -207,6 +207,29 @@ class CountEvaluatorSnapshotFallbackTests(SimpleTestCase):
         self.assertEqual(result["evidence"]["expected_cards"], 3)
         self.assertEqual(result["evidence"]["sources"], ["statpal_detailed_stats"])
 
+    def test_api_team_ids_are_not_used_as_statpal_profile_ids(self):
+        fixture = {"hid": "1025", "aid": "571", "hname": "Wolfsberger AC", "aname": "Salzburg"}
+
+        with patch("apps.algo.evaluators.count_market_evaluator.team_rate_profile_service.profile_for", return_value=None) as profile_for:
+            count_market_evaluator.evaluate(describe_market("Corners Over 8.5"), fixture=fixture)
+
+        self.assertEqual(profile_for.call_args_list[0].kwargs["team_id"], "")
+        self.assertEqual(profile_for.call_args_list[1].kwargs["team_id"], "")
+
+    def test_explicit_statpal_team_ids_are_used_for_profiles(self):
+        fixture = {
+            "statpal_home_team_id": "2341001",
+            "statpal_away_team_id": "2341002",
+            "hname": "Home",
+            "aname": "Away",
+        }
+
+        with patch("apps.algo.evaluators.count_market_evaluator.team_rate_profile_service.profile_for", return_value=None) as profile_for:
+            count_market_evaluator.evaluate(describe_market("Corners Over 8.5"), fixture=fixture)
+
+        self.assertEqual(profile_for.call_args_list[0].kwargs["team_id"], "2341001")
+        self.assertEqual(profile_for.call_args_list[1].kwargs["team_id"], "2341002")
+
 
 class CountEvaluatorTests(TestCase):
     def setUp(self):
@@ -220,7 +243,7 @@ class CountEvaluatorTests(TestCase):
             team_name_normalized="beta", corners_home=5.0, corners_away=4.0,
             cards_home=1.8, cards_away=2.0, matches=20,
         )
-        self.fixture = {"hid": "h1", "aid": "a1", "hname": "Alpha", "aname": "Beta"}
+        self.fixture = {"statpal_home_team_id": "h1", "statpal_away_team_id": "a1", "hname": "Alpha", "aname": "Beta"}
 
     def _evaluate(self, market):
         return count_market_evaluator.evaluate(describe_market(market), fixture=self.fixture)
