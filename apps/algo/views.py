@@ -3018,12 +3018,7 @@ def _selection_has_analysis(item):
 
 
 def _selection_is_unmatched(item):
-    if item.get("status") in {"unmatched", "ambiguous_match"}:
-        return True
-    if item.get("status") == "market_not_found":
-        selected_market = item.get("selected_market") or {}
-        return not item.get("replacement_market") and _float_or_none(selected_market.get("advisory_score")) is None
-    return False
+    return item.get("status") in {"unmatched", "ambiguous_match"}
 
 
 def _selection_strength_score(item):
@@ -3249,7 +3244,7 @@ def _ticket_killers_message(ticket_risk):
         f"{share}% of this ticket's risk."
     )
     if lift > 0:
-        message += f" Removing {'it' if count == 1 else 'them'} would raise the estimated success rate by about {round(lift, 2)} percentage points."
+        message += f" Changing {'it' if count == 1 else 'them'} to safer backed alternatives would raise the estimated success rate by about {round(lift, 2)} percentage points."
     return message
 
 

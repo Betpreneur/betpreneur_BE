@@ -16,13 +16,29 @@ from apps.algo.market_taxonomy import describe_market
 
 
 class SnapshotRequirementTests(SimpleTestCase):
-    def test_matrix_served_families_need_no_snapshots(self):
-        for family in ["match_result", "double_chance", "btts", "clean_sheet"]:
-            self.assertEqual(snapshots_for_family(family), [], family)
-
-    def test_goal_volume_families_request_statpal_fallback_snapshots(self):
-        self.assertIn("team_stats", snapshots_for_family("total_goals"))
-        self.assertIn("team_stats", snapshots_for_family("team_total_goals"))
+    def test_score_matrix_families_request_statpal_fallback_snapshots(self):
+        for family in [
+            "match_result",
+            "double_chance",
+            "draw_no_bet",
+            "btts",
+            "result_btts",
+            "clean_sheet",
+            "result_total_goals",
+            "total_btts",
+            "double_chance_btts",
+            "double_chance_total_goals",
+            "result_or_total_goals",
+            "result_or_btts",
+            "result_or_clean_sheet",
+            "odd_even",
+            "asian_handicap",
+            "handicap",
+            "first_to_score",
+            "total_goals",
+            "team_total_goals",
+        ]:
+            self.assertIn("team_stats", snapshots_for_family(family), family)
 
     def test_specialised_families_still_need_snapshots(self):
         self.assertTrue(snapshots_for_family("cards_total"))
@@ -47,11 +63,11 @@ class HydratorTests(SimpleTestCase):
         }
         self.hydrator = FixtureHydrator(snapshot_service=self.service)
 
-    def test_matrix_family_never_calls_the_provider(self):
+    def test_score_matrix_family_can_fetch_statpal_fallback_context(self):
         self.hydrator.bundle_for(describe_market("Home Win"), match_id="1")
 
-        self.service.prepare_fixture_context_for_market.assert_not_called()
-        self.assertEqual(self.hydrator.stats.served_by_model, 1)
+        self.service.prepare_fixture_context_for_market.assert_called_once()
+        self.assertEqual(self.hydrator.stats.calls_used, 1)
 
     def test_specialised_family_calls_the_provider_once(self):
         descriptor = describe_market("Cards Over 3.5")
@@ -97,8 +113,8 @@ class HydratorTests(SimpleTestCase):
             self.hydrator.bundle_for(cards, match_id="1")
             self.hydrator.bundle_for(result, match_id="1")
 
-        self.assertEqual(self.service.prepare_fixture_context_for_market.call_count, 1)
-        self.assertEqual(self.hydrator.stats.served_by_model, 25)
+        self.assertEqual(self.service.prepare_fixture_context_for_market.call_count, 2)
+        self.assertEqual(self.hydrator.stats.served_from_cache, 48)
 
     def test_team_stats_requirement_fetches_home_and_away_profiles(self):
         descriptor = describe_market("Corners Over 9.5")
@@ -174,9 +190,11 @@ class PlanTests(SimpleTestCase):
         self.assertEqual(plan["fixtures_served_by_model"], 0)
         self.assertEqual(plan["fixtures_needing_snapshots"], 2)
 
-    def test_a_wholly_matrix_served_slip_needs_no_calls(self):
+    def test_a_wholly_score_matrix_slip_plans_fallback_calls(self):
         plan = plan_slip_hydration([
             self._selection(f"sr:match:{index}", "match_result") for index in range(20)
         ])
 
-        self.assertEqual(plan["estimated_snapshot_calls"], 0)
+        self.assertEqual(plan["fixtures_needing_snapshots"], 20)
+        self.assertEqual(plan["fixtures_served_by_model"], 0)
+        self.assertEqual(plan["estimated_snapshot_calls"], 60)

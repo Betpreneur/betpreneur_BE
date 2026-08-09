@@ -1,12 +1,17 @@
+from unittest.mock import patch
+from types import SimpleNamespace
+
 from django.contrib.auth import get_user_model
 from django.test import SimpleTestCase, TestCase
 
 from apps.algo.models import SlipReview
+from apps.algo.ticket_risk import SCORE_BANDS, Calibration
 from apps.algo.views import (
     _manual_review_summary,
     _matched_fixture_with_statpal,
     _public_price_check_from_card,
     _slip_review_payload,
+    _ticket_killers_message,
 )
 
 
@@ -134,6 +139,28 @@ def _sample_market_not_found_without_replacement_but_scored():
     return result
 
 
+def _sample_market_not_found_without_score():
+    result = _sample_replace_result()
+    result["submitted_market"] = "1H Over 0.5"
+    result["status"] = "market_not_found"
+    result["verdict"] = "not_assessed"
+    result["message"] = "There is not enough data on this market to assess it."
+    result["replacement_market"] = None
+    result["selected_market"] = {
+        "market": "1H Over 0.5",
+        "advisory_score": None,
+        "advisory_status": "unknown",
+        "advisory_evidence": {},
+        "statpal_advisory": {"available": False, "assessment_type": "quantitative_model"},
+    }
+    result["market_taxonomy"] = {
+        "recognized": True,
+        "core_supported": False,
+        "family": "total_goals",
+    }
+    return result
+
+
 class PublicPriceCheckTests(SimpleTestCase):
     def test_public_price_check_summarizes_positive_edge(self):
         price_check = _public_price_check_from_card(
@@ -231,7 +258,20 @@ class MatchedFixtureStatPalPayloadTests(SimpleTestCase):
         self.assertEqual(payload["statpal_away_team_id"], "2340002")
 
 
-class SlipReviewPublicContractTests(TestCase):
+class SlipReviewPublicContractTests(SimpleTestCase):
+    def setUp(self):
+        super().setUp()
+        bands = {name: {"wins": 0, "settled": 0, "hit_rate_percent": None} for name, _, _ in SCORE_BANDS}
+        self._calibration_patch = patch(
+            "apps.algo.views.ticket_risk_service.calibration",
+            return_value=Calibration(basis="prior", sample_size=0, bands=bands),
+        )
+        self._calibration_patch.start()
+
+    def tearDown(self):
+        self._calibration_patch.stop()
+        super().tearDown()
+
     def test_public_review_contract_is_frontend_friendly(self):
         summary = _manual_review_summary([_sample_replace_result()])
         public = summary["public"]
@@ -320,6 +360,35 @@ class SlipReviewPublicContractTests(TestCase):
         self.assertEqual(public["counts"]["unmatched"], 0)
         self.assertEqual(public["selections"][0]["verdict"]["code"], "remove")
 
+    def test_market_not_found_without_score_counts_as_not_assessed_not_unmatched(self):
+        summary = _manual_review_summary([_sample_market_not_found_without_score()])
+        public = summary["public"]
+
+        self.assertEqual(summary["analysed_count"], 0)
+        self.assertEqual(summary["unmatched_count"], 0)
+        self.assertEqual(summary["not_assessed_count"], 1)
+        self.assertEqual(public["ticket"]["unmatched_legs"], 0)
+        self.assertEqual(public["counts"]["unmatched"], 0)
+        self.assertEqual(public["counts"]["not_assessed"], 1)
+        self.assertEqual(public["selections"][0]["state"], "insufficient_data")
+
+    def test_ticket_killers_recommend_changing_not_removing(self):
+        message = _ticket_killers_message(
+            SimpleNamespace(
+                killers=[
+                    {
+                        "drop_lift_points": 12.34,
+                        "risk_share_percent": 55.5,
+                    }
+                ],
+            )
+        )
+
+        self.assertNotIn("Removing", message)
+        self.assertIn("Changing", message)
+
+
+class SlipReviewPayloadDbTests(TestCase):
     def test_public_only_review_payload_hides_internal_summary(self):
         user = get_user_model().objects.create_user(username="tester")
         summary = _manual_review_summary([_sample_replace_result()])

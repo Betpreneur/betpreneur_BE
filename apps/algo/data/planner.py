@@ -28,7 +28,27 @@ DEFAULT_CALL_BUDGET = 120
 # certainty because fitted rates and fixture snapshots can still be thin or live-state
 # dependent.
 MODEL_CONFIDENCE_CAPS = {"strong": 85, "medium": 75, "limited": 62, "poor": 0}
-SCORE_MATRIX_FALLBACK_FAMILIES = {"total_goals", "team_total_goals"}
+SCORE_MATRIX_FALLBACK_FAMILIES = {
+    "match_result",
+    "double_chance",
+    "draw_no_bet",
+    "btts",
+    "result_btts",
+    "clean_sheet",
+    "result_total_goals",
+    "total_btts",
+    "double_chance_btts",
+    "double_chance_total_goals",
+    "result_or_total_goals",
+    "result_or_btts",
+    "result_or_clean_sheet",
+    "odd_even",
+    "asian_handicap",
+    "handicap",
+    "first_to_score",
+    "total_goals",
+    "team_total_goals",
+}
 
 
 def snapshots_for_family(family: str) -> list[str]:

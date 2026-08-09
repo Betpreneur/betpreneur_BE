@@ -14,6 +14,7 @@ from .evaluators.registry import (
 )
 from .market_taxonomy import MarketDescriptor, describe_market, normalize_market_text
 from .models import ProviderPlayerMap
+from .scoring.dixon_coles import build_score_matrix
 
 
 def _num(value, default=0.0) -> float:
@@ -375,7 +376,7 @@ class StatPalMarketAdvisoryService:
 
     def _evaluate_total_goal_market(self, descriptor: MarketDescriptor, *, fixture=None, provider_payload=None) -> StatPalAdvisory:
         line = _num(descriptor.line, 2.5)
-        expected_total, evidence, warnings = self._expected_total_goals(fixture)
+        expected_total, evidence, warnings = self._expected_total_goals(fixture, period=descriptor.period)
         probability = self._goal_line_probability(expected_total, line, descriptor.selection or descriptor.side)
         score = self._probability_score(probability, line=line, market_side=descriptor.selection or descriptor.side)
         evidence.update({
@@ -472,11 +473,81 @@ class StatPalMarketAdvisoryService:
         elif descriptor.family == "team_total_goals":
             advisory = self._evaluate_team_goal_market(descriptor, fixture=fixture, provider_payload=provider_payload)
         else:
-            return None
+            advisory = self._evaluate_score_matrix_market(descriptor, fixture=fixture, provider_payload=provider_payload)
         payload = advisory.to_dict()
         if payload.get("score") is None or payload.get("basis") in {"score_matrix_no_fit", "no_model_for_family"}:
             return None
         return payload
+
+    def _evaluate_score_matrix_market(self, descriptor: MarketDescriptor, *, fixture=None, provider_payload=None) -> StatPalAdvisory:
+        home_expected, away_expected, evidence, warnings = self._expected_score_rates(fixture, period=descriptor.period)
+        if home_expected <= 0 or away_expected <= 0:
+            warnings.append("score_matrix_fallback_profile_missing")
+            return StatPalAdvisory(
+                available=False,
+                score=None,
+                status="needs_data",
+                basis="score_matrix_fallback_profile_missing",
+                evidence={
+                    **evidence,
+                    "market_family": descriptor.family,
+                    "estimated_probability": None,
+                },
+                warnings=list(dict.fromkeys(warnings)),
+                message="Expected-goals inputs are unavailable for this score-combo market.",
+            )
+
+        from .evaluators.score_matrix_evaluator import _outcome_probability
+
+        matrix = build_score_matrix(home_expected, away_expected)
+        probability, push = _outcome_probability(descriptor, matrix)
+        if probability is None:
+            return StatPalAdvisory(
+                available=False,
+                score=None,
+                status="unsupported",
+                basis="score_matrix_fallback_unmapped_outcome",
+                evidence={"market_family": descriptor.family, "side": descriptor.side},
+                warnings=["outcome_not_derivable"],
+                message="This outcome could not be derived from the StatPal-backed score model.",
+            )
+
+        score = round(max(0, min(100, probability * 100)), 1)
+        payload = {
+            "available": True,
+            "score": score,
+            "status": _status(score),
+            "basis": "statpal_score_matrix_fallback",
+            "evidence": {
+                **evidence,
+                "market_family": descriptor.family,
+                "expected_goals_home": round(home_expected, 2),
+                "expected_goals_away": round(away_expected, 2),
+                "estimated_probability": round(probability * 100, 1),
+                "push_probability": round(push, 6),
+                "recognized": True,
+            },
+            "warnings": list(dict.fromkeys([*warnings, "score_matrix_fit_missing"])),
+        }
+        payload = self._apply_odds_overlay(
+            payload,
+            descriptor=descriptor,
+            fixture=fixture,
+            provider_payload=provider_payload,
+        )
+        score = round(max(0, min(100, _num(payload.get("score"), score))), 1)
+        return StatPalAdvisory(
+            available=True,
+            score=score,
+            status=_status(score),
+            basis="statpal_score_matrix_fallback",
+            evidence=payload.get("evidence") or {},
+            warnings=payload.get("warnings") or [],
+            message=(
+                f"Derived from StatPal-backed expected goals: {round(home_expected, 2)} home, "
+                f"{round(away_expected, 2)} away."
+            ),
+        )
 
     # `_evaluate_fixture_context_market` was removed here. It returned a hardcoded 58
     # plus snapshot nudges for 1X2, Double Chance, DNB, BTTS and clean sheets -- the
@@ -484,7 +555,7 @@ class StatPalMarketAdvisoryService:
     # though it were modelled. Those families are now derived from the fitted score
     # distribution (apps.algo.evaluators.score_matrix_evaluator, ADR-001).
 
-    def _expected_total_goals(self, fixture=None) -> tuple[float, dict[str, Any], list[str]]:
+    def _expected_total_goals(self, fixture=None, *, period: str = "full_match") -> tuple[float, dict[str, Any], list[str]]:
         fixture = fixture or {}
         context = fixture.get("fixture_context") or {}
         goal_model = context.get("goal_model") or {}
@@ -520,9 +591,15 @@ class StatPalMarketAdvisoryService:
             category="Goals",
             selection="over",
             side="over",
-            period="full_match",
+            period=period or "full_match",
         )) if team_stats else {}
         history_expected = _num(history.get("avg_total_goals"), 0)
+        period_prefix = "firsthalf_" if period == "first_half" else "secondhalf_" if period == "second_half" else ""
+        if period_prefix:
+            scored = _num(history.get(f"{period_prefix}avg_goals_for"), None)
+            conceded = _num(history.get(f"{period_prefix}avg_goals_against"), None)
+            if scored is not None or conceded is not None:
+                history_expected = round((scored or 0) + (conceded or 0), 2)
         if history_expected:
             sources.append("statpal_team_history")
             expected = round((expected * 0.6 + history_expected * 0.4), 2) if expected else history_expected
@@ -534,9 +611,13 @@ class StatPalMarketAdvisoryService:
         if form_expected:
             sources.append("recent_scoring_form")
             expected = round((expected * 0.7 + form_expected * 0.3), 2) if expected else form_expected
+        if period_prefix and expected and "statpal_team_history" not in sources:
+            expected = round(expected * (0.45 if period == "first_half" else 0.55), 2)
+            sources.append(f"{period}_period_factor")
 
         evidence = {
             "expected_total_goals": round(expected, 2) if expected else 0,
+            "period": period or "full_match",
             "fixture_expected_goals": _num(goal_model.get("expected_total"), None),
             "statpal_expected_goals": statpal_expected or None,
             "statpal_home_xg": home_xg or None,
@@ -547,6 +628,80 @@ class StatPalMarketAdvisoryService:
         }
         warnings = [] if expected else ["expected_goals_unavailable"]
         return round(expected, 2), evidence, warnings
+
+    def _expected_score_rates(self, fixture=None, *, period: str = "full_match") -> tuple[float, float, dict[str, Any], list[str]]:
+        fixture = fixture or {}
+        statpal = self._statpal_summaries(fixture)
+        predictions = statpal.get("predictions") or {}
+        detailed = statpal.get("detailed_stats") or {}
+        team_stats = statpal.get("team_stats") or {}
+        period = period or "full_match"
+        period_prefix = "firsthalf_" if period == "first_half" else "secondhalf_" if period == "second_half" else ""
+        sources = []
+
+        home_expected = _num(detailed.get("home_xg"), 0) or _num(predictions.get("home_xg"), 0)
+        away_expected = _num(detailed.get("away_xg"), 0) or _num(predictions.get("away_xg"), 0)
+        if home_expected or away_expected:
+            sources.append("statpal_expected_goals")
+
+        home_history = self._team_history_summary_for_descriptor(
+            team_stats,
+            MarketDescriptor(
+                raw="home_score_matrix",
+                canonical="home_score_matrix",
+                code="home_score_matrix",
+                family="team_total_goals",
+                category="Goals",
+                selection="over",
+                side="over",
+                team="home",
+                period=period,
+            ),
+        ) if team_stats else {}
+        away_history = self._team_history_summary_for_descriptor(
+            team_stats,
+            MarketDescriptor(
+                raw="away_score_matrix",
+                canonical="away_score_matrix",
+                code="away_score_matrix",
+                family="team_total_goals",
+                category="Goals",
+                selection="over",
+                side="over",
+                team="away",
+                period=period,
+            ),
+        ) if team_stats else {}
+
+        home_history_expected = _num(
+            home_history.get(f"{period_prefix}avg_goals_for") if period_prefix else home_history.get("avg_goals_for"),
+            0,
+        )
+        away_history_expected = _num(
+            away_history.get(f"{period_prefix}avg_goals_for") if period_prefix else away_history.get("avg_goals_for"),
+            0,
+        )
+        if home_history_expected or away_history_expected:
+            sources.append("statpal_team_history")
+            home_expected = round(home_expected * 0.55 + home_history_expected * 0.45, 2) if home_expected else home_history_expected
+            away_expected = round(away_expected * 0.55 + away_history_expected * 0.45, 2) if away_expected else away_history_expected
+
+        if period_prefix and (home_expected or away_expected) and "statpal_team_history" not in sources:
+            factor = 0.45 if period == "first_half" else 0.55
+            home_expected = round(home_expected * factor, 2)
+            away_expected = round(away_expected * factor, 2)
+            sources.append(f"{period}_period_factor")
+
+        evidence = {
+            "period": period,
+            "home_expected_goals": round(home_expected, 2) if home_expected else None,
+            "away_expected_goals": round(away_expected, 2) if away_expected else None,
+            "home_team_history_goals": home_history_expected or None,
+            "away_team_history_goals": away_history_expected or None,
+            "score_matrix_sources": sources,
+        }
+        warnings = [] if home_expected and away_expected else ["expected_score_rates_unavailable"]
+        return round(home_expected, 2), round(away_expected, 2), evidence, warnings
 
     def _expected_team_goals(self, fixture=None, *, team_side="") -> tuple[float, dict[str, Any], list[str]]:
         fixture = fixture or {}

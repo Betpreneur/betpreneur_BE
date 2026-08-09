@@ -312,6 +312,122 @@ class StatPalAdvisoryUnitTests(SimpleTestCase):
         self.assertGreater(result["evidence"]["estimated_probability"], 40)
         self.assertIn(result["status"], {"caution", "playable", "strong"})
 
+    def test_first_half_total_goal_market_uses_first_half_team_history(self):
+        descriptor = describe_market("1H Over 0.5")
+        fixture = {
+            "statpal_context": {
+                "available": True,
+                "snapshots": {
+                    "team_stats": {
+                        "summary": {
+                            "teams": [
+                                {
+                                    "fixture_side": "home",
+                                    "sample_size": 12,
+                                    "firsthalf_avg_goals_for": 0.7,
+                                    "firsthalf_avg_goals_against": 0.4,
+                                },
+                                {
+                                    "fixture_side": "away",
+                                    "sample_size": 12,
+                                    "firsthalf_avg_goals_for": 0.6,
+                                    "firsthalf_avg_goals_against": 0.5,
+                                },
+                            ]
+                        }
+                    }
+                },
+            }
+        }
+
+        result = statpal_market_advisory._evaluate_total_goal_market(descriptor, fixture=fixture).to_dict()
+
+        self.assertTrue(result["available"])
+        self.assertEqual(result["evidence"]["period"], "first_half")
+        self.assertEqual(result["basis"], "statpal_goal_market_model")
+        self.assertGreater(result["evidence"]["expected_total_goals"], 0.5)
+        self.assertGreater(result["evidence"]["estimated_probability"], 50)
+
+    def test_result_or_btts_uses_statpal_score_matrix_fallback(self):
+        descriptor = MarketDescriptor(
+            raw="Draw or GG / BTTS Yes - Yes",
+            canonical="Draw or GG / BTTS Yes - Yes",
+            code="result_or_btts_draw_btts_yes",
+            family="result_or_btts",
+            category="Combo",
+            side="draw_btts_yes",
+            selection="yes",
+            period="full_match",
+        )
+        fixture = {
+            "statpal_context": {
+                "available": True,
+                "snapshots": {
+                    "team_stats": {
+                        "summary": {
+                            "teams": [
+                                {
+                                    "fixture_side": "home",
+                                    "sample_size": 14,
+                                    "avg_goals_for": 1.5,
+                                    "avg_goals_against": 1.1,
+                                },
+                                {
+                                    "fixture_side": "away",
+                                    "sample_size": 14,
+                                    "avg_goals_for": 1.4,
+                                    "avg_goals_against": 1.2,
+                                },
+                            ]
+                        }
+                    }
+                },
+            }
+        }
+
+        result = statpal_market_advisory._score_matrix_fallback(descriptor, fixture=fixture)
+
+        self.assertTrue(result["available"])
+        self.assertEqual(result["basis"], "statpal_score_matrix_fallback")
+        self.assertEqual(result["evidence"]["market_family"], "result_or_btts")
+        self.assertGreater(result["evidence"]["estimated_probability"], 50)
+        self.assertIn("score_matrix_fit_missing", result["warnings"])
+
+    def test_match_result_uses_statpal_score_matrix_fallback(self):
+        descriptor = describe_market("Home Win")
+        fixture = {
+            "statpal_context": {
+                "available": True,
+                "snapshots": {
+                    "team_stats": {
+                        "summary": {
+                            "teams": [
+                                {
+                                    "fixture_side": "home",
+                                    "sample_size": 14,
+                                    "avg_goals_for": 2.0,
+                                    "avg_goals_against": 0.8,
+                                },
+                                {
+                                    "fixture_side": "away",
+                                    "sample_size": 14,
+                                    "avg_goals_for": 0.9,
+                                    "avg_goals_against": 1.6,
+                                },
+                            ]
+                        }
+                    }
+                },
+            }
+        }
+
+        result = statpal_market_advisory._score_matrix_fallback(descriptor, fixture=fixture)
+
+        self.assertTrue(result["available"])
+        self.assertEqual(result["basis"], "statpal_score_matrix_fallback")
+        self.assertEqual(result["evidence"]["market_family"], "match_result")
+        self.assertGreater(result["evidence"]["estimated_probability"], 45)
+
     def test_snapshot_odds_payload_adds_positive_value_evidence(self):
         descriptor = describe_market("Over 2.5")
         fixture = {
