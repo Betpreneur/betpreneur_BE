@@ -28,12 +28,15 @@ DEFAULT_CALL_BUDGET = 120
 # certainty because fitted rates and fixture snapshots can still be thin or live-state
 # dependent.
 MODEL_CONFIDENCE_CAPS = {"strong": 85, "medium": 75, "limited": 62, "poor": 0}
+SCORE_MATRIX_FALLBACK_FAMILIES = {"total_goals", "team_total_goals"}
 
 
 def snapshots_for_family(family: str) -> list[str]:
     """Snapshot types this family still needs from StatPal, if any."""
     spec = evaluator_for(family)
-    if spec is None or spec.engine == SCORE_MATRIX_ENGINE:
+    if spec is None:
+        return []
+    if spec.engine == SCORE_MATRIX_ENGINE and family not in SCORE_MATRIX_FALLBACK_FAMILIES:
         return []
     return snapshots_for_capabilities(required_capabilities([family]))
 

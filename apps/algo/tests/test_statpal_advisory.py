@@ -1,3 +1,5 @@
+from unittest import mock
+
 from django.test import SimpleTestCase, TestCase
 
 from apps.algo.market_taxonomy import MarketDescriptor, describe_market
@@ -837,6 +839,58 @@ class StatPalAdvisoryUnitTests(SimpleTestCase):
         self.assertEqual(evidence["team_history"]["team_name"], "Away")
         self.assertEqual(evidence["team_history"]["metric_value"], 1.8)
         self.assertIn("team_history_context_applied", warnings)
+
+    def test_score_matrix_no_fit_falls_back_to_team_history_for_team_goals(self):
+        descriptor = describe_market("Home Team Goals Over 1.5")
+        fixture = {
+            "hname": "Anderlecht",
+            "aname": "RAAL La Louviere",
+            "statpal_context": {
+                "available": True,
+                "snapshots": {
+                    "team_stats": {
+                        "summary": {
+                            "team_count": 2,
+                            "home": {
+                                "fixture_side": "home",
+                                "team_name": "Anderlecht",
+                                "sample_size": 20,
+                                "avg_goals_for": 2.2,
+                            },
+                            "away": {
+                                "fixture_side": "away",
+                                "team_name": "RAAL La Louviere",
+                                "sample_size": 20,
+                                "avg_goals_for": 0.9,
+                            },
+                            "teams": [
+                                {"fixture_side": "home", "team_name": "Anderlecht", "sample_size": 20, "avg_goals_for": 2.2},
+                                {"fixture_side": "away", "team_name": "RAAL La Louviere", "sample_size": 20, "avg_goals_for": 0.9},
+                            ],
+                        }
+                    }
+                },
+            },
+        }
+
+        with mock.patch(
+            "apps.algo.evaluators.score_matrix_evaluator.evaluate",
+            return_value={
+                "available": False,
+                "score": None,
+                "status": "needs_data",
+                "basis": "score_matrix_no_fit",
+                "evidence": {},
+                "warnings": ["score_matrix_fit_missing"],
+            },
+        ):
+            result = statpal_market_advisory.evaluate_market(descriptor, fixture=fixture)
+
+        self.assertTrue(result["available"])
+        self.assertEqual(result["basis"], "statpal_team_goal_market_model")
+        self.assertEqual(result["evidence"]["team_goal_model_source"], "statpal_team_history")
+        self.assertEqual(result["evidence"]["statpal_team_history_goals_for"], 2.2)
+        self.assertIn("score_matrix_fit_missing", result["warnings"])
 
 
 class StatPalAdvisoryMappingTests(TestCase):

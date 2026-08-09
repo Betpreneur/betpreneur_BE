@@ -105,6 +105,17 @@ class StatPalMarketAdvisoryService:
                 fixture=fixture,
                 provider_payload=provider_payload,
             )
+            if spec.engine == SCORE_MATRIX_ENGINE and not payload.get("available"):
+                fallback = self._score_matrix_fallback(
+                    descriptor,
+                    fixture=fixture,
+                    provider_payload=provider_payload,
+                )
+                if fallback is not None and fallback.get("available"):
+                    fallback.setdefault("warnings", []).append("score_matrix_fit_missing")
+                    fallback["assessment_type"] = spec.assessment_type
+                    fallback["market_family"] = descriptor.family
+                    return fallback
             return payload
 
         if spec.handler == "_evaluate_player_market":
@@ -437,6 +448,18 @@ class StatPalMarketAdvisoryService:
             message=self._team_goal_message(descriptor, expected_team, line, probability, team_side),
         )
 
+    def _score_matrix_fallback(self, descriptor: MarketDescriptor, *, fixture=None, provider_payload=None) -> dict[str, Any] | None:
+        if descriptor.family == "total_goals":
+            advisory = self._evaluate_total_goal_market(descriptor, fixture=fixture, provider_payload=provider_payload)
+        elif descriptor.family == "team_total_goals":
+            advisory = self._evaluate_team_goal_market(descriptor, fixture=fixture, provider_payload=provider_payload)
+        else:
+            return None
+        payload = advisory.to_dict()
+        if payload.get("score") is None or payload.get("basis") in {"score_matrix_no_fit", "no_model_for_family"}:
+            return None
+        return payload
+
     # `_evaluate_fixture_context_market` was removed here. It returned a hardcoded 58
     # plus snapshot nudges for 1X2, Double Chance, DNB, BTTS and clean sheets -- the
     # highest-volume markets on the site -- and that score was rendered to users as
@@ -450,6 +473,7 @@ class StatPalMarketAdvisoryService:
         statpal = self._statpal_summaries(fixture)
         predictions = statpal.get("predictions") or {}
         detailed = statpal.get("detailed_stats") or {}
+        team_stats = statpal.get("team_stats") or {}
         home_form = fixture.get("home_recent_form") or {}
         away_form = fixture.get("away_recent_form") or {}
 
@@ -470,6 +494,21 @@ class StatPalMarketAdvisoryService:
             sources.append("statpal_expected_goals")
             expected = round((expected * 0.55 + statpal_expected * 0.45), 2) if expected else statpal_expected
 
+        history = self._team_history_summary_for_descriptor(team_stats, MarketDescriptor(
+            raw="total_goals",
+            canonical="total_goals",
+            code="total_goals",
+            family="total_goals",
+            category="Goals",
+            selection="over",
+            side="over",
+            period="full_match",
+        )) if team_stats else {}
+        history_expected = _num(history.get("avg_total_goals"), 0)
+        if history_expected:
+            sources.append("statpal_team_history")
+            expected = round((expected * 0.6 + history_expected * 0.4), 2) if expected else history_expected
+
         form_expected = (
             _num(home_form.get("avg_scored") or home_form.get("goals_for_avg"), 0)
             + _num(away_form.get("avg_scored") or away_form.get("goals_for_avg"), 0)
@@ -484,6 +523,7 @@ class StatPalMarketAdvisoryService:
             "statpal_expected_goals": statpal_expected or None,
             "statpal_home_xg": home_xg or None,
             "statpal_away_xg": away_xg or None,
+            "statpal_team_history_goals": history_expected or None,
             "form_expected_goals": round(form_expected, 2) if form_expected else None,
             "goal_model_sources": sources,
         }
@@ -495,18 +535,34 @@ class StatPalMarketAdvisoryService:
         statpal = self._statpal_summaries(fixture)
         predictions = statpal.get("predictions") or {}
         detailed = statpal.get("detailed_stats") or {}
+        team_stats = statpal.get("team_stats") or {}
         home_form = fixture.get("home_recent_form") or {}
         away_form = fixture.get("away_recent_form") or {}
         team_side = team_side if team_side in {"home", "away"} else ""
+        history_descriptor = MarketDescriptor(
+            raw="team_total_goals",
+            canonical="team_total_goals",
+            code="team_total_goals",
+            family="team_total_goals",
+            category="Goals",
+            selection="over",
+            side="over",
+            team=team_side,
+            period="full_match",
+        )
+        history = self._team_history_summary_for_descriptor(team_stats, history_descriptor) if team_stats else {}
+        history_expected = _num(history.get("avg_goals_for"), 0)
 
         home_expected = (
             _num(detailed.get("home_xg"), 0)
             or _num(predictions.get("home_xg"), 0)
+            or (history_expected if team_side == "home" else 0)
             or self._team_form_expectation(home_form, away_form)
         )
         away_expected = (
             _num(detailed.get("away_xg"), 0)
             or _num(predictions.get("away_xg"), 0)
+            or (history_expected if team_side == "away" else 0)
             or self._team_form_expectation(away_form, home_form)
         )
         if team_side == "home":
@@ -520,7 +576,8 @@ class StatPalMarketAdvisoryService:
             "expected_team_goals": round(expected, 2) if expected else 0,
             "home_expected_goals": round(home_expected, 2) if home_expected else None,
             "away_expected_goals": round(away_expected, 2) if away_expected else None,
-            "team_goal_model_source": "statpal_xg" if (_num(detailed.get("home_xg"), 0) or _num(detailed.get("away_xg"), 0)) else "recent_form",
+            "statpal_team_history_goals_for": history_expected or None,
+            "team_goal_model_source": "statpal_xg" if (_num(detailed.get("home_xg"), 0) or _num(detailed.get("away_xg"), 0)) else "statpal_team_history" if history_expected else "recent_form",
         }
         warnings = []
         if not expected:

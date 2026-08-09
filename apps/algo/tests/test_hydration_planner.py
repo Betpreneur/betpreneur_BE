@@ -17,8 +17,12 @@ from apps.algo.market_taxonomy import describe_market
 
 class SnapshotRequirementTests(SimpleTestCase):
     def test_matrix_served_families_need_no_snapshots(self):
-        for family in ["match_result", "double_chance", "btts", "total_goals", "clean_sheet"]:
+        for family in ["match_result", "double_chance", "btts", "clean_sheet"]:
             self.assertEqual(snapshots_for_family(family), [], family)
+
+    def test_goal_volume_families_request_statpal_fallback_snapshots(self):
+        self.assertIn("team_stats", snapshots_for_family("total_goals"))
+        self.assertIn("team_stats", snapshots_for_family("team_total_goals"))
 
     def test_specialised_families_still_need_snapshots(self):
         self.assertTrue(snapshots_for_family("cards_total"))
@@ -163,8 +167,8 @@ class PlanTests(SimpleTestCase):
 
         self.assertEqual(plan["legs"], 3)
         self.assertEqual(plan["distinct_fixtures"], 2)
-        self.assertEqual(plan["fixtures_served_by_model"], 1)
-        self.assertEqual(plan["fixtures_needing_snapshots"], 1)
+        self.assertEqual(plan["fixtures_served_by_model"], 0)
+        self.assertEqual(plan["fixtures_needing_snapshots"], 2)
 
     def test_a_wholly_matrix_served_slip_needs_no_calls(self):
         plan = plan_slip_hydration([
