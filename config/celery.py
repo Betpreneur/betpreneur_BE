@@ -38,6 +38,21 @@ app.conf.beat_schedule = {
         ),
         "options": {"expires": timedelta(hours=5).total_seconds()},
     },
+    # StatPal-native data build: fixtures plus analysis snapshots for today,
+    # tomorrow, and next tomorrow. Run before top-pick generation by default.
+    "build-statpal-daily-cache": {
+        "task": "apps.algo.tasks.build_statpal_daily_cache",
+        "schedule": crontab(
+            hour=os.environ.get("STATPAL_DAILY_BUILD_HOUR", "23"),
+            minute=os.environ.get("STATPAL_DAILY_BUILD_MINUTE", "30"),
+        ),
+        "kwargs": {
+            "days": int(os.environ.get("STATPAL_DAILY_BUILD_DAYS", "3")),
+            "include_optional": os.environ.get("STATPAL_DAILY_BUILD_OPTIONAL", "0").lower() in {"1", "true", "yes"},
+            "force": os.environ.get("STATPAL_DAILY_BUILD_FORCE", "0").lower() in {"1", "true", "yes"},
+        },
+        "options": {"expires": timedelta(hours=8).total_seconds()},
+    },
     # Every 15 minutes: team sheets only firm up in the hour before kickoff, and a
     # confirmed omission is what turns a priced player prop into a dead bet.
     "refresh-imminent-lineups": {

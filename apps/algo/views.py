@@ -105,6 +105,8 @@ from .serializers import (
     StatPalFixtureContextQuerySerializer,
     StatPalFixtureContextResponseSerializer,
     StatPalFixtureRefreshRequestSerializer,
+    StatPalReadinessQuerySerializer,
+    StatPalReadinessResponseSerializer,
     TaskQueuedSerializer,
     TaskStatusSerializer,
     TopPickResponseSerializer,
@@ -3175,6 +3177,9 @@ def _public_selection_card(item):
         your_pick["data_quality"] = capability.get("data_quality")
         your_pick["confidence_cap"] = capability.get("confidence_cap")
     risk_level = _public_selection_risk(verdict, your_pick)
+    statpal_context = item.get("statpal_context") or card.get("statpal_context") or {}
+    statpal_coverage = statpal_context.get("market_snapshot_coverage") or {}
+    statpal_plan = statpal_context.get("market_snapshot_plan") or {}
     technical_ref = {
         "status": item.get("status"),
         "match_resolution_score": card.get("match_resolution_score"),
@@ -3184,7 +3189,13 @@ def _public_selection_card(item):
         "market_data_quality": capability.get("data_quality") if capability else "",
         "market_confidence_cap": capability.get("confidence_cap") if capability else None,
         "market_capability_warnings": capability.get("warnings") or [],
-        "statpal_snapshot_types": sorted(((card.get("statpal_context") or {}).get("snapshots") or {}).keys()),
+        "statpal_snapshot_types": sorted((statpal_context.get("snapshots") or {}).keys()),
+        "statpal_hydration_source": statpal_context.get("hydration_source") or "",
+        "statpal_snapshot_cache_status": statpal_context.get("snapshot_cache_status") or "",
+        "statpal_required_snapshot_types": statpal_coverage.get("required") or statpal_plan.get("snapshot_types") or [],
+        "statpal_missing_snapshot_types": statpal_coverage.get("missing") or statpal_plan.get("missing_snapshot_types") or [],
+        "statpal_stale_snapshot_types": statpal_plan.get("stale_snapshot_types") or [],
+        "statpal_snapshot_coverage_percent": statpal_coverage.get("coverage_percent") if statpal_coverage else statpal_plan.get("coverage_percent"),
         "has_technical_details": True,
     }
     leg_assessment = assess_leg(item)
@@ -4839,6 +4850,36 @@ class StatPalFixtureRefreshView(APIView):
         )
 
 
+class StatPalReadinessView(APIView):
+    permission_classes = [IsAdminUser]
+    serializer_class = StatPalReadinessResponseSerializer
+
+    @extend_schema(
+        summary="StatPal cache readiness",
+        description=(
+            "Admin-only endpoint. Inspects cached StatPal data for the requested window without making provider calls, "
+            "then returns fixture coverage and a readiness verdict for Match Checker analysis."
+        ),
+        tags=["Slip Reviews"],
+        parameters=[StatPalReadinessQuerySerializer],
+        responses={200: StatPalReadinessResponseSerializer},
+    )
+    def get(self, request):
+        query = StatPalReadinessQuerySerializer(data=request.query_params)
+        query.is_valid(raise_exception=True)
+        data = query.validated_data
+
+        from .statpal_daily_build import StatPalDailyBuildService
+
+        result = StatPalDailyBuildService().readiness_report(
+            start_date=data.get("start_date"),
+            days=data.get("days", 3),
+            include_optional=bool(data.get("include_optional")),
+            minimum_average_coverage=float(data.get("min_coverage") or 70.0),
+        )
+        return Response(_api_response_payload(result))
+
+
 class SlipReviewDetailView(APIView):
     permission_classes = [IsAuthenticated]
     serializer_class = SlipReviewDetailResponseSerializer
@@ -5619,6 +5660,7 @@ def _maintenance_jobs():
     request open.
     """
     from .tasks import (
+        build_statpal_daily_cache,
         fit_score_models,
         refresh_imminent_lineups,
         refresh_player_availability,
@@ -5628,6 +5670,7 @@ def _maintenance_jobs():
 
     return {
         # Ordered so a full run populates fixtures before anything that reads them.
+        "statpal_daily_cache": (build_statpal_daily_cache, "Build StatPal 3-day fixtures and analysis snapshots"),
         "fixture_horizon": (sync_fixture_horizon, "Cache every fixture in the 3-day window"),
         "score_models": (fit_score_models, "Refit per-league goal models"),
         "player_availability": (refresh_player_availability, "Reload injuries and suspensions"),
@@ -5669,7 +5712,7 @@ class MaintenanceRunView(APIView):
         queued = []
         for name in requested:
             task, description = available[name]
-            async_result = task.delay(days=days) if name == "fixture_horizon" else task.delay()
+            async_result = task.delay(days=days) if name in {"fixture_horizon", "statpal_daily_cache"} else task.delay()
             queued.append({"job": name, "task_id": async_result.id, "description": description})
             log.info("Maintenance job queued by %s: %s -> %s", request.user, name, async_result.id)
 

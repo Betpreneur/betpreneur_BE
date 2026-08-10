@@ -81,6 +81,15 @@ def _sample_replace_result():
         },
         "statpal_context": {
             "available": True,
+            "hydration_source": "statpal_daily_cache",
+            "snapshot_cache_status": "hit",
+            "market_snapshot_coverage": {
+                "required": ["lineups"],
+                "available": ["lineups"],
+                "fresh": ["lineups"],
+                "missing": [],
+                "coverage_percent": 100.0,
+            },
             "snapshots": {
                 "lineups": {"summary": {"home_confirmed": True}},
             },
@@ -347,6 +356,11 @@ class SlipReviewPublicContractTests(SimpleTestCase):
         self.assertEqual(selection["technical_ref"]["market_support_level"], "full")
         self.assertEqual(selection["technical_ref"]["market_data_quality"], "strong")
         self.assertEqual(selection["technical_ref"]["statpal_snapshot_types"], ["lineups"])
+        self.assertEqual(selection["technical_ref"]["statpal_hydration_source"], "statpal_daily_cache")
+        self.assertEqual(selection["technical_ref"]["statpal_snapshot_cache_status"], "hit")
+        self.assertEqual(selection["technical_ref"]["statpal_required_snapshot_types"], ["lineups"])
+        self.assertEqual(selection["technical_ref"]["statpal_missing_snapshot_types"], [])
+        self.assertEqual(selection["technical_ref"]["statpal_snapshot_coverage_percent"], 100.0)
 
     def test_market_not_found_with_replacement_counts_as_analysed(self):
         summary = _manual_review_summary([_sample_market_not_found_with_replacement()])

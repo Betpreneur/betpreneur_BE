@@ -1,0 +1,11 @@
+{% extends "admin/change_list.html" %}
+
+{% block object-tools-items %}
+  {{ block.super }}
+  <li>
+    <a href="{{ statpal_queue_build_url }}" class="historylink">Queue StatPal Build</a>
+  </li>
+  <li>
+    <a href="{{ statpal_queue_force_build_url }}" class="historylink">Force StatPal Refresh</a>
+  </li>
+{% endblock %}

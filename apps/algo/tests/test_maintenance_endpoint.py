@@ -40,6 +40,7 @@ class MaintenanceEndpointTests(TestCase):
             return task
 
         self.jobs.return_value = {
+            "statpal_daily_cache": (_fake("statpal_daily_cache"), "Build StatPal cache"),
             "fixture_horizon": (_fake("fixture_horizon"), "Cache fixtures"),
             "score_models": (_fake("score_models"), "Refit models"),
             "player_availability": (_fake("player_availability"), "Reload injuries"),
@@ -68,7 +69,7 @@ class MaintenanceEndpointTests(TestCase):
         response = self._post()
 
         self.assertEqual(response.status_code, 202)
-        self.assertEqual(len(response.json()["queued"]), 3)
+        self.assertEqual(len(response.json()["queued"]), 4)
 
     def test_a_subset_can_be_requested(self):
         self.client.force_authenticate(user=self.staff)
@@ -92,6 +93,13 @@ class MaintenanceEndpointTests(TestCase):
         self._post({"jobs": ["fixture_horizon"], "days": 5})
 
         self.assertEqual(self.calls["fixture_horizon"], {"days": 5})
+
+    def test_the_statpal_build_receives_the_requested_window(self):
+        self.client.force_authenticate(user=self.staff)
+
+        self._post({"jobs": ["statpal_daily_cache"], "days": 5})
+
+        self.assertEqual(self.calls["statpal_daily_cache"], {"days": 5})
 
     def test_an_unknown_job_is_rejected_and_lists_the_valid_ones(self):
         self.client.force_authenticate(user=self.staff)
@@ -131,4 +139,4 @@ class MaintenanceEndpointTests(TestCase):
         response = self._post({})
 
         self.assertEqual(response.status_code, 202)
-        self.assertEqual(len(response.json()["queued"]), 3)
+        self.assertEqual(len(response.json()["queued"]), 4)

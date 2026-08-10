@@ -10,7 +10,10 @@ from .models import FixtureCache, ProviderFixtureMap, StatPalFixtureSnapshot
 from .services import json_safe, normalize_fixture_text
 from .statpal import StatPalClient, StatPalError
 from .statpal_provider import (
+    normalize_head_to_head,
     normalize_injuries_suspensions,
+    normalize_league_standings,
+    normalize_league_stats,
     normalize_match_stats,
     normalize_prematch_odds,
     normalize_team,
@@ -716,6 +719,14 @@ class StatPalSnapshotService:
             return self._select_match_payload(rows, provider_match_id=provider_match_id) or payload
         if snapshot_type == StatPalFixtureSnapshot.SnapshotType.TEAM_STATS and endpoint_name in {"SOCCER_TEAM", "SOCCER_TEAM_STATS"}:
             return normalize_team(payload) or payload
+        if snapshot_type == StatPalFixtureSnapshot.SnapshotType.HEAD_TO_HEAD:
+            return normalize_head_to_head(payload) or payload
+        if snapshot_type == StatPalFixtureSnapshot.SnapshotType.LEAGUE_STANDINGS:
+            rows = normalize_league_standings(payload)
+            return self._league_rows_payload(rows, row_key="standings") or payload
+        if snapshot_type == StatPalFixtureSnapshot.SnapshotType.LEAGUE_STATS:
+            rows = normalize_league_stats(payload)
+            return self._league_rows_payload(rows, row_key="players") or payload
         return payload
 
     @staticmethod
@@ -728,6 +739,19 @@ class StatPalSnapshotService:
                 if target == str(row.get("provider_match_id") or "") or target in (row.get("fallback_match_ids") or []):
                     return row
         return rows[0]
+
+    @staticmethod
+    def _league_rows_payload(rows: list[dict[str, Any]], *, row_key: str) -> dict[str, Any]:
+        if not rows:
+            return {}
+        first = rows[0]
+        return {
+            row_key: rows,
+            "provider_competition_id": str(first.get("provider_competition_id") or ""),
+            "league": str(first.get("league") or ""),
+            "country": str(first.get("country") or ""),
+            "source": "statpal",
+        }
 
     @staticmethod
     def _normalized_detailed_stats_payload(payload: dict[str, Any], *, provider_match_id="") -> dict[str, Any]:
@@ -749,6 +773,14 @@ class StatPalSnapshotService:
             return self._summarize_injuries(payload)
         if snapshot_type == StatPalFixtureSnapshot.SnapshotType.TEAM_STATS:
             return self._summarize_team_stats(payload)
+        if snapshot_type == StatPalFixtureSnapshot.SnapshotType.HEAD_TO_HEAD:
+            return self._summarize_head_to_head(payload, match_id=match_id, provider_match_id=provider_match_id)
+        if snapshot_type == StatPalFixtureSnapshot.SnapshotType.LEAGUE_STANDINGS:
+            return self._summarize_league_rows(payload, row_key="standings", match_id=match_id, provider_match_id=provider_match_id)
+        if snapshot_type == StatPalFixtureSnapshot.SnapshotType.LEAGUE_STATS:
+            return self._summarize_league_rows(payload, row_key="players", match_id=match_id, provider_match_id=provider_match_id)
+        if snapshot_type == StatPalFixtureSnapshot.SnapshotType.WEATHER_FORECAST:
+            return self._summarize_weather(payload, match_id=match_id, provider_match_id=provider_match_id)
         if snapshot_type == StatPalFixtureSnapshot.SnapshotType.PREDICTIONS:
             return self._summarize_predictions(payload, match_id=match_id, provider_match_id=provider_match_id)
         if snapshot_type == StatPalFixtureSnapshot.SnapshotType.DETAILED_STATS:
@@ -760,6 +792,61 @@ class StatPalSnapshotService:
         return {
             "match_id": match_id,
             "provider_match_id": provider_match_id,
+            "top_level_keys": sorted((payload or {}).keys()) if isinstance(payload, dict) else [],
+        }
+
+    @staticmethod
+    def _summarize_head_to_head(payload: dict[str, Any], match_id="", provider_match_id="") -> dict[str, Any]:
+        recent = _as_list((payload or {}).get("recent_meetings"))
+        leagues = _as_list((payload or {}).get("leagues"))
+        total = (((payload or {}).get("overall_record") or {}).get("total") or {})
+        goals = (((payload or {}).get("goals") or {}).get("total") or {})
+        return {
+            "match_id": match_id,
+            "provider_match_id": provider_match_id,
+            "team1_id": str((payload or {}).get("team1_id") or ""),
+            "team2_id": str((payload or {}).get("team2_id") or ""),
+            "recent_meetings_count": len(recent),
+            "league_count": len(leagues),
+            "games": total.get("games"),
+            "team1_won": total.get("team1_won"),
+            "team2_won": total.get("team2_won"),
+            "draws": total.get("draws"),
+            "team1_scored": goals.get("team1_scored"),
+            "team2_scored": goals.get("team2_scored"),
+            "top_level_keys": sorted((payload or {}).keys()) if isinstance(payload, dict) else [],
+        }
+
+    @staticmethod
+    def _summarize_league_rows(payload: dict[str, Any], *, row_key: str, match_id="", provider_match_id="") -> dict[str, Any]:
+        rows = _as_list((payload or {}).get(row_key))
+        teams = {str(row.get("team_id") or "") for row in rows if isinstance(row, dict) and row.get("team_id")}
+        players = {str(row.get("player_id") or "") for row in rows if isinstance(row, dict) and row.get("player_id")}
+        return {
+            "match_id": match_id,
+            "provider_match_id": provider_match_id,
+            "row_key": row_key,
+            "row_count": len(rows),
+            "team_count": len(teams),
+            "player_count": len(players),
+            "provider_competition_id": str((payload or {}).get("provider_competition_id") or ""),
+            "league": str((payload or {}).get("league") or ""),
+            "country": str((payload or {}).get("country") or ""),
+            "top_level_keys": sorted((payload or {}).keys()) if isinstance(payload, dict) else [],
+        }
+
+    @staticmethod
+    def _summarize_weather(payload: dict[str, Any], match_id="", provider_match_id="") -> dict[str, Any]:
+        weather = (payload or {}).get("weather") if isinstance(payload, dict) else {}
+        forecast = (payload or {}).get("forecast") if isinstance(payload, dict) else {}
+        container = weather if isinstance(weather, dict) else forecast if isinstance(forecast, dict) else payload if isinstance(payload, dict) else {}
+        return {
+            "match_id": match_id,
+            "provider_match_id": provider_match_id,
+            "temperature": StatPalSnapshotService._find_numeric(container, "temperature", "temp", "temp_c"),
+            "wind_speed": StatPalSnapshotService._find_numeric(container, "wind_speed", "wind"),
+            "humidity": StatPalSnapshotService._find_numeric(container, "humidity"),
+            "condition": str(container.get("condition") or container.get("description") or container.get("summary") or ""),
             "top_level_keys": sorted((payload or {}).keys()) if isinstance(payload, dict) else [],
         }
 

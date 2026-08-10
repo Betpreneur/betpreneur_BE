@@ -22,14 +22,16 @@ from .models import (
     ProviderTeamMap,
     SlipReview,
     SlipSelection,
+    StatPalFixtureCoverage,
     StatPalFixtureSnapshot,
     StrategyReview,
     TeamAliasMap,
 )
+from .statpal_daily_build import StatPalDailyBuildService, statpal_snapshot_usable_fields
 from .council import council_review
 from .performance import performance_dashboard
 from .recommendation_policy import assess_recommendation
-from .tasks import generate_daily_picks, recover_daily_run, run_monthly_auditor, settle_daily_results
+from .tasks import build_statpal_daily_cache, generate_daily_picks, recover_daily_run, run_monthly_auditor, settle_daily_results
 
 
 class PickInline(admin.TabularInline):
@@ -300,17 +302,275 @@ class StatPalFixtureSnapshotAdmin(admin.ModelAdmin):
         "provider_competition_id",
         "status",
         "source_endpoint",
+        "usable_field_count",
+        "payload_state",
         "fetched_at",
         "expires_at",
     )
-    list_filter = ("snapshot_type", "status", "source_endpoint")
+    list_filter = ("snapshot_type", "status", "source_endpoint", "provider_competition_id")
     search_fields = (
         "match_id",
         "provider_match_id",
         "provider_competition_id",
         "source_endpoint",
     )
-    readonly_fields = ("created_at", "updated_at")
+    readonly_fields = (
+        "created_at",
+        "updated_at",
+        "usable_fields_display",
+        "summary_pretty",
+        "payload_pretty",
+    )
+
+    @admin.display(description="Usable fields")
+    def usable_field_count(self, obj):
+        return len(statpal_snapshot_usable_fields(obj.snapshot_type, obj.summary or {}))
+
+    @admin.display(description="Payload")
+    def payload_state(self, obj):
+        return "yes" if obj.payload else "empty"
+
+    @admin.display(description="Usable fields")
+    def usable_fields_display(self, obj):
+        fields = statpal_snapshot_usable_fields(obj.snapshot_type, obj.summary or {})
+        return ", ".join(fields) or "No usable fields detected"
+
+    @admin.display(description="Summary JSON")
+    def summary_pretty(self, obj):
+        return format_html("<pre style='white-space:pre-wrap'>{}</pre>", json.dumps(obj.summary or {}, indent=2, sort_keys=True))
+
+    @admin.display(description="Payload JSON")
+    def payload_pretty(self, obj):
+        return format_html("<pre style='white-space:pre-wrap'>{}</pre>", json.dumps(obj.payload or {}, indent=2, sort_keys=True)[:50000])
+
+
+@admin.register(StatPalFixtureCoverage)
+class StatPalFixtureCoverageAdmin(admin.ModelAdmin):
+    change_list_template = "admin/algo/statpalfixturecoverage/change_list.html"
+    date_hierarchy = "match_date"
+    list_display = (
+        "match_date",
+        "fixture",
+        "country",
+        "league",
+        "statpal_provider_match_id",
+        "coverage_badge",
+        "present_snapshot_count",
+        "missing_snapshot_count",
+        "usable_field_count",
+        "updated_at",
+    )
+    list_filter = ("match_date", "country", "league", "source")
+    search_fields = (
+        "fixture",
+        "home_team",
+        "away_team",
+        "match_id",
+        "league",
+        "country",
+        "api_payload",
+    )
+    readonly_fields = (
+        "created_at",
+        "updated_at",
+        "statpal_identity_display",
+        "coverage_detail",
+        "missing_snapshot_types_display",
+        "present_snapshot_types_display",
+        "api_payload_pretty",
+    )
+    fieldsets = (
+        (
+            "Fixture",
+            {
+                "fields": (
+                    "match_date",
+                    "fixture",
+                    "home_team",
+                    "away_team",
+                    "country",
+                    "league",
+                    "kickoff",
+                    "kickoff_utc",
+                    "match_id",
+                    "source",
+                )
+            },
+        ),
+        (
+            "StatPal Coverage",
+            {
+                "fields": (
+                    "statpal_identity_display",
+                    "coverage_detail",
+                    "present_snapshot_types_display",
+                    "missing_snapshot_types_display",
+                )
+            },
+        ),
+        ("Raw Fixture Payload", {"classes": ("collapse",), "fields": ("api_payload_pretty",)}),
+        ("Timestamps", {"fields": ("created_at", "updated_at")}),
+    )
+
+    def get_urls(self):
+        urls = super().get_urls()
+        custom_urls = [
+            path(
+                "queue-build/",
+                self.admin_site.admin_view(self.queue_build_view),
+                name="algo_statpalfixturecoverage_queue_build",
+            ),
+            path(
+                "queue-force-build/",
+                self.admin_site.admin_view(self.queue_force_build_view),
+                name="algo_statpalfixturecoverage_queue_force_build",
+            ),
+        ]
+        return custom_urls + urls
+
+    def changelist_view(self, request, extra_context=None):
+        extra_context = extra_context or {}
+        extra_context["statpal_queue_build_url"] = reverse("admin:algo_statpalfixturecoverage_queue_build")
+        extra_context["statpal_queue_force_build_url"] = reverse("admin:algo_statpalfixturecoverage_queue_force_build")
+        return super().changelist_view(request, extra_context=extra_context)
+
+    def queue_build_view(self, request):
+        task = build_statpal_daily_cache.delay(days=3)
+        self.message_user(
+            request,
+            f"Queued StatPal daily cache build: {task.id}",
+            level=messages.SUCCESS,
+        )
+        return self._redirect_to_changelist()
+
+    def queue_force_build_view(self, request):
+        task = build_statpal_daily_cache.delay(days=3, force=True)
+        self.message_user(
+            request,
+            f"Queued forced StatPal daily cache refresh: {task.id}",
+            level=messages.SUCCESS,
+        )
+        return self._redirect_to_changelist()
+
+    def _redirect_to_changelist(self):
+        from django.shortcuts import redirect
+
+        return redirect(reverse("admin:algo_statpalfixturecoverage_changelist"))
+
+    def get_queryset(self, request):
+        queryset = super().get_queryset(request)
+        return queryset.filter(source="statpal")
+
+    def _coverage(self, obj):
+        cached = getattr(obj, "_statpal_admin_coverage", None)
+        if cached is None:
+            service = StatPalDailyBuildService()
+            cached = service.coverage_for_fixture(self._fixture_dict(obj), include_optional=True)
+            obj._statpal_admin_coverage = cached
+        return cached
+
+    @staticmethod
+    def _fixture_dict(obj):
+        payload = obj.api_payload if isinstance(obj.api_payload, dict) else {}
+        return {
+            "match_id": obj.match_id,
+            "provider_match_id": payload.get("provider_match_id") or payload.get("main_id") or payload.get("statpal_provider_match_id") or "",
+            "provider_competition_id": payload.get("provider_competition_id") or payload.get("statpal_provider_competition_id") or payload.get("code") or "",
+            "home_team_id": payload.get("provider_home_team_id") or payload.get("statpal_home_team_id") or payload.get("hid") or "",
+            "away_team_id": payload.get("provider_away_team_id") or payload.get("statpal_away_team_id") or payload.get("aid") or "",
+            "home_team": obj.home_team,
+            "away_team": obj.away_team,
+            "fixture": obj.fixture,
+            "date": obj.match_date,
+            "league": obj.league,
+            "country": obj.country,
+            "api_payload": payload,
+        }
+
+    @admin.display(description="StatPal match")
+    def statpal_provider_match_id(self, obj):
+        identity = self._coverage(obj).get("identity") or {}
+        return identity.get("match_id") or ""
+
+    @admin.display(description="Coverage")
+    def coverage_badge(self, obj):
+        coverage = self._coverage(obj)
+        status = coverage.get("status", "unknown")
+        percent = coverage.get("coverage_percent", 0)
+        color = {
+            "complete": "#147d3f",
+            "stale": "#9a6700",
+            "partial": "#b42318",
+            "identity_missing": "#b42318",
+        }.get(status, "#667085")
+        return format_html(
+            "<strong style='color:{}'>{} {}</strong>",
+            color,
+            f"{percent}%",
+            status.replace("_", " "),
+        )
+
+    @admin.display(description="Present")
+    def present_snapshot_count(self, obj):
+        snapshots = self._coverage(obj).get("snapshots") or {}
+        return sum(1 for item in snapshots.values() if item.get("present"))
+
+    @admin.display(description="Missing")
+    def missing_snapshot_count(self, obj):
+        return len(self._coverage(obj).get("missing_snapshot_types") or [])
+
+    @admin.display(description="Usable fields")
+    def usable_field_count(self, obj):
+        return self._coverage(obj).get("usable_field_count", 0)
+
+    @admin.display(description="StatPal identity")
+    def statpal_identity_display(self, obj):
+        identity = self._coverage(obj).get("identity") or {}
+        present = identity.get("present") or {}
+        rows = [
+            ("Match", identity.get("match_id", ""), present.get("provider_match_id")),
+            ("League", identity.get("league_id", ""), present.get("league_id")),
+            ("Home team", identity.get("home_team_id", ""), present.get("home_team_id")),
+            ("Away team", identity.get("away_team_id", ""), present.get("away_team_id")),
+        ]
+        return format_html_join(
+            "",
+            "<div><strong>{}</strong>: {} {}</div>",
+            ((label, value or "missing", "ok" if ok else "missing") for label, value, ok in rows),
+        )
+
+    @admin.display(description="Coverage detail")
+    def coverage_detail(self, obj):
+        coverage = self._coverage(obj)
+        rows = []
+        for snapshot_type, item in (coverage.get("snapshots") or {}).items():
+            if item.get("present"):
+                fields = ", ".join(item.get("usable_fields") or [])
+                state = "stale" if item.get("stale") else "available"
+            else:
+                fields = ""
+                state = "missing"
+            rows.append((snapshot_type, state, item.get("source_endpoint", ""), fields or ""))
+        return format_html_join(
+            "",
+            "<div style='margin-bottom:6px'><strong>{}</strong>: {} <span style='color:#667085'>{}</span><br><small>{}</small></div>",
+            rows,
+        )
+
+    @admin.display(description="Present snapshot types")
+    def present_snapshot_types_display(self, obj):
+        snapshots = self._coverage(obj).get("snapshots") or {}
+        present = [key for key, item in snapshots.items() if item.get("present")]
+        return ", ".join(present) or "None"
+
+    @admin.display(description="Missing snapshot types")
+    def missing_snapshot_types_display(self, obj):
+        missing = self._coverage(obj).get("missing_snapshot_types") or []
+        return ", ".join(missing) or "None"
+
+    @admin.display(description="Fixture payload JSON")
+    def api_payload_pretty(self, obj):
+        return format_html("<pre style='white-space:pre-wrap'>{}</pre>", json.dumps(obj.api_payload or {}, indent=2, sort_keys=True))
 
 
 @admin.register(SlipReview)

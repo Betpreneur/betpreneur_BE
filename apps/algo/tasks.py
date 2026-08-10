@@ -160,6 +160,39 @@ def sync_fixture_horizon(self, days=3, league_ids=None):
     return FixtureSearchService().sync_statpal_horizon(days=days, league_ids=league_ids)
 
 
+@shared_task(
+    bind=True,
+    ignore_result=False,
+    max_retries=2,
+    default_retry_delay=300,
+    soft_time_limit=2400,
+    time_limit=3000,
+)
+def build_statpal_daily_cache(self, start_date=None, days=3, include_optional=False, force=False, max_tasks=None):
+    """
+    Build StatPal's 3-day fixture/stat cache.
+
+    This is the StatPal-native replacement/complement for the older provider fixture
+    horizon: it fetches the daily match universe, then refreshes fixture, league,
+    team, H2H, odds, lineup, injury, weather, and prediction snapshots for analysis.
+    """
+    from .statpal_daily_build import StatPalDailyBuildService
+
+    parsed_start = date.fromisoformat(start_date) if start_date else None
+    try:
+        return StatPalDailyBuildService().build(
+            start_date=parsed_start,
+            days=days,
+            include_optional=include_optional,
+            force=force,
+            max_tasks=max_tasks,
+        )
+    except Exception as exc:
+        if self.request.retries < self.max_retries:
+            raise self.retry(exc=exc, countdown=300 * (self.request.retries + 1))
+        raise
+
+
 @shared_task(bind=True, ignore_result=False)
 def refresh_imminent_lineups(self, match_ids=None):
     """

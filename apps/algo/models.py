@@ -199,6 +199,13 @@ class FixtureCache(models.Model):
         return self.fixture
 
 
+class StatPalFixtureCoverage(FixtureCache):
+    class Meta:
+        proxy = True
+        verbose_name = "StatPal Fixture Coverage"
+        verbose_name_plural = "StatPal Fixture Coverage"
+
+
 class BookmakerLeagueMap(models.Model):
     provider = models.CharField(max_length=30)
     provider_competition_id = models.CharField(max_length=100, blank=True)
@@ -400,6 +407,14 @@ class StatPalFixtureSnapshot(models.Model):
         LINEUPS = "lineups", "Lineups"
         PREDICTIONS = "predictions", "Predictions"
         DETAILED_STATS = "detailed_stats", "Detailed Stats"
+        HEAD_TO_HEAD = "head_to_head", "Head to Head"
+        LEAGUE_STANDINGS = "league_standings", "League Standings"
+        LEAGUE_STATS = "league_stats", "League Stats"
+        WEATHER_FORECAST = "weather_forecast", "Weather Forecast"
+        PLAYER_STATS = "player_stats", "Player Stats"
+        COACH = "coach", "Coach"
+        IMAGES = "images", "Images"
+        LIVE_STORYLINES = "live_storylines", "Live Storylines"
         RAW = "raw", "Raw"
 
     provider_fixture = models.ForeignKey(

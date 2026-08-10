@@ -587,13 +587,13 @@ class MaintenanceRunRequestSerializer(serializers.Serializer):
         child=serializers.CharField(),
         required=False,
         help_text=(
-            "Jobs to queue. Omit to run every job. Valid names: fixture_horizon, "
-            "score_models, player_availability, lineups, settle_slips."
+            "Jobs to queue. Omit to run every job. Valid names: statpal_daily_cache, "
+            "fixture_horizon, score_models, player_availability, lineups, settle_slips."
         ),
     )
     days = serializers.IntegerField(
         required=False, min_value=0, max_value=7, default=3,
-        help_text="Fixture horizon in days. Only used by fixture_horizon.",
+        help_text="Build window in days. Used by statpal_daily_cache and fixture_horizon.",
     )
 
     def validate(self, attrs):
@@ -619,6 +619,38 @@ class MaintenanceRunRequestSerializer(serializers.Serializer):
 class MaintenanceRunResponseSerializer(serializers.Serializer):
     queued = serializers.JSONField()
     poll = serializers.CharField()
+
+
+class StatPalReadinessQuerySerializer(serializers.Serializer):
+    start_date = serializers.DateField(
+        required=False,
+        help_text="Start date in YYYY-MM-DD format. Defaults to today.",
+    )
+    days = serializers.IntegerField(
+        required=False,
+        min_value=1,
+        max_value=7,
+        default=3,
+        help_text="Number of days to inspect.",
+    )
+    include_optional = serializers.BooleanField(
+        required=False,
+        default=False,
+        help_text="Include optional player/coach coverage in the report.",
+    )
+    min_coverage = serializers.FloatField(
+        required=False,
+        min_value=0,
+        max_value=100,
+        default=70.0,
+        help_text="Minimum average coverage percentage required for readiness.",
+    )
+
+
+class StatPalReadinessResponseSerializer(serializers.Serializer):
+    window = serializers.ListField(child=serializers.CharField())
+    coverage = serializers.JSONField()
+    readiness = serializers.JSONField()
 
 
 class SlipRepairDecisionSerializer(serializers.Serializer):

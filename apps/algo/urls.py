@@ -25,6 +25,7 @@ from .views import (
     SportyBetSlipImportView,
     StatPalFixtureContextView,
     StatPalFixtureRefreshView,
+    StatPalReadinessView,
     TaskStatusView,
     TopPickView,
 )
@@ -50,6 +51,7 @@ urlpatterns = [
     path("slip-reviews/<int:review_id>/repair/", SlipRepairView.as_view(), name="algo-slip-review-repair"),
     path("statpal/fixtures/context/", StatPalFixtureContextView.as_view(), name="algo-statpal-fixture-context"),
     path("statpal/fixtures/refresh/", StatPalFixtureRefreshView.as_view(), name="algo-statpal-fixture-refresh"),
+    path("statpal/readiness/", StatPalReadinessView.as_view(), name="algo-statpal-readiness"),
     path("games/", GamesView.as_view(), name="algo-games"),
     path("games/backed/", BackedGamesView.as_view(), name="algo-backed-games"),
     path("games/<str:match_id>/backed/", BackGameView.as_view(), name="algo-game-backed"),

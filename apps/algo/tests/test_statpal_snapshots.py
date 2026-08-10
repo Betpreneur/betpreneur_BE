@@ -166,6 +166,46 @@ class StatPalSnapshotContextPayloadTests(SimpleTestCase):
         self.assertEqual(len(context["payload"]["teams"]), 2)
         self.assertNotIn("raw", context["payload"]["teams"][0])
 
+    def test_head_to_head_summary_exposes_admin_counts(self):
+        summary = StatPalSnapshotService().summarize(
+            snapshot_type=StatPalFixtureSnapshot.SnapshotType.HEAD_TO_HEAD,
+            payload={
+                "team1_id": "1",
+                "team2_id": "2",
+                "recent_meetings": [{"id": "m1"}, {"id": "m2"}],
+                "leagues": [{"id": "l1"}],
+                "overall_record": {"total": {"games": 12, "team1_won": 5, "team2_won": 4, "draws": 3}},
+                "goals": {"total": {"team1_scored": 18, "team2_scored": 14}},
+            },
+            match_id="statpal:fixture-1",
+            provider_match_id="fixture-1",
+        )
+
+        self.assertEqual(summary["recent_meetings_count"], 2)
+        self.assertEqual(summary["league_count"], 1)
+        self.assertEqual(summary["games"], 12)
+        self.assertEqual(summary["team1_scored"], 18)
+
+    def test_league_rows_summary_exposes_admin_counts(self):
+        summary = StatPalSnapshotService().summarize(
+            snapshot_type=StatPalFixtureSnapshot.SnapshotType.LEAGUE_STATS,
+            payload={
+                "players": [
+                    {"team_id": "t1", "player_id": "p1"},
+                    {"team_id": "t1", "player_id": "p2"},
+                    {"team_id": "t2", "player_id": "p3"},
+                ],
+                "provider_competition_id": "3240",
+                "league": "Sweden: Allsvenskan",
+            },
+            match_id="statpal:soccer_league_stats:3240",
+        )
+
+        self.assertEqual(summary["row_count"], 3)
+        self.assertEqual(summary["team_count"], 2)
+        self.assertEqual(summary["player_count"], 3)
+        self.assertEqual(summary["provider_competition_id"], "3240")
+
 
 class StatPalSnapshotServiceTests(TestCase):
     def test_save_injuries_payload_creates_fixture_snapshot_summary(self):

@@ -54,6 +54,7 @@ class SnapshotRequirementTests(SimpleTestCase):
 class HydratorTests(SimpleTestCase):
     def setUp(self):
         self.service = mock.Mock()
+        self.service.snapshot_plan_for_market.return_value = {}
         self.service.prepare_fixture_context_for_market.return_value = {
             "context": {"snapshots": {"team_stats": {}}}, "refreshed": {},
         }
@@ -145,6 +146,51 @@ class HydratorTests(SimpleTestCase):
         self.assertEqual(bundle["context"]["snapshots"]["team_stats"]["summary"]["team_count"], 2)
         self.assertEqual(self.hydrator.stats.calls_used, 3)
 
+    def test_fresh_daily_snapshot_cache_avoids_on_demand_refresh(self):
+        descriptor = describe_market("Cards Over 3.5")
+        self.service.snapshot_plan_for_market.return_value = {
+            "snapshot_types": ["detailed_stats", "lineups"],
+            "fresh_snapshot_types": ["detailed_stats", "lineups"],
+            "stale_snapshot_types": [],
+            "missing_snapshot_types": [],
+            "requires_provider_competition_id": [],
+            "coverage_percent": 100.0,
+        }
+        self.service.fixture_context.return_value = {
+            "snapshots": {
+                "detailed_stats": {"summary": {"total_cards": 4}},
+                "lineups": {"summary": {"starting_count": 22}},
+            }
+        }
+
+        bundle = self.hydrator.bundle_for(descriptor, match_id="statpal:match-1", provider_match_id="match-1")
+
+        self.service.prepare_fixture_context_for_market.assert_not_called()
+        self.assertEqual(self.hydrator.stats.calls_used, 0)
+        self.assertEqual(self.hydrator.stats.served_from_snapshot_cache, 1)
+        self.assertEqual(bundle["hydration_source"], "statpal_daily_cache")
+        self.assertEqual(bundle["context"]["snapshot_cache_status"], "hit")
+        self.assertEqual(bundle["refreshed"]["api_usage"]["skipped_by_cache"], 2)
+
+    def test_incomplete_daily_snapshot_cache_uses_on_demand_refresh(self):
+        descriptor = describe_market("Cards Over 3.5")
+        self.service.snapshot_plan_for_market.return_value = {
+            "snapshot_types": ["detailed_stats", "lineups"],
+            "fresh_snapshot_types": ["detailed_stats"],
+            "stale_snapshot_types": [],
+            "missing_snapshot_types": ["lineups"],
+            "requires_provider_competition_id": [],
+            "coverage_percent": 50.0,
+        }
+
+        bundle = self.hydrator.bundle_for(descriptor, match_id="statpal:match-1", provider_match_id="match-1")
+
+        self.service.prepare_fixture_context_for_market.assert_called_once()
+        self.assertEqual(self.hydrator.stats.calls_used, 1)
+        self.assertEqual(self.hydrator.stats.snapshot_cache_misses, 1)
+        self.assertEqual(bundle["hydration_source"], "statpal_on_demand_refresh")
+        self.assertEqual(bundle["context"]["snapshot_cache_status"], "miss")
+
 
 class ModelBackedCapabilityTests(SimpleTestCase):
     def test_a_fitted_market_is_scoreable_without_any_snapshots(self):
@@ -200,4 +246,4 @@ class PlanTests(SimpleTestCase):
 
         self.assertEqual(plan["fixtures_needing_snapshots"], 20)
         self.assertEqual(plan["fixtures_served_by_model"], 0)
-        self.assertEqual(plan["estimated_snapshot_calls"], 60)
+        self.assertEqual(plan["estimated_snapshot_calls"], 80)

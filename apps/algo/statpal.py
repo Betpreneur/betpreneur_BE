@@ -135,6 +135,9 @@ class StatPalClient:
     def soccer_player(self, player_id: str | int, params: dict[str, Any] | None = None) -> dict[str, Any]:
         return self.soccer_endpoint("SOCCER_PLAYER", params=params, player_id=player_id)
 
+    def soccer_coach(self, coach_id: str | int, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        return self.soccer_endpoint("SOCCER_COACH", params=params, coach_id=coach_id)
+
     def soccer_team_lineups(self, match_id: str | int, params: dict[str, Any] | None = None) -> dict[str, Any]:
         request_params = {**(params or {}), "match_id": match_id}
         return self.soccer_endpoint("SOCCER_TEAM_LINEUPS", params=request_params)
@@ -144,6 +147,25 @@ class StatPalClient:
 
     def soccer_prematch_odds(self, league_id: str | int, params: dict[str, Any] | None = None) -> dict[str, Any]:
         return self.soccer_endpoint("SOCCER_PREMATCH_ODDS", params=params, league_id=league_id)
+
+    def soccer_weather_forecast(self, match_id: str | int, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        request_params = {**(params or {}), "match_id": match_id}
+        return self.soccer_endpoint("SOCCER_WEATHER_FORECAST", params=request_params)
+
+    def soccer_images(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        return self.soccer_endpoint("SOCCER_IMAGES", params=params)
+
+    def soccer_live_storylines(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        return self.soccer_endpoint("SOCCER_LIVE_STORYLINES", params=params)
+
+    def soccer_live_odds(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        return self.soccer_endpoint("SOCCER_LIVE_ODDS", params=params)
+
+    def soccer_live_odds_markets(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        return self.soccer_endpoint("SOCCER_LIVE_ODDS_MARKETS", params=params)
+
+    def soccer_live_odds_match_states(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        return self.soccer_endpoint("SOCCER_LIVE_ODDS_MATCH_STATES", params=params)
 
     def soccer_endpoint(self, endpoint_name: str, params: dict[str, Any] | None = None, **path_params: Any) -> dict[str, Any]:
         path = self._configured_endpoint(endpoint_name)
@@ -156,6 +178,8 @@ class StatPalClient:
         config = getattr(settings, "GRIND_ALGO", {}) or {}
         key = f"STATPAL_ENDPOINT_{endpoint_name.upper()}"
         path = str(config.get(key) or "").strip()
+        if not path and endpoint_name.upper() == "SOCCER_HEAD_TO_HEAD":
+            path = str(config.get("STATPAL_ENDSOINT_SOCCER_HEAD_TO_HEAD") or "").strip()
         if path:
             return path
         defaults = {

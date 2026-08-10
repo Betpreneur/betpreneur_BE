@@ -162,6 +162,8 @@ def capability_for_descriptor(descriptor, *, fixture=None, statpal_context=None)
 class HydrationStats:
     calls_used: int = 0
     served_from_cache: int = 0
+    served_from_snapshot_cache: int = 0
+    snapshot_cache_misses: int = 0
     served_by_model: int = 0
     budget_exhausted: bool = False
     fixtures_hydrated: set = field(default_factory=set)
@@ -170,6 +172,8 @@ class HydrationStats:
         return {
             "calls_used": self.calls_used,
             "served_from_cache": self.served_from_cache,
+            "served_from_snapshot_cache": self.served_from_snapshot_cache,
+            "snapshot_cache_misses": self.snapshot_cache_misses,
             "served_by_model": self.served_by_model,
             "fixtures_hydrated": len(self.fixtures_hydrated),
             "budget_exhausted": self.budget_exhausted,
@@ -227,16 +231,64 @@ class FixtureHydrator:
             self.stats.served_from_cache += 1
             return self._cache[key]
 
+        cache_plan = self._snapshot_cache_plan(
+            descriptor,
+            match_id=match_id,
+            provider_match_id=provider_match_id,
+            provider_competition_id=provider_competition_id,
+        )
+        if self._plan_is_fresh(cache_plan):
+            context = self.service.fixture_context(match_id=match_id, provider_match_id=provider_match_id)
+            context["market_snapshot_plan"] = cache_plan
+            context["market_snapshot_coverage"] = {
+                "required": cache_plan["snapshot_types"],
+                "available": sorted((context.get("snapshots") or {}).keys()),
+                "fresh": cache_plan["fresh_snapshot_types"],
+                "missing": cache_plan["missing_snapshot_types"],
+                "coverage_percent": cache_plan["coverage_percent"],
+            }
+            context["hydration_source"] = "statpal_daily_cache"
+            context["snapshot_cache_status"] = "hit"
+            bundle = {
+                "context": context,
+                "refreshed": {
+                    "api_usage": {
+                        "provider": "statpal",
+                        "attempted_calls": 0,
+                        "successful_calls": 0,
+                        "failed_calls": 0,
+                        "skipped_by_cache": len(cache_plan["snapshot_types"]),
+                        "skipped_without_call": 0,
+                        "snapshot_types_attempted": [],
+                        "snapshot_types_refreshed": [],
+                        "snapshot_types_failed": [],
+                    },
+                    "reason": "fresh_statpal_daily_cache",
+                },
+                "plan": cache_plan,
+                "plan_before_refresh": cache_plan,
+                "hydration_source": "statpal_daily_cache",
+            }
+            self.stats.served_from_snapshot_cache += 1
+            self.stats.fixtures_hydrated.add(key[0])
+            self._cache[key] = bundle
+            return bundle
+
         if self.stats.calls_used >= self._budget:
             self.stats.budget_exhausted = True
             return dict(_EMPTY_BUNDLE)
 
+        if cache_plan:
+            self.stats.snapshot_cache_misses += 1
         bundle = self.service.prepare_fixture_context_for_market(
             descriptor,
             match_id=match_id,
             provider_match_id=provider_match_id,
             provider_competition_id=provider_competition_id,
         )
+        bundle["hydration_source"] = "statpal_on_demand_refresh"
+        bundle.setdefault("context", {})["hydration_source"] = "statpal_on_demand_refresh"
+        bundle["context"]["snapshot_cache_status"] = "miss"
         self.stats.calls_used += 1
         if "team_stats" in needed and (home_team_id or away_team_id) and self.stats.calls_used < self._budget:
             team_refresh = self.service.refresh_fixture_team_stats(
@@ -252,6 +304,38 @@ class FixtureHydrator:
         self.stats.fixtures_hydrated.add(key[0])
         self._cache[key] = bundle
         return bundle
+
+    def _snapshot_cache_plan(
+        self,
+        descriptor,
+        *,
+        match_id="",
+        provider_match_id="",
+        provider_competition_id="",
+    ) -> dict:
+        planner = getattr(self.service, "snapshot_plan_for_market", None)
+        if not callable(planner):
+            return {}
+        try:
+            plan = planner(
+                descriptor,
+                match_id=match_id,
+                provider_match_id=provider_match_id,
+                provider_competition_id=provider_competition_id,
+            )
+        except Exception:
+            return {}
+        return plan if isinstance(plan, dict) else {}
+
+    @staticmethod
+    def _plan_is_fresh(plan: dict) -> bool:
+        return bool(
+            plan
+            and plan.get("snapshot_types")
+            and not plan.get("missing_snapshot_types")
+            and not plan.get("stale_snapshot_types")
+            and not plan.get("requires_provider_competition_id")
+        )
 
 
 def plan_slip_hydration(selections) -> dict:

@@ -79,4 +79,10 @@ class Command(BaseCommand):
             StatPalFixtureSnapshot.SnapshotType.LINEUPS: "SOCCER_LINEUPS",
             StatPalFixtureSnapshot.SnapshotType.PREDICTIONS: "SOCCER_PREDICTIONS",
             StatPalFixtureSnapshot.SnapshotType.DETAILED_STATS: "SOCCER_DETAILED_STATS",
+            StatPalFixtureSnapshot.SnapshotType.HEAD_TO_HEAD: "SOCCER_HEAD_TO_HEAD",
+            StatPalFixtureSnapshot.SnapshotType.LEAGUE_STANDINGS: "SOCCER_LEAGUE_STANDINGS",
+            StatPalFixtureSnapshot.SnapshotType.LEAGUE_STATS: "SOCCER_LEAGUE_STATS",
+            StatPalFixtureSnapshot.SnapshotType.WEATHER_FORECAST: "SOCCER_WEATHER_FORECAST",
+            StatPalFixtureSnapshot.SnapshotType.PLAYER_STATS: "SOCCER_PLAYER",
+            StatPalFixtureSnapshot.SnapshotType.COACH: "SOCCER_COACH",
         }.get(snapshot_type, "")
