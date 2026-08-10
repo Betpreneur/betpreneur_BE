@@ -1079,6 +1079,23 @@ class StatPalAdvisoryUnitTests(SimpleTestCase):
         self.assertEqual(result["assessment_type"], "quantitative_model")
         self.assertGreater(result["evidence"]["first_half_expected_goals"], 0)
         self.assertGreater(result["evidence"]["second_half_expected_goals"], 0)
+        self.assertLessEqual(result["evidence"]["first_half_probability"], 100)
+        self.assertLessEqual(result["evidence"]["second_half_probability"], 100)
+        self.assertLessEqual(result["evidence"]["estimated_probability"], 100)
+
+    def test_both_halves_total_goals_labels_fixture_backed_model(self):
+        descriptor = describe_market("Both Halves Over 0.5 - Yes")
+        fixture = {
+            "fixture_context": {"goal_model": {"expected_total": 3.2}},
+            "home_recent_form": {"avg_scored": 1.4},
+            "away_recent_form": {"avg_scored": 1.1},
+        }
+
+        result = statpal_market_advisory._evaluate_both_halves_total_goal_market(descriptor, fixture=fixture).to_dict()
+
+        self.assertTrue(result["available"])
+        self.assertEqual(result["basis"], "fixture_both_halves_goal_model")
+        self.assertNotIn("statpal_expected_goals", result["evidence"]["first_half_sources"])
 
     def test_team_goal_market_declines_when_expected_profile_is_zero(self):
         descriptor = describe_market("Home Team Goals Over 1.5")

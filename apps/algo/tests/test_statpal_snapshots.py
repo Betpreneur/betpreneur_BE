@@ -401,6 +401,30 @@ class StatPalSnapshotServiceTests(TestCase):
         self.assertEqual(summary["away_yellow_cards"], 3)
         self.assertEqual(summary["away_red_cards"], 1)
 
+    def test_detailed_stats_summary_aggregates_player_shot_stats(self):
+        summary = StatPalSnapshotService().summarize(
+            snapshot_type=StatPalFixtureSnapshot.SnapshotType.DETAILED_STATS,
+            payload={
+                "player_stats": {
+                    "home": [
+                        {"stats": {"shots_total": 4, "shots_on": 2}},
+                        {"stats": {"shots_total": 3, "shots_on_target": 1}},
+                    ],
+                    "away": [
+                        {"stats": {"shots_total": 5, "shots_on_goal": 3}},
+                        {"stats": {"shots_total": 2}},
+                    ],
+                }
+            },
+            match_id="12345",
+        )
+
+        self.assertEqual(summary["home_shots"], 7)
+        self.assertEqual(summary["away_shots"], 7)
+        self.assertEqual(summary["home_shots_on_target"], 3)
+        self.assertEqual(summary["away_shots_on_target"], 3)
+        self.assertTrue(summary["has_player_stats"])
+
     def test_detailed_stats_snapshot_normalizes_match_stats_endpoint_payload(self):
         service = StatPalSnapshotService()
         row = service.save_endpoint_payload(

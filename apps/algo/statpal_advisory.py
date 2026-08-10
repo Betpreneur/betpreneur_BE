@@ -503,16 +503,20 @@ class StatPalMarketAdvisoryService:
                 message="Expected-goals inputs are unavailable for this both-halves market.",
             )
 
-        first_probability = self._goal_line_probability(first_expected, line, direction)
-        second_probability = self._goal_line_probability(second_expected, line, direction)
+        first_probability = self._goal_line_probability(first_expected, line, direction) / 100.0
+        second_probability = self._goal_line_probability(second_expected, line, direction) / 100.0
         yes_probability = first_probability * second_probability
         probability = yes_probability if answer == "yes" else 1.0 - yes_probability
         score = round(max(0, min(100, probability * 100)), 1)
+        basis = self._goal_model_basis(
+            [*first_evidence.get("goal_model_sources", []), *second_evidence.get("goal_model_sources", [])],
+            "both_halves_goal_model",
+        )
         payload = {
             "available": True,
             "score": score,
             "status": _status(score),
-            "basis": "statpal_both_halves_goal_model",
+            "basis": basis,
             "evidence": {
                 "market_family": descriptor.family,
                 "line": line,
@@ -540,7 +544,7 @@ class StatPalMarketAdvisoryService:
             available=True,
             score=score,
             status=_status(score),
-            basis="statpal_both_halves_goal_model",
+            basis=str(payload.get("basis") or basis),
             evidence=payload.get("evidence") or {},
             warnings=list(dict.fromkeys(payload.get("warnings") or [])),
             message=(
@@ -548,6 +552,10 @@ class StatPalMarketAdvisoryService:
                 f"{first_expected} and second-half goals {second_expected}."
             ),
         )
+
+    @staticmethod
+    def _goal_model_basis(sources: list[str], fallback: str) -> str:
+        return f"statpal_{fallback}" if any(str(source).startswith("statpal_") for source in sources or []) else f"fixture_{fallback}"
 
     def _score_matrix_fallback(self, descriptor: MarketDescriptor, *, fixture=None, provider_payload=None) -> dict[str, Any] | None:
         if descriptor.family == "total_goals":

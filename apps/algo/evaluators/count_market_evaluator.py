@@ -31,6 +31,7 @@ SOT_FAMILIES = {"shots_on_target_total", "team_shots_on_target"}
 # Booking points are scored 10 per yellow and 25 per red on the standard scale; the
 # line arrives in points, so convert it to an equivalent booking count.
 BOOKING_POINTS_PER_CARD = 10.0
+SHOTS_ON_TARGET_FROM_TOTAL_SHOTS_RATIO = 0.34
 PERIOD_EXPECTATION_FACTORS = {
     "1st_half": 0.45,
     "first_half": 0.45,
@@ -100,6 +101,13 @@ def _team_stats_side_rate(summary, side: str, *keys):
     return None
 
 
+def _sot_proxy_from_shots(value):
+    value = _summary_number({"value": value}, "value")
+    if value is None:
+        return None
+    return round(max(0.1, value * SHOTS_ON_TARGET_FROM_TOTAL_SHOTS_RATIO), 3)
+
+
 def _statpal_forecast(descriptor, fixture, *, kind: str, team: str = ""):
     summary = _detailed_summary(fixture)
     source = "statpal_detailed_stats"
@@ -120,6 +128,20 @@ def _statpal_forecast(descriptor, fixture, *, kind: str, team: str = ""):
             away = _team_stats_side_rate(team_summary, "away", "shots_on_target_away", "shots_on_target_total")
             if away is not None:
                 source = "statpal_team_stats"
+        if home is None:
+            home = _sot_proxy_from_shots(
+                _summary_number(summary, "home_shots")
+                or _team_stats_side_rate(team_summary, "home", "shots_total_home", "shots_total")
+            )
+            if home is not None:
+                source = "statpal_team_stats_shots_total_proxy"
+        if away is None:
+            away = _sot_proxy_from_shots(
+                _summary_number(summary, "away_shots")
+                or _team_stats_side_rate(team_summary, "away", "shots_total_away", "shots_total")
+            )
+            if away is not None:
+                source = "statpal_team_stats_shots_total_proxy"
         if home is None and away is None:
             return None
     else:
@@ -401,6 +423,8 @@ def evaluate(descriptor, *, fixture=None, **_ignored) -> dict:
         warnings.append("thin_team_sample")
     if len(forecast.sources) < 2 and descriptor.family in {"corners_total", "cards_total", "shots_on_target_total"}:
         warnings.append("one_sided_team_rates")
+    if any("shots_total_proxy" in source for source in forecast.sources):
+        warnings.append("shots_on_target_estimated_from_total_shots")
     if period_factor != 1.0:
         warnings.append("period_expectation_scaled")
 

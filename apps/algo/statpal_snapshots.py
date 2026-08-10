@@ -949,6 +949,7 @@ class StatPalSnapshotService:
     @staticmethod
     def _summarize_detailed_stats(payload: dict[str, Any], match_id="", provider_match_id="") -> dict[str, Any]:
         team_stats = (payload or {}).get("team_stats") if isinstance(payload, dict) else {}
+        player_stats = (payload or {}).get("player_stats") if isinstance(payload, dict) else {}
         event_summary = (payload or {}).get("event_summary") if isinstance(payload, dict) else {}
         home_xg = (
             StatPalSnapshotService._team_metric(team_stats, "home", "expected_goals")
@@ -983,14 +984,36 @@ class StatPalSnapshotService:
         booking_points = StatPalSnapshotService._find_numeric(payload, "booking_points", "total_booking_points")
         if booking_points is None and any(value is not None for value in (home_yellows, away_yellows, home_reds, away_reds)):
             booking_points = ((home_yellows or 0) + (away_yellows or 0)) * 10 + ((home_reds or 0) + (away_reds or 0)) * 25
+        home_player_shots = StatPalSnapshotService._player_stat_total(player_stats, "home", "shots_total", "shots")
+        away_player_shots = StatPalSnapshotService._player_stat_total(player_stats, "away", "shots_total", "shots")
+        home_player_sot = StatPalSnapshotService._player_stat_total(
+            player_stats,
+            "home",
+            "shots_on",
+            "shots_on_target",
+            "shots_on_goal",
+        )
+        away_player_sot = StatPalSnapshotService._player_stat_total(
+            player_stats,
+            "away",
+            "shots_on",
+            "shots_on_target",
+            "shots_on_goal",
+        )
         return {
             "match_id": match_id,
             "provider_match_id": provider_match_id or (payload or {}).get("provider_match_id", ""),
             "home_xg": home_xg,
             "away_xg": away_xg,
             "expected_goals": total_xg,
-            "home_shots": StatPalSnapshotService._find_numeric(payload, "home_shots", "shots_home", "home_total_shots"),
-            "away_shots": StatPalSnapshotService._find_numeric(payload, "away_shots", "shots_away", "away_total_shots"),
+            "home_shots": (
+                StatPalSnapshotService._find_numeric(payload, "home_shots", "shots_home", "home_total_shots")
+                or home_player_shots
+            ),
+            "away_shots": (
+                StatPalSnapshotService._find_numeric(payload, "away_shots", "shots_away", "away_total_shots")
+                or away_player_shots
+            ),
             "home_shots_on_target": (
                 StatPalSnapshotService._team_metric(team_stats, "home", "shots_on_goal")
                 or StatPalSnapshotService._team_metric(team_stats, "home", "shots_on_target")
@@ -1002,6 +1025,7 @@ class StatPalSnapshotService:
                     "shots_on_goal_home",
                     "home_sot",
                 )
+                or home_player_sot
             ),
             "away_shots_on_target": (
                 StatPalSnapshotService._team_metric(team_stats, "away", "shots_on_goal")
@@ -1014,6 +1038,7 @@ class StatPalSnapshotService:
                     "shots_on_goal_away",
                     "away_sot",
                 )
+                or away_player_sot
             ),
             "home_corners": (
                 StatPalSnapshotService._team_metric(team_stats, "home", "corners")
@@ -1045,6 +1070,29 @@ class StatPalSnapshotService:
             "has_player_stats": bool(((payload or {}).get("player_stats") or {}).get("home") or ((payload or {}).get("player_stats") or {}).get("away")),
             "top_level_keys": sorted((payload or {}).keys()) if isinstance(payload, dict) else [],
         }
+
+    @staticmethod
+    def _player_stat_total(player_stats, side: str, *keys: str) -> float | None:
+        if not isinstance(player_stats, dict):
+            return None
+        players = player_stats.get(side)
+        if not isinstance(players, list):
+            return None
+        total = 0.0
+        found = False
+        for player in players:
+            if not isinstance(player, dict):
+                continue
+            stats = player.get("stats") if isinstance(player.get("stats"), dict) else player
+            for key in keys:
+                value = StatPalSnapshotService._to_number(stats.get(key))
+                if value is not None:
+                    total += value
+                    found = True
+                    break
+        if not found:
+            return None
+        return round(total, 3)
 
     @staticmethod
     def _team_metric(team_stats, side: str, metric: str, field: str = "total"):
