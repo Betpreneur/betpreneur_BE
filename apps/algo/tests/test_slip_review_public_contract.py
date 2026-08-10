@@ -574,6 +574,27 @@ class SlipReviewPublicContractTests(SimpleTestCase):
 
 
 class SlipReviewPayloadDbTests(TestCase):
+    def test_public_only_review_payload_is_minimal_while_analysing(self):
+        user = get_user_model().objects.create_user(username="progress")
+        review = SlipReview.objects.create(
+            user=user,
+            source=SlipReview.Source.SPORTYBET,
+            status=SlipReview.Status.ANALYSING,
+            title="SportyBet review",
+            summary={},
+        )
+
+        payload = _slip_review_payload(review, public_only=True)
+
+        self.assertEqual(payload["id"], review.id)
+        self.assertEqual(payload["source"], "sportybet")
+        self.assertEqual(payload["status"], "analysing")
+        self.assertIn("created_at", payload)
+        self.assertIn("updated_at", payload)
+        self.assertNotIn("ticket", payload)
+        self.assertNotIn("games", payload)
+        self.assertNotIn("recommended_ticket", payload)
+
     def test_public_only_review_payload_hides_internal_summary(self):
         user = get_user_model().objects.create_user(username="tester")
         summary = _manual_review_summary([_sample_replace_result()])

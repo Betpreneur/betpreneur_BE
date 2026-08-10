@@ -4650,6 +4650,20 @@ def _slip_review_payload(review, *, include_selections=True, public_only=False):
     summary = review.summary or {}
     public_payload = summary.get("public") or (summary.get("intelligence") or {}).get("public", {})
     if public_only:
+        if review.status in {
+            SlipReview.Status.QUEUED,
+            SlipReview.Status.IMPORTING,
+            SlipReview.Status.ANALYSING,
+        }:
+            return _api_response_payload(
+                {
+                    "id": review.id,
+                    "source": review.source,
+                    "status": review.status,
+                    "created_at": review.created_at,
+                    "updated_at": review.updated_at,
+                }
+            )
         bettor_payload = summary.get("bettor_public") or _build_bettor_public_payload(
             review,
             public_payload,
