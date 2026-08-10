@@ -173,3 +173,26 @@ class ServiceTests(SimpleTestCase):
 
         self.assertEqual(explanation.source, "template")
         self.assertTrue(explanation.text)
+
+    def test_ticket_explanation_allows_combined_killer_risk_share(self):
+        public = {
+            "ticket": {
+                "estimated_success_percent": 3.75,
+                "assessed_legs_in_estimate": 5,
+                "legs_excluded_from_estimate": 0,
+            },
+            "ticket_killers": {
+                "combined_risk_share_percent": 69.9,
+                "selections": [
+                    {"risk_share_percent": 29.6},
+                    {"risk_share_percent": 20.8},
+                    {"risk_share_percent": 19.5},
+                ],
+            },
+            "calibration": {"basis": "prior"},
+        }
+
+        explanation = service.explain_ticket(public)
+
+        self.assertTrue(explanation.validation["ok"], explanation.validation)
+        self.assertIn("69.9%", explanation.text)

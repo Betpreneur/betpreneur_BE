@@ -368,8 +368,9 @@ def _correlation_for(items: list[dict[str, Any]], legs: list[LegRisk]):
             grouped.setdefault(key, []).append(index)
 
     multi = {key: indexes for key, indexes in grouped.items() if len(indexes) > 1}
+    assessed_count = len(assessed)
     if not multi:
-        return CorrelationResult(factor=1.0, correlated_groups=0, adjusted_legs=0, skipped_legs=0)
+        return CorrelationResult(factor=1.0, correlated_groups=0, adjusted_legs=0, skipped_legs=assessed_count)
 
     groups = []
     for indexes in multi.values():
@@ -396,8 +397,14 @@ def _correlation_for(items: list[dict[str, Any]], legs: list[LegRisk]):
         groups.append((rates.matrix(), legs_spec))
 
     if not groups:
-        return CorrelationResult(factor=1.0, correlated_groups=0, adjusted_legs=0, skipped_legs=0)
-    return combine(groups)
+        return CorrelationResult(factor=1.0, correlated_groups=0, adjusted_legs=0, skipped_legs=assessed_count)
+    result = combine(groups)
+    return CorrelationResult(
+        factor=result.factor,
+        correlated_groups=result.correlated_groups,
+        adjusted_legs=result.adjusted_legs,
+        skipped_legs=max(0, assessed_count - result.adjusted_legs),
+    )
 
 
 def _tier_counts(legs: list[LegRisk]) -> dict[str, int]:

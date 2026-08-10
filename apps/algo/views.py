@@ -4,6 +4,7 @@ import hashlib
 import json
 import dataclasses
 import logging
+import math
 from decimal import Decimal, InvalidOperation
 
 from celery.result import AsyncResult
@@ -2737,6 +2738,52 @@ def _float_or_none(value):
         return None
 
 
+def _round_percent(value):
+    parsed = _float_or_none(value)
+    return round(parsed * 100, 1) if parsed is not None else None
+
+
+def _fair_odds(probability):
+    parsed = _float_or_none(probability)
+    if parsed is None or parsed <= 0:
+        return None
+    return round(1 / parsed, 2)
+
+
+def _implied_probability_from_odds(odds):
+    parsed = _float_or_none(odds)
+    if parsed is None or parsed <= 1:
+        return None
+    return 1 / parsed
+
+
+def _probability_gap(model_probability, market_probability):
+    if model_probability is None or market_probability is None:
+        return None
+    return round((model_probability - market_probability) * 100, 1)
+
+
+def _gap_level(gap_points):
+    gap = abs(_float_or_none(gap_points) or 0)
+    if gap >= 15:
+        return "high"
+    if gap >= 8:
+        return "medium"
+    return "low"
+
+
+def _value_rating(model_probability, offered_odds):
+    market_probability = _implied_probability_from_odds(offered_odds)
+    gap = _probability_gap(model_probability, market_probability)
+    if gap is None:
+        return "unknown"
+    if gap >= 5:
+        return "positive_value"
+    if gap <= -5:
+        return "poor_value"
+    return "near_fair"
+
+
 def _selection_original_odds(item):
     provider_payload = item.get("provider_payload") or {}
     odds = provider_payload.get("odds")
@@ -2837,6 +2884,36 @@ def _ticket_health_label(score):
     return "Very Poor"
 
 
+def _pick_confidence_label(score):
+    score = _float_or_none(score)
+    if score is None:
+        return "Unknown"
+    if score >= 90:
+        return "Exceptional"
+    if score >= 80:
+        return "Very Strong"
+    if score >= 70:
+        return "Strong"
+    if score >= 60:
+        return "Moderate"
+    if score >= 50:
+        return "Borderline"
+    if score >= 40:
+        return "Low"
+    return "Very Low"
+
+
+def _risk_level_from_confidence(score):
+    score = _float_or_none(score)
+    if score is None:
+        return "unknown"
+    if score < 55:
+        return "high"
+    if score < 70:
+        return "medium"
+    return "low"
+
+
 def _ticket_issue_text(replace_count=0, remove_count=0, caution_count=0, unverified_count=0):
     parts = []
     if replace_count:
@@ -2873,13 +2950,15 @@ def _public_action_label(verdict):
     }.get(str(verdict or "").lower(), "Review")
 
 
-def _public_verdict_message(verdict, submitted_market=None):
+def _public_verdict_message(verdict, submitted_market=None, pick_status=None):
     market = submitted_market or "This pick"
+    if str(verdict or "").lower() == "caution" and str(pick_status or "").lower() == "avoid":
+        return f"{market} has low model support; treat it as high risk unless you accept the downside."
     return {
         "keep": f"{market} is playable from the current analysis.",
         "caution": f"{market} is playable, but it carries extra risk.",
         "replace": f"{market} is too risky compared with the suggested alternative.",
-        "remove": f"{market} is too risky to trust from the current analysis.",
+        "remove": f"{market} is too risky compared with safer options for this game.",
         "expired": "This event has already started or ended.",
         "unmatched": "We could not confidently match this fixture.",
         "unmatched_market": "We matched the fixture, but not this market.",
@@ -2888,12 +2967,12 @@ def _public_verdict_message(verdict, submitted_market=None):
     }.get(str(verdict or "").lower(), "This pick needs review.")
 
 
-def _public_verdict_object(verdict, submitted_market=None):
+def _public_verdict_object(verdict, submitted_market=None, pick_status=None):
     code = str(verdict or "review").lower()
     return {
         "code": code,
         "label": _public_action_label(code),
-        "message": _public_verdict_message(code, submitted_market=submitted_market),
+        "message": _public_verdict_message(code, submitted_market=submitted_market, pick_status=pick_status),
     }
 
 
@@ -2921,6 +3000,7 @@ def _public_market_pick(market, *, fallback_market="", fallback_odds=None):
         "confidence": (market or {}).get("final_confidence") or (market or {}).get("confidence"),
         "odds": _float_or_none((market or {}).get("odds")) if market else fallback_odds,
         "score": score,
+        "decision_score": score,
         "status": _match_checker_status(score),
         "odds_status": odds_status,
     }
@@ -3030,7 +3110,14 @@ def _public_why_from_card(card):
     price_check = _public_price_check_from_card(card)
     if price_check.get("available"):
         why.append(price_check["message"])
-        codes.append("price_edge")
+        if price_check.get("status") == "positive_edge":
+            codes.append("price_edge")
+        elif price_check.get("status") == "near_reference":
+            codes.append("price_near_reference")
+        elif price_check.get("status") == "short_price":
+            codes.append("price_short")
+        else:
+            codes.append("price_reference")
     if alternative.get("reason"):
         why.append(alternative["reason"])
         codes.append("better_alternative")
@@ -3190,7 +3277,9 @@ def _public_selection_card(item):
     if verdict == "replace" and replacement_market:
         ai_pick = _public_market_pick(replacement_market)
     elif verdict in {"keep", "caution"}:
-        ai_pick = _public_market_pick(selected_market, fallback_market=item.get("submitted_market"), fallback_odds=_selection_original_odds(item))
+        selected_score = _float_or_none(selected_market.get("advisory_score"))
+        if selected_score is not None and selected_score >= 55:
+            ai_pick = _public_market_pick(selected_market, fallback_market=item.get("submitted_market"), fallback_odds=_selection_original_odds(item))
     if ai_pick:
         ai_pick["recommendation_strength"] = _public_recommendation_strength(ai_pick)
         if verdict == "replace" and replacement_market:
@@ -3206,6 +3295,7 @@ def _public_selection_card(item):
         "confidence": card.get("confidence"),
         "odds": card.get("odds"),
         "score": card.get("advisory_score"),
+        "decision_score": card.get("advisory_score"),
         "status": card.get("advisory_status") or _match_checker_status(_float_or_none(card.get("advisory_score"))),
     }
     capability = item.get("market_capability") or selected_market.get("market_capability") or {}
@@ -3217,6 +3307,9 @@ def _public_selection_card(item):
     statpal_context = item.get("statpal_context") or card.get("statpal_context") or {}
     statpal_coverage = statpal_context.get("market_snapshot_coverage") or {}
     statpal_plan = statpal_context.get("market_snapshot_plan") or {}
+    statpal_snapshot_types = sorted((statpal_context.get("snapshots") or {}).keys())
+    statpal_hydration_source = statpal_context.get("hydration_source") or ("statpal_context" if statpal_snapshot_types else "")
+    statpal_snapshot_cache_status = statpal_context.get("snapshot_cache_status") or ("hit" if statpal_snapshot_types else "")
     technical_ref = {
         "status": item.get("status"),
         "match_resolution_score": card.get("match_resolution_score"),
@@ -3226,9 +3319,9 @@ def _public_selection_card(item):
         "market_data_quality": capability.get("data_quality") if capability else "",
         "market_confidence_cap": capability.get("confidence_cap") if capability else None,
         "market_capability_warnings": capability.get("warnings") or [],
-        "statpal_snapshot_types": sorted((statpal_context.get("snapshots") or {}).keys()),
-        "statpal_hydration_source": statpal_context.get("hydration_source") or "",
-        "statpal_snapshot_cache_status": statpal_context.get("snapshot_cache_status") or "",
+        "statpal_snapshot_types": statpal_snapshot_types,
+        "statpal_hydration_source": statpal_hydration_source,
+        "statpal_snapshot_cache_status": statpal_snapshot_cache_status,
         "statpal_required_snapshot_types": statpal_coverage.get("required") or statpal_plan.get("snapshot_types") or [],
         "statpal_missing_snapshot_types": statpal_coverage.get("missing") or statpal_plan.get("missing_snapshot_types") or [],
         "statpal_stale_snapshot_types": statpal_plan.get("stale_snapshot_types") or [],
@@ -3249,7 +3342,7 @@ def _public_selection_card(item):
         "match": card.get("fixture") or card.get("match"),
         "match_id": card.get("match_id", ""),
         "your_pick": your_pick,
-        "verdict": _public_verdict_object(verdict, submitted_market=item.get("submitted_market")),
+        "verdict": _public_verdict_object(verdict, submitted_market=item.get("submitted_market"), pick_status=your_pick.get("status")),
         "risk_level": risk_level,
         "risk": _public_risk_label(risk_level),
         "ai_pick": ai_pick,
@@ -3299,19 +3392,107 @@ def _leg_state_counts(items):
 def _with_leg_risk(card, leg):
     """Attach the calibrated risk view of a leg to its public card."""
     tier_label = "High risk" if leg.tier == "avoid" else leg.tier_label
+    probability_percent = _round_percent(leg.probability)
+    repair_probability_percent = _round_percent(leg.repair_probability)
+    selection_lift = (
+        round(repair_probability_percent - probability_percent, 1)
+        if repair_probability_percent is not None and probability_percent is not None
+        else None
+    )
     card["risk_tier"] = {
         "code": leg.tier,
         "label": tier_label,
-        "estimated_success_percent": round(leg.probability * 100, 1) if leg.probability is not None else None,
+        "estimated_success_percent": probability_percent,
         "risk_share_percent": leg.risk_share_percent,
         "capped_by_data_quality": leg.capped_by_data_quality,
     }
     card["repair"] = {
         "available": leg.repair_probability is not None,
-        "estimated_success_percent": round(leg.repair_probability * 100, 1) if leg.repair_probability else None,
+        "estimated_success_percent": repair_probability_percent,
+        "selection_lift_points": selection_lift,
         "ticket_lift_points": leg.repair_lift_points,
         "drop_lift_points": leg.drop_lift_points,
     }
+    your_pick = card.get("your_pick") or {}
+    data_confidence_score = _float_or_none(your_pick.get("confidence_cap") or your_pick.get("confidence"))
+    offered_probability = _implied_probability_from_odds(your_pick.get("odds"))
+    price_check = card.get("price_check") or {}
+    reference_probability = _implied_probability_from_odds(price_check.get("reference_odds"))
+    disagreement_gap = _probability_gap(leg.probability, reference_probability)
+    pick_confidence_score = probability_percent
+    your_pick.update(
+        {
+            "model_probability": leg.probability,
+            "model_probability_percent": probability_percent,
+            "fair_odds": _fair_odds(leg.probability),
+            "confidence_score": pick_confidence_score,
+            "confidence_label": _pick_confidence_label(pick_confidence_score),
+            "data_confidence_score": data_confidence_score,
+            "decision_score": your_pick.get("decision_score", your_pick.get("score")),
+            "risk_score": round((1 - leg.probability) * 100, 1) if leg.probability is not None else None,
+            "risk_level": _risk_level_from_confidence(pick_confidence_score),
+            "market_implied_probability": offered_probability,
+            "market_implied_probability_percent": _round_percent(offered_probability),
+            "value_rating": _value_rating(leg.probability, your_pick.get("odds")),
+        }
+    )
+    card["your_pick"] = your_pick
+    ai_same_as_user = bool(card.get("ai_pick")) and leg.repair_probability is None
+    card["user_pick"] = {
+        "market": your_pick.get("market"),
+        "odds": your_pick.get("odds"),
+        "confidence_score": pick_confidence_score,
+        "confidence_label": _pick_confidence_label(pick_confidence_score),
+        "risk_level": _risk_level_from_confidence(pick_confidence_score),
+        "model_probability_percent": probability_percent,
+        "data_confidence_score": data_confidence_score,
+        "verdict": (card.get("verdict") or {}).get("code"),
+    }
+    if card.get("ai_pick"):
+        ai_data_confidence_score = _float_or_none(
+            card["ai_pick"].get("confidence") or data_confidence_score
+        )
+        ai_probability = leg.repair_probability if leg.repair_probability is not None else leg.probability
+        ai_confidence_score = repair_probability_percent if repair_probability_percent is not None else probability_percent
+        card["ai_pick"].update(
+            {
+                "model_probability": ai_probability,
+                "model_probability_percent": ai_confidence_score,
+                "fair_odds": _fair_odds(ai_probability),
+                "available": True,
+                "confidence_score": ai_confidence_score,
+                "confidence_label": _pick_confidence_label(ai_confidence_score),
+                "data_confidence_score": ai_data_confidence_score,
+                "decision_score": card["ai_pick"].get("decision_score", card["ai_pick"].get("score")),
+                "risk_level": _risk_level_from_confidence(ai_confidence_score),
+                "selection_lift_points": selection_lift,
+            }
+        )
+    else:
+        card["ai_pick"] = {"available": False}
+    card["comparison"] = {
+        "confidence_gain": 0.0 if ai_same_as_user and selection_lift is None else selection_lift,
+        "selection_probability_lift": 0.0 if ai_same_as_user and selection_lift is None else selection_lift,
+        "ticket_success_lift": leg.repair_lift_points,
+    }
+    if reference_probability is not None:
+        card["market_consensus"] = {
+            "reference_odds": price_check.get("reference_odds"),
+            "implied_probability": reference_probability,
+            "implied_probability_percent": _round_percent(reference_probability),
+            "model_probability": leg.probability,
+            "model_probability_percent": probability_percent,
+            "probability_gap_points": disagreement_gap,
+            "disagreement_level": _gap_level(disagreement_gap),
+        }
+        if abs(disagreement_gap or 0) >= 15:
+            card.setdefault("reason_codes", [])
+            if "model_market_disagreement" not in card["reason_codes"]:
+                card["reason_codes"].append("model_market_disagreement")
+            card.setdefault("why", [])
+            card["why"].append(
+                "The model and market consensus disagree strongly, so treat this verdict with extra caution."
+            )
     return card
 
 
@@ -3323,6 +3504,28 @@ def _public_ticket_killers(ticket_risk):
             copy["tier_label"] = "High risk"
         selections.append(copy)
     return selections
+
+
+def _ticket_risk_level_from_score(score):
+    score = _float_or_none(score)
+    if score is None:
+        return "unknown"
+    if score < 55:
+        return "high"
+    if score < 65:
+        return "medium"
+    return "low"
+
+
+def _repaired_ticket_confidence_score(ticket_risk):
+    probabilities = []
+    for leg in ticket_risk.legs:
+        probability = leg.repair_probability if leg.repair_probability is not None else leg.probability
+        if probability is not None:
+            probabilities.append(probability)
+    if not probabilities:
+        return None
+    return round(math.exp(sum(math.log(probability) for probability in probabilities) / len(probabilities)) * 100, 1)
 
 
 def _ticket_killers_message(ticket_risk):
@@ -3421,12 +3624,20 @@ def _slip_intelligence(results):
         "legs": len(analysed),
         "estimated_success": original_success,
         "combined_odds": original_combined,
+        "fair_odds": _fair_odds((original_success or 0) / 100) if original_success is not None else None,
     }
     optimized_ticket = {
         "legs": optimized_leg_count,
         "estimated_success": optimized_success,
         "combined_odds": suggested_combined,
+        "fair_odds": _fair_odds((optimized_success or 0) / 100) if optimized_success is not None else None,
     }
+    repaired_confidence_score = _repaired_ticket_confidence_score(ticket_risk)
+    confidence_change = (
+        round(repaired_confidence_score - overall_score, 1)
+        if repaired_confidence_score is not None and overall_score is not None
+        else None
+    )
     improvement_text = f"+{improvement} percentage points" if improvement is not None and improvement > 0 else (
         f"{improvement} percentage points" if improvement is not None else ""
     )
@@ -3437,6 +3648,22 @@ def _slip_intelligence(results):
         item for item in enriched
         if _settlement_market_for(item) and (item.get("matched_fixture") or {}).get("match_date")
     ]
+    untracked_items = []
+    for item in enriched:
+        reasons = []
+        if not (item.get("matched_fixture") or {}).get("match_date"):
+            reasons.append("missing_fixture_date")
+        if not _settlement_market_for(item):
+            reasons.append("unsupported_settlement_market")
+        if reasons:
+            untracked_items.append(
+                {
+                    "id": (item.get("matched_fixture") or {}).get("match_id") or item.get("match"),
+                    "match": item.get("match"),
+                    "market": item.get("submitted_market"),
+                    "reasons": reasons,
+                }
+            )
     flagged_risky_items = [item for item in enriched if _selection_flagged_risky(item)]
     learning_tracking = {
         "status": "tracking" if trackable_items else "not_tracked",
@@ -3536,6 +3763,30 @@ def _slip_intelligence(results):
         "explanation": {},
         "leg_states": _leg_state_counts(enriched),
         "ticket_health": ticket_health,
+        "ticket_summary": {
+            "total_legs": len(enriched),
+            "user_ticket": {
+                "overall_confidence_score": overall_score,
+                "estimated_success_percent": original_success,
+                "risk_level": risk_level,
+                "label": _ticket_health_label(overall_score),
+                "combined_odds": original_combined,
+                "model_fair_odds": original_ticket["fair_odds"],
+            },
+            "ai_ticket": {
+                "overall_confidence_score": repaired_confidence_score,
+                "estimated_success_percent": optimized_success,
+                "risk_level": _ticket_risk_level_from_score(repaired_confidence_score),
+                "label": "Improved" if confidence_change is not None and confidence_change > 0 else _ticket_health_label(repaired_confidence_score),
+                "combined_odds": suggested_combined,
+                "model_fair_odds": optimized_ticket["fair_odds"],
+            },
+            "improvement": {
+                "confidence_score_change": confidence_change,
+                "success_probability_change": improvement,
+                "picks_changed": len(replace_items) + len(remove_items),
+            },
+        },
         "ticket_killers": {
             "selections": public_ticket_killers,
             "message": _ticket_killers_message(ticket_risk),
@@ -3564,11 +3815,19 @@ def _slip_intelligence(results):
             "original": {
                 "legs": original_ticket["legs"],
                 "combined_odds": original_ticket["combined_odds"],
+                "model_fair_odds": original_ticket["fair_odds"],
                 "model_estimated_success_percent": original_ticket["estimated_success"],
+            },
+            "repaired": {
+                "legs": optimized_ticket["legs"],
+                "combined_odds": optimized_ticket["combined_odds"],
+                "model_fair_odds": optimized_ticket["fair_odds"],
+                "model_estimated_success_percent": optimized_ticket["estimated_success"],
             },
             "optimized": {
                 "legs": optimized_ticket["legs"],
                 "combined_odds": optimized_ticket["combined_odds"],
+                "model_fair_odds": optimized_ticket["fair_odds"],
                 "model_estimated_success_percent": optimized_ticket["estimated_success"],
             },
             "success_increase_percentage_points": improvement,
@@ -3576,6 +3835,7 @@ def _slip_intelligence(results):
         },
         "improvement": {
             "original_success_percent": original_success,
+            "repaired_success_percent": optimized_success,
             "optimized_success_percent": optimized_success,
             "increase_percentage_points": improvement,
             "label": improvement_text,
@@ -3597,6 +3857,8 @@ def _slip_intelligence(results):
             "enabled": bool(trackable_items),
             "status": learning_tracking["outcome_tracking"],
             "tracked_selections": len(trackable_items),
+            "untracked_selections": len(untracked_items),
+            "untracked": untracked_items,
             "flagged_risky_selections": len(flagged_risky_items),
         },
     }
@@ -3697,6 +3959,110 @@ def _selection_flagged_risky(item):
     return item.get("verdict") in {"remove", "replace", "caution"}
 
 
+def _log_slip_review_debug(review, summary):
+    public = (summary or {}).get("public") or {}
+    ticket_summary = public.get("ticket_summary") or {}
+    user_ticket = ticket_summary.get("user_ticket") or {}
+    ai_ticket = ticket_summary.get("ai_ticket") or {}
+    improvement = ticket_summary.get("improvement") or {}
+    explanation = public.get("explanation") or {}
+    tracking = public.get("tracking") or {}
+    correlation = public.get("correlation") or {}
+    counts = public.get("counts") or {}
+    verdict = public.get("verdict") or {}
+    log.info(
+        (
+            "Slip review public summary review=%s status=%s source=%s total_legs=%s analysed=%s "
+            "user_conf=%s user_success=%s user_odds=%s ai_conf=%s ai_success=%s ai_odds=%s "
+            "confidence_delta=%s success_delta=%s picks_changed=%s verdict=%s counts=%s "
+            "correlation=%s tracking=%s explanation_ok=%s explanation_reasons=%s"
+        ),
+        review.id,
+        review.status,
+        review.source,
+        ticket_summary.get("total_legs"),
+        (summary or {}).get("analysed_count"),
+        user_ticket.get("overall_confidence_score"),
+        user_ticket.get("estimated_success_percent"),
+        user_ticket.get("combined_odds"),
+        ai_ticket.get("overall_confidence_score"),
+        ai_ticket.get("estimated_success_percent"),
+        ai_ticket.get("combined_odds"),
+        improvement.get("confidence_score_change"),
+        improvement.get("success_probability_change"),
+        improvement.get("picks_changed"),
+        verdict.get("code"),
+        counts,
+        correlation,
+        {
+            "status": tracking.get("status"),
+            "tracked": tracking.get("tracked_selections"),
+            "untracked": tracking.get("untracked_selections"),
+            "flagged_risky": tracking.get("flagged_risky_selections"),
+        },
+        (explanation.get("validation") or {}).get("ok"),
+        (explanation.get("validation") or {}).get("reasons") or [],
+    )
+
+    untracked_by_id = {
+        str(item.get("id") or ""): item.get("reasons") or []
+        for item in tracking.get("untracked") or []
+    }
+    for index, selection in enumerate(public.get("selections") or [], start=1):
+        user_pick = selection.get("user_pick") or selection.get("your_pick") or {}
+        ai_pick = selection.get("ai_pick") or {}
+        comparison = selection.get("comparison") or {}
+        technical = selection.get("technical_ref") or {}
+        market_consensus = selection.get("market_consensus") or {}
+        assessment = selection.get("assessment") or {}
+        selection_id = str(selection.get("id") or "")
+        log.info(
+            (
+                "Slip review leg debug review=%s leg=%s id=%s match=%r market=%r state=%s family=%s "
+                "verdict=%s risk=%s user_conf=%s user_label=%s user_prob=%s data_conf=%s "
+                "ai_available=%s ai_market=%r ai_conf=%s ai_label=%s ai_prob=%s "
+                "confidence_gain=%s ticket_lift=%s value=%s market_gap=%s disagreement=%s "
+                "price_status=%s statpal_source=%s statpal_cache=%s statpal_coverage=%s "
+                "statpal_required=%s statpal_missing=%s statpal_stale=%s statpal_snapshots=%s "
+                "warnings=%s tracking_reasons=%s reason_codes=%s"
+            ),
+            review.id,
+            index,
+            selection_id,
+            selection.get("match"),
+            user_pick.get("market"),
+            selection.get("state"),
+            assessment.get("market_family"),
+            (selection.get("verdict") or {}).get("code"),
+            selection.get("risk_level"),
+            user_pick.get("confidence_score"),
+            user_pick.get("confidence_label"),
+            user_pick.get("model_probability_percent"),
+            user_pick.get("data_confidence_score"),
+            ai_pick.get("available"),
+            ai_pick.get("market"),
+            ai_pick.get("confidence_score"),
+            ai_pick.get("confidence_label"),
+            ai_pick.get("model_probability_percent"),
+            comparison.get("confidence_gain"),
+            comparison.get("ticket_success_lift"),
+            user_pick.get("value_rating"),
+            market_consensus.get("probability_gap_points"),
+            market_consensus.get("disagreement_level"),
+            (selection.get("price_check") or {}).get("status"),
+            technical.get("statpal_hydration_source"),
+            technical.get("statpal_snapshot_cache_status"),
+            technical.get("statpal_snapshot_coverage_percent"),
+            technical.get("statpal_required_snapshot_types") or [],
+            technical.get("statpal_missing_snapshot_types") or [],
+            technical.get("statpal_stale_snapshot_types") or [],
+            technical.get("statpal_snapshot_types") or [],
+            technical.get("market_capability_warnings") or [],
+            untracked_by_id.get(selection_id, []),
+            selection.get("reason_codes") or [],
+        )
+
+
 def _populate_slip_review(review, results):
     safe_results = _json_safe(results)
     safe_results, _ = _slip_intelligence(safe_results)
@@ -3704,6 +4070,7 @@ def _populate_slip_review(review, results):
     review.status = _review_status_from_summary(summary)
     review.summary = summary
     review.save(update_fields=["status", "summary", "updated_at"])
+    _log_slip_review_debug(review, summary)
     review.selections.all().delete()
     rows = []
     for index, item in enumerate(safe_results, start=1):

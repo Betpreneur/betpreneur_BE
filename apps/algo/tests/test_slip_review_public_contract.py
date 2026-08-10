@@ -11,6 +11,7 @@ from apps.algo.views import (
     _manual_review_summary,
     _matched_fixture_with_statpal,
     _public_price_check_from_card,
+    _public_verdict_object,
     _replacement_market_for_slip,
     _should_skip_core_on_demand,
     _slip_review_payload,
@@ -328,15 +329,25 @@ class SlipReviewPublicContractTests(SimpleTestCase):
         self.assertEqual(public["contract_version"], "match_checker_public_v2")
         self.assertEqual(public["response_mode"], "public")
         self.assertIn("ticket_health", public)
+        self.assertIn("ticket_summary", public)
         self.assertIn("comparison", public)
         self.assertIn("ticket_impact", public)
         self.assertNotIn("api_usage", public)
         self.assertNotIn("recommended_changes", public)
         self.assertEqual(public["recommended_change_ids"], ["1581037"])
+        self.assertEqual(public["ticket_summary"]["total_legs"], 1)
+        self.assertIn("overall_confidence_score", public["ticket_summary"]["user_ticket"])
+        self.assertIn("overall_confidence_score", public["ticket_summary"]["ai_ticket"])
+        self.assertIn("confidence_score_change", public["ticket_summary"]["improvement"])
 
         self.assertEqual(selection["verdict"]["code"], "replace")
         self.assertEqual(selection["verdict"]["label"], "Replace")
         self.assertEqual(selection["your_pick"]["market"], "Away Win")
+        self.assertEqual(selection["user_pick"]["market"], "Away Win")
+        self.assertIn("confidence_score", selection["user_pick"])
+        self.assertIn("confidence_label", selection["user_pick"])
+        self.assertIn("data_confidence_score", selection["user_pick"])
+        self.assertEqual(selection["user_pick"]["verdict"], "replace")
         self.assertEqual(selection["your_pick"]["support_level"], "full")
         self.assertEqual(selection["your_pick"]["data_quality"], "strong")
         self.assertEqual(selection["your_pick"]["confidence_cap"], 88)
@@ -345,10 +356,26 @@ class SlipReviewPublicContractTests(SimpleTestCase):
         self.assertEqual(selection["price_check"]["status"], "short_price")
         self.assertEqual(selection["price_check"]["edge_percent"], -10.0)
         self.assertEqual(selection["price_check"]["reference_odds"], 2.0)
-        self.assertIn("price_edge", selection["reason_codes"])
+        self.assertIn("price_short", selection["reason_codes"])
         self.assertTrue(any("shorter than the StatPal reference" in reason for reason in selection["why"]))
+        self.assertIn("model_probability_percent", selection["your_pick"])
+        self.assertIn("decision_score", selection["your_pick"])
+        self.assertIn("data_confidence_score", selection["your_pick"])
+        self.assertIn("confidence_label", selection["your_pick"])
+        self.assertNotEqual(selection["your_pick"]["model_probability_percent"], selection["your_pick"]["decision_score"])
+        self.assertIn("value_rating", selection["your_pick"])
+        self.assertIn("market_consensus", selection)
+        self.assertIn("model_fair_odds", public["comparison"]["original"])
+        self.assertIn("repaired", public["comparison"])
         self.assertEqual(selection["ai_pick"]["market"], "Over 1.5")
+        self.assertTrue(selection["ai_pick"]["available"])
+        self.assertIn("confidence_score", selection["ai_pick"])
+        self.assertIn("confidence_label", selection["ai_pick"])
+        self.assertIn("data_confidence_score", selection["ai_pick"])
         self.assertEqual(selection["ai_pick"]["replacement_scope"], "broad_fallback")
+        self.assertIn("selection_lift_points", selection["ai_pick"])
+        self.assertIn("confidence_gain", selection["comparison"])
+        self.assertIn("ticket_success_lift", selection["comparison"])
         self.assertIn(
             selection["ai_pick"]["recommendation_strength"],
             {"playable", "safer_alternative", "strong_recommendation"},
@@ -362,6 +389,27 @@ class SlipReviewPublicContractTests(SimpleTestCase):
         self.assertEqual(selection["technical_ref"]["statpal_required_snapshot_types"], ["lineups"])
         self.assertEqual(selection["technical_ref"]["statpal_missing_snapshot_types"], [])
         self.assertEqual(selection["technical_ref"]["statpal_snapshot_coverage_percent"], 100.0)
+
+    def test_slip_review_debug_logging_exposes_decision_inputs(self):
+        from apps.algo.views import _log_slip_review_debug
+
+        summary = _manual_review_summary([_sample_replace_result()])
+        review = type("Review", (), {"id": 33, "status": "completed", "source": "sportybet"})()
+
+        with self.assertLogs("apps.algo.views", level="INFO") as captured:
+            _log_slip_review_debug(review, summary)
+
+        text = "\n".join(captured.output)
+        self.assertIn("Slip review public summary review=33", text)
+        self.assertIn("user_conf=", text)
+        self.assertIn("ai_conf=", text)
+        self.assertIn("success_delta=", text)
+        self.assertIn("Slip review leg debug review=33", text)
+        self.assertIn("user_prob=", text)
+        self.assertIn("data_conf=", text)
+        self.assertIn("confidence_gain=", text)
+        self.assertIn("statpal_coverage=", text)
+        self.assertIn("reason_codes=", text)
 
     def test_market_not_found_with_replacement_counts_as_analysed(self):
         summary = _manual_review_summary([_sample_market_not_found_with_replacement()])
@@ -429,6 +477,16 @@ class SlipReviewPublicContractTests(SimpleTestCase):
         self.assertEqual(descriptor.family, "shots_on_target_total")
         self.assertEqual(descriptor.side, "under")
         self.assertEqual(descriptor.line, "9.5")
+
+    def test_caution_verdict_for_avoid_bucket_does_not_say_playable(self):
+        verdict = _public_verdict_object(
+            "caution",
+            submitted_market="GG / BTTS Yes",
+            pick_status="avoid",
+        )
+
+        self.assertNotIn("playable", verdict["message"].lower())
+        self.assertIn("high risk", verdict["message"].lower())
 
     def test_broad_replacement_must_be_materially_stronger(self):
         selected = {

@@ -96,6 +96,7 @@ def explain_ticket(public) -> Explanation:
     evidence = {
         "ticket": ticket,
         "killers": killers,
+        "ticket_killers": public.get("ticket_killers") or {},
         "calibration": public.get("calibration") or {},
     }
     return _finalise(baseline, evidence)

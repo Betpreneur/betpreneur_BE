@@ -59,6 +59,16 @@ class TicketProbabilityTests(TestCase):
             places=1,
         )
 
+    def test_independent_assessed_legs_are_declared_in_correlation_metadata(self):
+        legs = [_leg(70), _leg(65)]
+        legs[0]["match_id"] = "fixture-1"
+        legs[1]["match_id"] = "fixture-2"
+
+        ticket = TicketRiskService().assess(legs, calibration=PRIOR)
+
+        self.assertFalse(ticket.correlation["applied"])
+        self.assertEqual(ticket.correlation["legs_assumed_independent"], 2)
+
     def test_health_is_leg_quality_and_does_not_decay_with_leg_count(self):
         service = TicketRiskService()
 
