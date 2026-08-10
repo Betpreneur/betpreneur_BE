@@ -391,14 +391,10 @@ def describe_market(value, *, market_name="", outcome_name="", specifier=""):
             return _mk(raw=raw or canonical, canonical=canonical, code=f"{family}_{team_side or 'total'}_{side}_{line}", family=family, category=category, side=side, team=team_side, selection=side, line=line, period=period, requires_card_stats=True)
         return _mk(raw=raw or combined, canonical=raw or combined, code="cards_market", family="cards", category="Cards", period=period, requires_card_stats=True)
 
-    if (
-        "shot" in text
-        and "target" in text
-        and ("team" in text or "home" in text or "away" in text)
-        and not ("player" in text or "to score" in text)
-    ):
+    if "shot" in text and "target" in text and not ("player" in text or "to score" in text):
         side = _over_under_side(outcome or raw or text)
         team_side = "home" if "home" in text else "away" if "away" in text else ""
+        family = "team_shots_on_target" if team_side or "team" in text else "shots_on_target_total"
         canonical = (
             f"{team_side.title() + ' Team ' if team_side else ''}Shots On Target "
             f"{(side or '').title()} {line}".strip()
@@ -406,9 +402,9 @@ def describe_market(value, *, market_name="", outcome_name="", specifier=""):
         return _mk(
             raw=raw or canonical or combined,
             canonical=canonical or raw or combined,
-            code=f"team_shots_on_target_{team_side or 'total'}_{side or 'market'}_{line}",
-            family="team_shots_on_target",
-            category="Team Shots",
+            code=f"{family}_{team_side or 'total'}_{side or 'market'}_{line}",
+            family=family,
+            category="Team Shots" if team_side or "team" in text else "Shots",
             side=side,
             team=team_side,
             selection=side,

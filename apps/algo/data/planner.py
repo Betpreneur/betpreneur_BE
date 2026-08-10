@@ -373,7 +373,6 @@ class FixtureHydrator:
             and plan.get("snapshot_types")
             and not plan.get("missing_snapshot_types")
             and not plan.get("stale_snapshot_types")
-            and not plan.get("requires_provider_competition_id")
         )
 
     @staticmethod

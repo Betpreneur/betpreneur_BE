@@ -2098,6 +2098,11 @@ def _generated_market_names_for_family(descriptor):
             prefix = "Home Team Cards" if descriptor.team == "home" else "Away Team Cards"
             return [f"{prefix} {side.title()} {line}" for line in ("1.5", "2.5", "3.5") for side in ("over", "under")]
         return [f"Cards {side.title()} {line}" for line in ("2.5", "3.5", "4.5", "5.5") for side in ("over", "under")]
+    if family in {"shots_on_target_total", "team_shots_on_target"}:
+        if descriptor.team in {"home", "away"}:
+            prefix = "Home Team Shots On Target" if descriptor.team == "home" else "Away Team Shots On Target"
+            return [f"{prefix} {side.title()} {line}" for line in ("2.5", "3.5", "4.5", "5.5") for side in ("over", "under")]
+        return [f"Shots On Target {side.title()} {line}" for line in ("6.5", "7.5", "8.5", "9.5", "10.5", "11.5") for side in ("over", "under")]
     if family == "booking_points":
         return [f"Booking Points {side.title()} {line}" for line in ("35.5", "45.5", "55.5", "65.5") for side in ("over", "under")]
     if family in {"total_goals", "team_total_goals"}:
@@ -2226,6 +2231,8 @@ def _market_family_group(market):
         return "corners"
     if family in {"cards_total", "team_cards", "booking_points", "cards"}:
         return "cards"
+    if family in {"shots_on_target_total", "team_shots_on_target"}:
+        return "shots_on_target"
     if str(family).startswith("player_"):
         return "player"
     if family in {"match_result", "double_chance", "draw_no_bet", "asian_handicap", "handicap"}:
@@ -2243,7 +2250,7 @@ def _replacement_scope(selected_market, candidate):
 
 def _allows_broad_replacement(selected_market):
     group = _market_family_group(selected_market)
-    return group in {"goals", "result"}
+    return group not in {"unknown"}
 
 
 def _rank_replacement_candidates(candidates):
@@ -2627,13 +2634,13 @@ def _manual_verdict(selected_market, replacement_market):
             else "This selection is playable for tracking, but it is not strong enough as a recommended pick."
         )
     elif status_value == "no_edge":
-        verdict = "replace" if has_better_market or has_stat_backed_alternative else "remove"
+        verdict = "replace" if replacement_market else "caution"
         message = (
             "The selected market does not show enough edge; consider the stronger match-specific alternative."
             if has_better_market
             else "The selected market is high risk; use the statistically backed alternative instead."
             if has_stat_backed_alternative
-            else "The selected market does not show enough edge from the current analysis."
+            else "This selection is high risk, but no stronger backed replacement was found for this game."
         )
     else:
         verdict = "caution"
@@ -3144,6 +3151,25 @@ def _selection_card(item):
     }
 
 
+def _without_remove_recommendation(item):
+    if item.get("verdict") != "remove":
+        return item
+    copy = dict(item)
+    if copy.get("replacement_market"):
+        copy["verdict"] = "replace"
+        copy["message"] = (
+            copy.get("message")
+            or "This selection is high risk; use the statistically backed alternative instead."
+        )
+    else:
+        copy["verdict"] = "caution"
+        copy["message"] = (
+            copy.get("message")
+            or "This selection is high risk, but no stronger backed replacement was found for this game."
+        )
+    return copy
+
+
 def _public_selection_card(item):
     card = _selection_card(item)
     selected_market = item.get("selected_market") or {}
@@ -3298,7 +3324,7 @@ def _ticket_killers_message(ticket_risk):
 def _slip_intelligence(results):
     enriched = []
     for item in results:
-        copy = dict(item)
+        copy = _without_remove_recommendation(dict(item))
         copy["selection_score"] = _selection_strength_score(copy)
         enriched.append(copy)
 

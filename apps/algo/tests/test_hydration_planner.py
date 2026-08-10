@@ -172,6 +172,29 @@ class HydratorTests(SimpleTestCase):
         self.assertEqual(bundle["context"]["snapshot_cache_status"], "hit")
         self.assertEqual(bundle["refreshed"]["api_usage"]["skipped_by_cache"], 2)
 
+    def test_fresh_daily_snapshot_cache_does_not_require_league_id(self):
+        descriptor = describe_market("Shots On Target Over 9.5")
+        self.service.snapshot_plan_for_market.return_value = {
+            "snapshot_types": ["detailed_stats", "prematch_odds"],
+            "fresh_snapshot_types": ["detailed_stats", "prematch_odds"],
+            "stale_snapshot_types": [],
+            "missing_snapshot_types": [],
+            "requires_provider_competition_id": ["detailed_stats", "prematch_odds"],
+            "coverage_percent": 100.0,
+        }
+        self.service.fixture_context.return_value = {
+            "snapshots": {
+                "detailed_stats": {"summary": {"home_shots_on_target": 5}},
+                "prematch_odds": {"summary": {"market_count": 80}},
+            }
+        }
+
+        bundle = self.hydrator.bundle_for(descriptor, match_id="1494239", provider_match_id="2026081032970")
+
+        self.service.prepare_fixture_context_for_market.assert_not_called()
+        self.assertEqual(bundle["hydration_source"], "statpal_daily_cache")
+        self.assertEqual(bundle["context"]["snapshot_cache_status"], "hit")
+
     def test_incomplete_daily_snapshot_cache_uses_on_demand_refresh(self):
         descriptor = describe_market("Cards Over 3.5")
         self.service.snapshot_plan_for_market.return_value = {

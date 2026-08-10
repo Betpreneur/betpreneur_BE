@@ -400,13 +400,15 @@ class SlipReviewPublicContractTests(SimpleTestCase):
         public = summary["public"]
 
         self.assertEqual(summary["analysed_count"], 1)
-        self.assertEqual(summary["remove_count"], 1)
+        self.assertEqual(summary["remove_count"], 0)
+        self.assertEqual(summary["caution_count"], 1)
         self.assertEqual(summary["unmatched_count"], 0)
         self.assertEqual(public["ticket"]["analysed_legs"], 1)
         self.assertEqual(public["ticket"]["unmatched_legs"], 0)
-        self.assertEqual(public["counts"]["remove"], 1)
+        self.assertEqual(public["counts"]["remove"], 0)
+        self.assertEqual(public["counts"]["caution"], 1)
         self.assertEqual(public["counts"]["unmatched"], 0)
-        self.assertEqual(public["selections"][0]["verdict"]["code"], "remove")
+        self.assertEqual(public["selections"][0]["verdict"]["code"], "caution")
 
     def test_market_not_found_without_score_counts_as_not_assessed_not_unmatched(self):
         summary = _manual_review_summary([_sample_market_not_found_without_score()])
@@ -419,6 +421,13 @@ class SlipReviewPublicContractTests(SimpleTestCase):
         self.assertEqual(public["counts"]["unmatched"], 0)
         self.assertEqual(public["counts"]["not_assessed"], 1)
         self.assertEqual(public["selections"][0]["state"], "insufficient_data")
+
+    def test_match_shots_on_target_text_stays_match_level_market(self):
+        descriptor = describe_market("Shots On Target Under 9.5")
+
+        self.assertEqual(descriptor.family, "shots_on_target_total")
+        self.assertEqual(descriptor.side, "under")
+        self.assertEqual(descriptor.line, "9.5")
 
     def test_ticket_killers_recommend_changing_not_removing(self):
         message = _ticket_killers_message(
