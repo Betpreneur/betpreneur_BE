@@ -595,6 +595,40 @@ class FixtureSearchService:
             "fixture": self._serialize_fixture(cached, float(mapping.confidence or 100), "direct"),
         }
 
+    def find_statpal_fixture_context(self, candidate, *, minimum_score=70):
+        candidate = candidate or {}
+        match_date = candidate.get("match_date")
+        if not match_date:
+            return None
+        home_query = normalize_fixture_text(candidate.get("home_team") or candidate.get("hname") or "")
+        away_query = normalize_fixture_text(candidate.get("away_team") or candidate.get("aname") or "")
+        normalized_query = normalize_fixture_text(
+            candidate.get("fixture")
+            or " vs ".join(
+                item
+                for item in [
+                    candidate.get("home_team") or candidate.get("hname"),
+                    candidate.get("away_team") or candidate.get("aname"),
+                ]
+                if item
+            )
+        )
+        if not normalized_query:
+            return None
+
+        best = None
+        queryset = FixtureCache.objects.filter(match_date=match_date, source="statpal")
+        for fixture in queryset[:2000]:
+            if home_query and away_query and not self._has_team_token_overlap(fixture, home_query, away_query):
+                continue
+            score, orientation = self._match_score_and_orientation(fixture, home_query, away_query, normalized_query)
+            if score >= minimum_score and (best is None or score > best[0]):
+                best = (score, orientation, fixture)
+        if not best:
+            return None
+        score, orientation, fixture = best
+        return self._serialize_fixture(fixture, score, orientation)
+
     def fetch_fixture_by_id(self, fixture_id):
         fixture_id = str(fixture_id or "").strip()
         if not fixture_id:
@@ -893,9 +927,11 @@ class FixtureSearchService:
         home_team_id = payload.get("provider_home_team_id") or payload.get("hid") or payload.get("home_team_id")
         away_team_id = payload.get("provider_away_team_id") or payload.get("aid") or payload.get("away_team_id")
         league_id = payload.get("provider_competition_id") or payload.get("code") or payload.get("league_id")
+        provider_match_id = payload.get("provider_match_id") or payload.get("main_id") or ""
         statpal_home_team_id = payload.get("statpal_home_team_id") or (home_team_id if fixture.source == "statpal" else "")
         statpal_away_team_id = payload.get("statpal_away_team_id") or (away_team_id if fixture.source == "statpal" else "")
         statpal_provider_competition_id = payload.get("statpal_provider_competition_id") or (league_id if fixture.source == "statpal" else "")
+        statpal_provider_match_id = payload.get("statpal_provider_match_id") or (provider_match_id if fixture.source == "statpal" else "")
         return {
             "match_id": fixture.match_id,
             "match_date": fixture.match_date,
@@ -906,9 +942,9 @@ class FixtureSearchService:
             "away_team_id": away_team_id,
             "statpal_home_team_id": statpal_home_team_id,
             "statpal_away_team_id": statpal_away_team_id,
-            "statpal_provider_match_id": payload.get("statpal_provider_match_id") or "",
+            "statpal_provider_match_id": statpal_provider_match_id,
             "statpal_provider_competition_id": statpal_provider_competition_id,
-            "provider_match_id": payload.get("provider_match_id") or payload.get("main_id") or "",
+            "provider_match_id": provider_match_id,
             "hid": home_team_id,
             "aid": away_team_id,
             "code": league_id,

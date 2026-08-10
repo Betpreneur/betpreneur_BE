@@ -3287,9 +3287,10 @@ def _leg_state_counts(items):
 
 def _with_leg_risk(card, leg):
     """Attach the calibrated risk view of a leg to its public card."""
+    tier_label = "High risk" if leg.tier == "avoid" else leg.tier_label
     card["risk_tier"] = {
         "code": leg.tier,
-        "label": leg.tier_label,
+        "label": tier_label,
         "estimated_success_percent": round(leg.probability * 100, 1) if leg.probability is not None else None,
         "risk_share_percent": leg.risk_share_percent,
         "capped_by_data_quality": leg.capped_by_data_quality,
@@ -3301,6 +3302,16 @@ def _with_leg_risk(card, leg):
         "drop_lift_points": leg.drop_lift_points,
     }
     return card
+
+
+def _public_ticket_killers(ticket_risk):
+    selections = []
+    for killer in ticket_risk.killers:
+        copy = dict(killer)
+        if copy.get("tier") == "avoid":
+            copy["tier_label"] = "High risk"
+        selections.append(copy)
+    return selections
 
 
 def _ticket_killers_message(ticket_risk):
@@ -3433,6 +3444,7 @@ def _slip_intelligence(results):
         _with_explanation(_with_leg_risk(_public_selection_card(item), leg))
         for item, leg in zip(enriched, ticket_risk.legs)
     ]
+    public_ticket_killers = _public_ticket_killers(ticket_risk)
     recommended_change_ids = [
         selection.get("id")
         for selection in public_selections
@@ -3514,11 +3526,11 @@ def _slip_intelligence(results):
         "leg_states": _leg_state_counts(enriched),
         "ticket_health": ticket_health,
         "ticket_killers": {
-            "selections": ticket_risk.killers,
+            "selections": public_ticket_killers,
             "message": _ticket_killers_message(ticket_risk),
             "combined_risk_share_percent": round(
-                sum(killer["risk_share_percent"] for killer in ticket_risk.killers), 1
-            ) if ticket_risk.killers else None,
+                sum(killer["risk_share_percent"] for killer in public_ticket_killers), 1
+            ) if public_ticket_killers else None,
         },
         "calibration": {
             **ticket_risk.calibration.to_dict(),
@@ -4102,6 +4114,17 @@ def _analyse_manual_selection(
             },
             "possible_matches": candidates,
         }
+    if not statpal_candidate:
+        statpal_candidate = search_service.find_statpal_fixture_context(candidate)
+        if statpal_candidate:
+            resolver_trace.append(
+                {
+                    "strategy": "statpal_context_from_resolved_fixture",
+                    "candidate_match_id": statpal_candidate.get("match_id"),
+                    "provider_match_id": statpal_candidate.get("provider_match_id") or statpal_candidate.get("statpal_provider_match_id"),
+                    "candidate_score": statpal_candidate.get("match_score"),
+                }
+            )
     if str(provider_metadata.get("provider") or "").lower() != "sportybet" or provider_fixture:
         search_service.learn_resolution(
             provider_metadata=provider_metadata,
