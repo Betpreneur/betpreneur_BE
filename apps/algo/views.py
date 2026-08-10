@@ -3149,7 +3149,6 @@ def _public_why_from_card(card):
         codes.append("limited_league_sample")
     price_check = _public_price_check_from_card(card)
     if price_check.get("available"):
-        why.append(price_check["message"])
         if price_check.get("status") == "positive_edge":
             codes.append("price_edge")
         elif price_check.get("status") == "near_reference":
@@ -3392,6 +3391,11 @@ def _public_selection_card(item):
         "price_check": price_check,
         "why": why,
         "reason_codes": reason_codes,
+        "home_recent_form": item.get("home_recent_form") or {},
+        "away_recent_form": item.get("away_recent_form") or {},
+        "corner_profile": item.get("corner_profile") or {},
+        "fixture_context": item.get("fixture_context") or {},
+        "evidence_payload": selected_market.get("advisory_evidence") or {},
         "state": str(leg_assessment.state),
         "assessment": {
             "type": leg_assessment.assessment_type,
@@ -3637,7 +3641,16 @@ def _repaired_ticket_confidence_score(ticket_risk):
 def _bettor_pick_breakdown(selections):
     breakdown = {"strong": 0, "playable": 0, "high_risk": 0, "needs_review": 0}
     for selection in selections or []:
-        code = _bettor_verdict_from_confidence((selection.get("user_pick") or {}).get("confidence_score"))
+        verdict = _simple_pick_verdict(selection)
+        confidence = _float_or_none((selection.get("user_pick") or {}).get("confidence_score"))
+        if verdict == "review":
+            code = "needs_review"
+        elif verdict == "risky":
+            code = "high_risk"
+        elif confidence is not None and confidence >= 70:
+            code = "strong"
+        else:
+            code = "playable"
         breakdown[code] = breakdown.get(code, 0) + 1
     return breakdown
 
@@ -3648,20 +3661,7 @@ def _public_score(value):
 
 
 def _public_confidence_label(score):
-    score = _float_or_none(score)
-    if score is None:
-        return "Unknown"
-    if score >= 80:
-        return "Very Strong"
-    if score >= 70:
-        return "Strong"
-    if score >= 60:
-        return "Good"
-    if score >= 50:
-        return "Borderline"
-    if score >= 40:
-        return "Low"
-    return "Very Low"
+    return _pick_confidence_label(score)
 
 
 def _public_ticket_label(score):
@@ -3714,8 +3714,145 @@ def _evidence_is_risk(text):
     )
 
 
+def _public_market_context_line(selection, market_payload=None):
+    market_payload = market_payload or {}
+    market_name = market_payload.get("market") or ((selection or {}).get("user_pick") or {}).get("market") or ""
+    confidence = _public_score(
+        market_payload.get("model_probability_percent")
+        or market_payload.get("confidence_score")
+        or ((selection or {}).get("user_pick") or {}).get("confidence_score")
+    )
+    odds = market_payload.get("odds") or ((selection or {}).get("user_pick") or {}).get("odds")
+    ev = market_payload.get("ev")
+    parts = []
+    if confidence is not None:
+        parts.append(f"{confidence}% confidence")
+    if odds is not None:
+        parts.append(f"{odds} odds")
+    if ev is not None:
+        parts.append(f"{float(ev):+.3f} expected value")
+    if not parts:
+        return ""
+    sentence = f"{market_name} rates at {parts[0]}"
+    if len(parts) > 1:
+        sentence += f" with {', '.join(parts[1:])}"
+    return sentence + "."
+
+
+def _stat_line_from_form(label, form):
+    if not isinstance(form, dict) or not int(form.get("games") or 0):
+        return ""
+    return _format_game_form_line(label, form) + "."
+
+
+def _goal_model_line_from_evidence(evidence):
+    evidence = evidence or {}
+    statpal = evidence.get("statpal") if isinstance(evidence.get("statpal"), dict) else {}
+    candidates = [evidence, statpal]
+    for payload in candidates:
+        home_xg = _float_or_none(
+            payload.get("home_expected_goals")
+            or payload.get("home_xg")
+            or payload.get("expected_home_goals")
+            or payload.get("first_half_expected_home_goals")
+        )
+        away_xg = _float_or_none(
+            payload.get("away_expected_goals")
+            or payload.get("away_xg")
+            or payload.get("expected_away_goals")
+            or payload.get("first_half_expected_away_goals")
+        )
+        total_xg = _float_or_none(
+            payload.get("expected_goals")
+            or payload.get("expected_total")
+            or payload.get("total_expected_goals")
+        )
+        if home_xg is not None and away_xg is not None:
+            return f"Expected goals: home {round(home_xg, 2)}, away {round(away_xg, 2)}."
+        if total_xg is not None:
+            return f"Expected goals sit around {round(total_xg, 2)}."
+    return ""
+
+
+def _period_or_family_line(selection, market_payload=None):
+    market_payload = market_payload or {}
+    user_pick = (selection or {}).get("user_pick") or {}
+    market = str(market_payload.get("market") or user_pick.get("market") or "")
+    assessment = (selection or {}).get("assessment") or {}
+    family = str(assessment.get("market_family") or "")
+    technical = (selection or {}).get("technical_ref") or {}
+    snapshots = technical.get("statpal_snapshot_types") or []
+    if "1H" in market or "First Half" in market or "first_half" in str((selection or {}).get("market_identity") or {}):
+        return "This is a first-half market, so the pick depends on early match control rather than full-time strength."
+    if "2H" in market or "Second Half" in market:
+        return "This is a second-half market, so match state and second-half scoring profile matter most."
+    if "corner" in family or "Corner" in market:
+        return "This corner market should be judged from team corner volume and corner concessions, not win/loss form."
+    if "card" in family or "Card" in market:
+        return "This card market should be judged from fouls, cards, referee tendency and match intensity."
+    if "shots_on_target" in family or "Shots On Target" in market:
+        return "This shots-on-target market should be judged from attacking shot volume and defensive shot allowance."
+    if snapshots:
+        return f"StatPal context available: {', '.join(str(item) for item in snapshots[:4])}."
+    return ""
+
+
+def _stats_backed_evidence(selection, *, market_payload=None, include_context=True):
+    market_payload = market_payload or {}
+    evidence = []
+    context_line = _public_market_context_line(selection, market_payload)
+    if include_context and context_line:
+        evidence.append(context_line)
+
+    for label, form in (
+        ("Home", (selection or {}).get("home_recent_form")),
+        ("Away", (selection or {}).get("away_recent_form")),
+    ):
+        line = _stat_line_from_form(label, form)
+        if line:
+            evidence.append(line)
+
+    selected_evidence = (
+        market_payload.get("advisory_evidence")
+        or (selection or {}).get("evidence_payload")
+        or {}
+    )
+    goal_line = _goal_model_line_from_evidence(selected_evidence)
+    if goal_line:
+        evidence.append(goal_line)
+
+    raw_evidence = list((selection or {}).get("evidence") or (selection or {}).get("why") or [])
+    for item in raw_evidence:
+        text = str(item or "").strip()
+        lowered = text.lower()
+        if not text:
+            continue
+        if "statpal reference" in lowered or "your price is" in lowered or "reference price" in lowered:
+            continue
+        evidence.append(text)
+
+    period_line = _period_or_family_line(selection, market_payload)
+    if period_line:
+        evidence.append(period_line)
+
+    return list(dict.fromkeys(evidence))[:5]
+
+
+def _clean_bettor_evidence_items(items, *, limit=4):
+    cleaned = []
+    for item in items or []:
+        text = str(item or "").strip()
+        lowered = text.lower()
+        if not text:
+            continue
+        if "statpal reference" in lowered or "reference price" in lowered or "your price is" in lowered:
+            continue
+        cleaned.append(text[:240])
+    return list(dict.fromkeys(cleaned))[:limit]
+
+
 def _split_bettor_evidence(selection):
-    raw = list(dict.fromkeys((selection or {}).get("evidence") or (selection or {}).get("why") or []))
+    raw = _stats_backed_evidence(selection, market_payload=(selection or {}).get("your_pick") or {})
     verdict = _simple_pick_verdict(selection)
     positive = [item for item in raw if not _evidence_is_risk(item)]
     risky = [item for item in raw if _evidence_is_risk(item)]
@@ -3781,7 +3918,13 @@ def _bettor_recommendation(selection):
         }
     else:
         pick = None
-    why = list(dict.fromkeys(recommendation.get("why") or []))[:4]
+    why = _stats_backed_evidence(
+        selection,
+        market_payload=(selection or {}).get("ai_pick") or user_pick,
+        include_context=True,
+    )
+    if not why:
+        why = list(dict.fromkeys(recommendation.get("why") or []))[:4]
     if not why:
         if action == "replace":
             why = ["This alternative has stronger statistical support than the original selection."]
@@ -3843,21 +3986,34 @@ def _build_bettor_public_payload(review, technical_public, *, enhance=False):
                 "market": (selected_pick or {}).get("market") or user_pick.get("market"),
                 "confidence_score": (selected_pick or {}).get("confidence_score")
                 or _public_score(user_pick.get("confidence_score")),
+                "confidence_label": (selected_pick or {}).get("confidence_label")
+                or _public_confidence_label(user_pick.get("confidence_score")),
+                "action": recommendation.get("action"),
+                "included_in_estimate": user_pick.get("confidence_score") is not None,
                 "changed": changed,
             }
         )
 
     changes = int(improvement.get("picks_changed") or 0)
-    risky_count = int((breakdown.get("high_risk") or 0) + (breakdown.get("needs_review") or 0))
-    verdict_title = f"{changes} {_plural(changes, 'pick')} need changing" if changes else "No forced changes"
+    high_risk_count = int(breakdown.get("high_risk") or 0)
+    review_count = int(breakdown.get("needs_review") or 0)
+    risky_count = high_risk_count
+    needs_word = "needs" if changes == 1 else "need"
+    verdict_title = f"{changes} {_plural(changes, 'pick')} {needs_word} changing" if changes else "No forced changes"
     if changes:
-        verdict_message = (
-            f"Most of your ticket is playable, but {changes} {_plural(changes, 'selection')} "
-            "have weak statistical support. We found stronger alternatives for them."
+        extra = f" {review_count} {_plural(review_count, 'pick')} still needs review." if review_count == 1 else (
+            f" {review_count} {_plural(review_count, 'pick')} still need review." if review_count else ""
         )
-    elif risky_count:
         verdict_message = (
-            f"{risky_count} {_plural(risky_count, 'selection')} need caution, but no stronger replacement "
+            f"{changes} {_plural(changes, 'selection')} "
+            f"{'has' if changes == 1 else 'have'} weak statistical support. "
+            f"We found {'a stronger alternative' if changes == 1 else 'stronger alternatives'} for "
+            f"{'it' if changes == 1 else 'them'}.{extra}"
+        )
+    elif risky_count or review_count:
+        total_attention = risky_count + review_count
+        verdict_message = (
+            f"{total_attention} {_plural(total_attention, 'selection')} need caution or review, but no stronger replacement "
             "was found with enough statistical support."
         )
     else:
@@ -3878,6 +4034,7 @@ def _build_bettor_public_payload(review, technical_public, *, enhance=False):
                     "strong": int(breakdown.get("strong") or 0),
                     "playable": int(breakdown.get("playable") or 0),
                     "risky": risky_count,
+                    "review": review_count,
                 },
             },
             "recommended_picks": {
@@ -3937,6 +4094,9 @@ def _enhance_bettor_public_with_deepseek(payload):
                         "You write simple football betslip analysis for bettors. Use only the supplied facts. "
                         "Do not promise a win. Do not invent team form, injuries, odds, xG, lineups, or H2H. "
                         "Keep the user's markets, scores, verdicts, and recommendation actions unchanged. "
+                        "Do not use StatPal reference-price wording as evidence. Bettors need football stats, "
+                        "such as expected goals, recent form, first-half/second-half profile, corners, cards, "
+                        "shots, or the market-specific confidence already supplied. "
                         "Return strict valid JSON only."
                     ),
                 },
@@ -3945,7 +4105,10 @@ def _enhance_bettor_public_with_deepseek(payload):
                     "content": (
                         "Rewrite each game into bettor-facing analysis. For each game return: index, "
                         "user_pick_summary, positive_evidence, risk_evidence, conclusion, recommendation_why. "
-                        "Evidence arrays must only rephrase supplied evidence and must be short bullet strings. "
+                        "Evidence arrays must only rephrase supplied football/statistical evidence and must be short bullet strings. "
+                        "Each evidence item should include an actual stat when supplied, such as confidence %, expected goals, "
+                        "recent W-D-L, goals scored/conceded, corner totals, card totals, shot volume, or period-specific context. "
+                        "Never write bullets like 'Your price is close to the StatPal reference'. "
                         "Shape: {\"games\":[{\"index\":0,\"user_pick_summary\":\"...\","
                         "\"positive_evidence\":[\"...\"],\"risk_evidence\":[\"...\"],"
                         "\"conclusion\":\"...\",\"recommendation_why\":[\"...\"]}]}.\n"
@@ -3965,13 +4128,17 @@ def _enhance_bettor_public_with_deepseek(payload):
             if update.get("user_pick_summary"):
                 game["user_pick"]["summary"] = str(update["user_pick_summary"]).strip()[:320]
             if isinstance(update.get("positive_evidence"), list):
-                game["analysis"]["positive_evidence"] = [str(item).strip()[:240] for item in update["positive_evidence"] if str(item).strip()][:4]
+                cleaned = _clean_bettor_evidence_items(update["positive_evidence"])
+                if cleaned:
+                    game["analysis"]["positive_evidence"] = cleaned
             if isinstance(update.get("risk_evidence"), list):
-                game["analysis"]["risk_evidence"] = [str(item).strip()[:240] for item in update["risk_evidence"] if str(item).strip()][:4]
+                game["analysis"]["risk_evidence"] = _clean_bettor_evidence_items(update["risk_evidence"])
             if update.get("conclusion"):
                 game["analysis"]["conclusion"] = str(update["conclusion"]).strip()[:360]
             if isinstance(update.get("recommendation_why"), list):
-                game["recommendation"]["why"] = [str(item).strip()[:240] for item in update["recommendation_why"] if str(item).strip()][:4]
+                cleaned = _clean_bettor_evidence_items(update["recommendation_why"])
+                if cleaned:
+                    game["recommendation"]["why"] = cleaned
         log.info("DeepSeek SportyBet public analysis enhanced %s/%s games", len(updates), len(games))
     except Exception as exc:
         log.warning("DeepSeek SportyBet public analysis skipped: %s", exc)
@@ -4523,12 +4690,12 @@ def _populate_slip_review(review, results):
     safe_results = _json_safe(results)
     safe_results, _ = _slip_intelligence(safe_results)
     summary = _manual_review_summary(safe_results)
+    review.status = _review_status_from_summary(summary)
     summary["bettor_public"] = _build_bettor_public_payload(
         review,
         (summary.get("public") or {}),
         enhance=True,
     )
-    review.status = _review_status_from_summary(summary)
     review.summary = summary
     review.save(update_fields=["status", "summary", "updated_at"])
     _log_slip_review_debug(review, summary)
@@ -4675,6 +4842,12 @@ def _slip_review_payload(review, *, include_selections=True, public_only=False):
             public_payload,
             enhance=False,
         )
+        if bettor_payload.get("status") != review.status:
+            bettor_payload = _build_bettor_public_payload(
+                review,
+                public_payload,
+                enhance=False,
+            )
         return _api_response_payload(bettor_payload)
     payload = {
         "id": review.id,

@@ -11,6 +11,7 @@ from apps.algo.views import (
     _has_statpal_hydration_identity,
     _manual_review_summary,
     _matched_fixture_with_statpal,
+    _public_confidence_label,
     _public_price_check_from_card,
     _public_verdict_object,
     _replacement_market_for_slip,
@@ -368,7 +369,7 @@ class SlipReviewPublicContractTests(SimpleTestCase):
         self.assertEqual(selection["price_check"]["edge_percent"], -10.0)
         self.assertEqual(selection["price_check"]["reference_odds"], 2.0)
         self.assertIn("price_short", selection["reason_codes"])
-        self.assertTrue(any("shorter than the StatPal reference" in reason for reason in selection["why"]))
+        self.assertFalse(any("StatPal reference" in reason for reason in selection["why"]))
         self.assertIn("model_probability_percent", selection["your_pick"])
         self.assertIn("decision_score", selection["your_pick"])
         self.assertIn("data_confidence_score", selection["your_pick"])
@@ -476,8 +477,84 @@ class SlipReviewPublicContractTests(SimpleTestCase):
         self.assertEqual(selection["price_check"]["offered_odds"], 2.2)
         self.assertEqual(selection["price_check"]["reference_odds"], 2.0)
         self.assertIn("price_edge", selection["reason_codes"])
-        self.assertTrue(any("better than the StatPal reference" in reason for reason in selection["why"]))
+        self.assertFalse(any("StatPal reference" in reason for reason in selection["why"]))
         self.assertNotIn("statpal_advisory", selection["your_pick"])
+
+    def test_bettor_public_uses_stats_evidence_not_reference_price_copy(self):
+        result = _sample_replace_result()
+        result["home_recent_form"] = {
+            "games": 8,
+            "wins": 3,
+            "draws": 3,
+            "losses": 2,
+            "avg_scored": 2.12,
+            "avg_conceded": 1.62,
+        }
+        result["away_recent_form"] = {
+            "games": 8,
+            "wins": 4,
+            "draws": 2,
+            "losses": 2,
+            "avg_scored": 1.5,
+            "avg_conceded": 1.0,
+        }
+        result["selected_market"]["advisory_evidence"]["statpal"]["odds_value"] = {
+            "offered_odds": 1.80,
+            "statpal_reference_odds": 1.80,
+            "value_edge_pct": 0.0,
+        }
+        review = SimpleNamespace(id=35, source="sportybet", status="completed")
+
+        payload = _build_bettor_public_payload(
+            review,
+            _manual_review_summary([result])["public"],
+            enhance=False,
+        )
+
+        game = payload["games"][0]
+        joined = " ".join(game["analysis"]["positive_evidence"] + game["analysis"]["risk_evidence"] + game["recommendation"]["why"])
+        self.assertIn("Home: 3W-3D-2L in 8", joined)
+        self.assertIn("Away: 4W-2D-2L in 8", joined)
+        self.assertNotIn("StatPal reference", joined)
+
+    def test_bettor_public_summary_separates_review_from_risky(self):
+        assessed = _sample_replace_result()
+        review_leg = _sample_market_not_found_without_score()
+        review = SimpleNamespace(id=36, source="sportybet", status="partial")
+
+        payload = _build_bettor_public_payload(
+            review,
+            _manual_review_summary([assessed, review_leg])["public"],
+            enhance=False,
+        )
+
+        self.assertEqual(payload["ticket"]["user_picks"]["summary"]["review"], 1)
+        self.assertEqual(payload["recommended_ticket"]["picks"][1]["action"], "review")
+        self.assertFalse(payload["recommended_ticket"]["picks"][1]["included_in_estimate"])
+        self.assertIn("needs changing", payload["ticket"]["verdict"]["title"])
+
+    def test_public_confidence_label_matches_pick_band(self):
+        self.assertEqual(_public_confidence_label(64), "Moderate")
+        self.assertEqual(_public_confidence_label(65), "Moderate")
+
+    def test_public_only_payload_is_minimal_while_analysing_without_db(self):
+        review = SimpleNamespace(
+            id=36,
+            source="sportybet",
+            status="analysing",
+            summary={},
+            created_at="2026-08-10T22:56:48Z",
+            updated_at="2026-08-10T22:57:00Z",
+        )
+
+        payload = _slip_review_payload(review, public_only=True)
+
+        self.assertEqual(payload["status"], "analysing")
+        self.assertIn("created_at", payload)
+        self.assertIn("updated_at", payload)
+        self.assertNotIn("ticket", payload)
+        self.assertNotIn("games", payload)
+        self.assertNotIn("recommended_ticket", payload)
 
     def test_market_not_found_without_replacement_but_scored_counts_as_analysed(self):
         summary = _manual_review_summary([_sample_market_not_found_without_replacement_but_scored()])
