@@ -1,7 +1,8 @@
-from datetime import date
+from datetime import date, timedelta
 from types import SimpleNamespace
 
 from django.test import SimpleTestCase, TestCase
+from django.utils import timezone
 
 from apps.algo.models import FixtureCache, ProviderFixtureMap, StatPalFixtureSnapshot
 from apps.algo.statpal_snapshots import StatPalSnapshotService
@@ -293,6 +294,39 @@ class StatPalSnapshotServiceTests(TestCase):
         self.assertEqual(first.id, second.id)
         self.assertEqual(StatPalFixtureSnapshot.objects.count(), 1)
         self.assertEqual(second.payload["odds"][0]["market"], "Totals")
+
+    def test_provider_match_snapshot_can_override_stale_internal_match_snapshot(self):
+        service = StatPalSnapshotService()
+        stale_time = timezone.now() - timedelta(hours=1)
+        fresh_time = timezone.now() + timedelta(hours=1)
+        StatPalFixtureSnapshot.objects.create(
+            match_id="1494239",
+            provider_match_id="",
+            snapshot_type=StatPalFixtureSnapshot.SnapshotType.DETAILED_STATS,
+            source_endpoint="SOCCER_DETAILED_STATS",
+            summary={"home_shots_on_target": 1},
+            fetched_at=timezone.now() - timedelta(hours=8),
+            expires_at=stale_time,
+        )
+        fresh = StatPalFixtureSnapshot.objects.create(
+            match_id="statpal:2026081032970",
+            provider_match_id="2026081032970",
+            snapshot_type=StatPalFixtureSnapshot.SnapshotType.DETAILED_STATS,
+            source_endpoint="SOCCER_DETAILED_STATS",
+            summary={"home_shots_on_target": 5},
+            fetched_at=timezone.now(),
+            expires_at=fresh_time,
+        )
+
+        snapshot = service.get_snapshot(
+            match_id="1494239",
+            provider_match_id="2026081032970",
+            snapshot_type=StatPalFixtureSnapshot.SnapshotType.DETAILED_STATS,
+        )
+        context = service.fixture_context(match_id="1494239", provider_match_id="2026081032970")
+
+        self.assertEqual(snapshot.id, fresh.id)
+        self.assertEqual(context["snapshots"]["detailed_stats"]["summary"]["home_shots_on_target"], 5)
 
     def test_lineups_endpoint_payload_is_normalized_before_save(self):
         row = StatPalSnapshotService().save_endpoint_payload(

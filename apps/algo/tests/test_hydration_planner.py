@@ -68,7 +68,7 @@ class HydratorTests(SimpleTestCase):
         self.hydrator = FixtureHydrator(snapshot_service=self.service)
 
     def test_score_matrix_family_can_fetch_statpal_fallback_context(self):
-        self.hydrator.bundle_for(describe_market("Home Win"), match_id="1")
+        self.hydrator.bundle_for(describe_market("Home Win"), match_id="statpal:1")
 
         self.service.prepare_fixture_context_for_market.assert_called_once()
         self.assertEqual(self.hydrator.stats.calls_used, 1)
@@ -76,7 +76,7 @@ class HydratorTests(SimpleTestCase):
     def test_specialised_family_calls_the_provider_once(self):
         descriptor = describe_market("Cards Over 3.5")
 
-        self.hydrator.bundle_for(descriptor, match_id="1")
+        self.hydrator.bundle_for(descriptor, match_id="statpal:1")
 
         self.assertEqual(self.service.prepare_fixture_context_for_market.call_count, 1)
         self.assertEqual(self.hydrator.stats.calls_used, 1)
@@ -85,7 +85,7 @@ class HydratorTests(SimpleTestCase):
         descriptor = describe_market("Cards Over 3.5")
 
         for _ in range(5):
-            self.hydrator.bundle_for(descriptor, match_id="1")
+            self.hydrator.bundle_for(descriptor, match_id="statpal:1")
 
         self.assertEqual(self.service.prepare_fixture_context_for_market.call_count, 1)
         self.assertEqual(self.hydrator.stats.served_from_cache, 4)
@@ -93,8 +93,8 @@ class HydratorTests(SimpleTestCase):
     def test_different_fixtures_are_fetched_separately(self):
         descriptor = describe_market("Cards Over 3.5")
 
-        self.hydrator.bundle_for(descriptor, match_id="1")
-        self.hydrator.bundle_for(descriptor, match_id="2")
+        self.hydrator.bundle_for(descriptor, match_id="statpal:1")
+        self.hydrator.bundle_for(descriptor, match_id="statpal:2")
 
         self.assertEqual(self.service.prepare_fixture_context_for_market.call_count, 2)
         self.assertEqual(len(self.hydrator.stats.fixtures_hydrated), 2)
@@ -103,8 +103,8 @@ class HydratorTests(SimpleTestCase):
         hydrator = FixtureHydrator(call_budget=1, snapshot_service=self.service)
         descriptor = describe_market("Cards Over 3.5")
 
-        hydrator.bundle_for(descriptor, match_id="1")
-        hydrator.bundle_for(descriptor, match_id="2")
+        hydrator.bundle_for(descriptor, match_id="statpal:1")
+        hydrator.bundle_for(descriptor, match_id="statpal:2")
 
         self.assertEqual(self.service.prepare_fixture_context_for_market.call_count, 1)
         self.assertTrue(hydrator.stats.budget_exhausted)
@@ -114,8 +114,8 @@ class HydratorTests(SimpleTestCase):
         result = describe_market("Home Win")
 
         for _ in range(25):
-            self.hydrator.bundle_for(cards, match_id="1")
-            self.hydrator.bundle_for(result, match_id="1")
+            self.hydrator.bundle_for(cards, match_id="statpal:1")
+            self.hydrator.bundle_for(result, match_id="statpal:1")
 
         self.assertEqual(self.service.prepare_fixture_context_for_market.call_count, 2)
         self.assertEqual(self.hydrator.stats.served_from_cache, 48)
@@ -190,6 +190,25 @@ class HydratorTests(SimpleTestCase):
         self.assertEqual(self.hydrator.stats.snapshot_cache_misses, 1)
         self.assertEqual(bundle["hydration_source"], "statpal_on_demand_refresh")
         self.assertEqual(bundle["context"]["snapshot_cache_status"], "miss")
+
+    def test_missing_statpal_identity_skips_on_demand_refresh(self):
+        descriptor = describe_market("Cards Over 3.5")
+        self.service.snapshot_plan_for_market.return_value = {
+            "snapshot_types": ["detailed_stats", "lineups"],
+            "fresh_snapshot_types": [],
+            "stale_snapshot_types": [],
+            "missing_snapshot_types": ["detailed_stats", "lineups"],
+            "requires_provider_competition_id": [],
+            "coverage_percent": 0.0,
+        }
+
+        bundle = self.hydrator.bundle_for(descriptor, match_id="1494240", provider_match_id="")
+
+        self.service.prepare_fixture_context_for_market.assert_not_called()
+        self.assertEqual(self.hydrator.stats.calls_used, 0)
+        self.assertEqual(bundle["hydration_source"], "statpal_identity_missing")
+        self.assertEqual(bundle["context"]["snapshot_cache_status"], "unavailable")
+        self.assertEqual(bundle["refreshed"]["api_usage"]["skipped_without_call"], 4)
 
 
 class ModelBackedCapabilityTests(SimpleTestCase):

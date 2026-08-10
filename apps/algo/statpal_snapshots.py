@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import timedelta
 from typing import Any
 
+from django.db.models import Q
 from django.utils import timezone
 
 from .market_taxonomy import MarketDescriptor, describe_market
@@ -321,13 +322,18 @@ class StatPalSnapshotService:
 
     def get_snapshot(self, *, match_id="", provider_match_id="", snapshot_type: str) -> StatPalFixtureSnapshot | None:
         qs = StatPalFixtureSnapshot.objects.filter(snapshot_type=snapshot_type, status="available")
+        filters = Q()
         if match_id:
-            found = qs.filter(match_id=str(match_id)).order_by("-fetched_at", "-updated_at").first()
-            if found:
-                return found
+            filters |= Q(match_id=str(match_id))
         if provider_match_id:
-            return qs.filter(provider_match_id=str(provider_match_id)).order_by("-fetched_at", "-updated_at").first()
-        return None
+            filters |= Q(provider_match_id=str(provider_match_id))
+        if not filters:
+            return None
+        candidates = list(qs.filter(filters).order_by("-fetched_at", "-updated_at")[:6])
+        if not candidates:
+            return None
+        fresh = [row for row in candidates if not self._is_expired(row)]
+        return fresh[0] if fresh else candidates[0]
 
     def refresh_fixture_snapshots(
         self,
@@ -464,20 +470,26 @@ class StatPalSnapshotService:
 
     def fixture_context(self, *, match_id="", provider_match_id="") -> dict[str, Any]:
         snapshots = StatPalFixtureSnapshot.objects.filter(status="available")
+        filters = Q()
         if match_id:
-            snapshots = snapshots.filter(match_id=str(match_id))
-        elif provider_match_id:
-            snapshots = snapshots.filter(provider_match_id=str(provider_match_id))
-        else:
+            filters |= Q(match_id=str(match_id))
+        if provider_match_id:
+            filters |= Q(provider_match_id=str(provider_match_id))
+        if not filters:
             return {"available": False, "snapshots": {}}
+        snapshots = snapshots.filter(filters)
 
         by_type = {}
         team_rows = []
         for row in snapshots.order_by("snapshot_type", "-fetched_at", "-updated_at"):
+            if row.snapshot_type in by_type and not self._is_expired(by_type[row.snapshot_type]):
+                continue
             if row.snapshot_type == StatPalFixtureSnapshot.SnapshotType.TEAM_STATS:
                 team_rows.append(row)
                 continue
-            by_type.setdefault(row.snapshot_type, row)
+            current = by_type.get(row.snapshot_type)
+            if current is None or (self._is_expired(current) and not self._is_expired(row)):
+                by_type[row.snapshot_type] = row
         snapshot_context = {key: self._snapshot_context(row) for key, row in by_type.items()}
         if team_rows:
             snapshot_context[StatPalFixtureSnapshot.SnapshotType.TEAM_STATS] = self._team_stats_context(team_rows)

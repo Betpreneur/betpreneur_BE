@@ -274,6 +274,45 @@ class FixtureHydrator:
             self._cache[key] = bundle
             return bundle
 
+        if not self._has_statpal_fixture_identity(match_id=match_id, provider_match_id=provider_match_id):
+            self.stats.snapshot_cache_misses += 1
+            context = {
+                "available": False,
+                "snapshots": {},
+                "hydration_source": "statpal_identity_missing",
+                "snapshot_cache_status": "unavailable",
+                "market_snapshot_plan": cache_plan,
+                "market_snapshot_coverage": {
+                    "required": cache_plan.get("snapshot_types") or needed,
+                    "available": [],
+                    "fresh": cache_plan.get("fresh_snapshot_types") or [],
+                    "missing": cache_plan.get("missing_snapshot_types") or needed,
+                    "coverage_percent": cache_plan.get("coverage_percent", 0.0) if cache_plan else 0.0,
+                },
+            }
+            bundle = {
+                "context": context,
+                "refreshed": {
+                    "api_usage": {
+                        "provider": "statpal",
+                        "attempted_calls": 0,
+                        "successful_calls": 0,
+                        "failed_calls": 0,
+                        "skipped_by_cache": 0,
+                        "skipped_without_call": len(needed),
+                        "snapshot_types_attempted": [],
+                        "snapshot_types_refreshed": [],
+                        "snapshot_types_failed": [],
+                    },
+                    "reason": "missing_statpal_fixture_identity",
+                },
+                "plan": cache_plan,
+                "plan_before_refresh": cache_plan,
+                "hydration_source": "statpal_identity_missing",
+            }
+            self._cache[key] = bundle
+            return bundle
+
         if self.stats.calls_used >= self._budget:
             self.stats.budget_exhausted = True
             return dict(_EMPTY_BUNDLE)
@@ -336,6 +375,10 @@ class FixtureHydrator:
             and not plan.get("stale_snapshot_types")
             and not plan.get("requires_provider_competition_id")
         )
+
+    @staticmethod
+    def _has_statpal_fixture_identity(*, match_id="", provider_match_id="") -> bool:
+        return bool(str(provider_match_id or "").strip() or str(match_id or "").startswith("statpal:"))
 
 
 def plan_slip_hydration(selections) -> dict:
