@@ -2225,6 +2225,7 @@ def _market_family_group(market):
         "double_chance_total_goals",
         "total_btts",
         "result_btts",
+        "both_halves_total_goals",
     }:
         return "goals"
     if family in {"corners_total", "team_corners", "corners"}:
@@ -2265,6 +2266,20 @@ def _rank_replacement_candidates(candidates):
     )
 
 
+def _replacement_is_meaningfully_better(selected_market, replacement_market):
+    if not replacement_market or not selected_market:
+        return bool(replacement_market)
+    if _market_matches(selected_market.get("market"), replacement_market.get("market")):
+        return False
+
+    selected_score = _float_or_none(selected_market.get("advisory_score")) or float(selected_market.get("display_score") or 0)
+    replacement_score = _float_or_none(replacement_market.get("advisory_score")) or float(replacement_market.get("display_score") or 0)
+    scope = replacement_market.get("replacement_scope") or _replacement_scope(selected_market, replacement_market)
+    minimum_score = 58 if scope == "comparable_market" else 60
+    minimum_lift = 4 if scope == "comparable_market" else 6
+    return replacement_score >= minimum_score and replacement_score >= selected_score + minimum_lift
+
+
 def _replacement_market_for_slip(game, selected_market=None, generated_markets=None, *, allow_safer_fallback=False):
     markets = [
         _with_match_checker_advisory(market)
@@ -2280,22 +2295,20 @@ def _replacement_market_for_slip(game, selected_market=None, generated_markets=N
     if not candidates:
         return None
     if selected_market:
-        comparable = [
-            market
-            for market in candidates
-            if _replacement_scope(selected_market, market) in {"comparable_market", "goal_family"}
-        ]
-        if comparable:
-            replacement = _rank_replacement_candidates(comparable)[0]
-            replacement["replacement_scope"] = _replacement_scope(selected_market, replacement)
-            return replacement
-        if not _allows_broad_replacement(selected_market):
+        allowed = []
+        for market in candidates:
+            scope = _replacement_scope(selected_market, market)
+            if scope == "broad_fallback" and (not allow_safer_fallback or not _allows_broad_replacement(selected_market)):
+                continue
+            market["replacement_scope"] = scope
+            if _replacement_is_meaningfully_better(selected_market, market):
+                allowed.append(market)
+        if not allowed:
             return None
-        if allow_safer_fallback:
-            replacement = _rank_replacement_candidates(candidates)[0]
-            replacement["replacement_scope"] = _replacement_scope(selected_market, replacement)
+        replacement = _rank_replacement_candidates(allowed)[0]
+        if replacement.get("replacement_scope") == "broad_fallback":
             replacement["recommendation_strength"] = "safer_alternative"
-            return replacement
+        return replacement
     replacement = _rank_replacement_candidates(candidates)[0]
     if selected_market:
         replacement["replacement_scope"] = _replacement_scope(selected_market, replacement)
@@ -2307,14 +2320,10 @@ def _market_is_better_for_slip(selected_market, replacement_market):
         return False
     if _market_matches(selected_market.get("market"), replacement_market.get("market")):
         return False
-    selected_score = _float_or_none(selected_market.get("advisory_score")) or float(selected_market.get("display_score") or 0)
-    replacement_score = _float_or_none(replacement_market.get("advisory_score")) or float(replacement_market.get("display_score") or 0)
     scope = replacement_market.get("replacement_scope") or _replacement_scope(selected_market, replacement_market)
-    if scope == "broad_fallback":
-        if not _allows_broad_replacement(selected_market):
-            return False
-        return replacement_score >= selected_score + 14 and replacement_score >= 66
-    return replacement_score >= selected_score + 6 and replacement_score >= 58
+    if scope == "broad_fallback" and not _allows_broad_replacement(selected_market):
+        return False
+    return _replacement_is_meaningfully_better(selected_market, replacement_market)
 
 
 def _alternative_is_allowed_for_slip(selected_market, replacement_market):
@@ -3155,7 +3164,9 @@ def _without_remove_recommendation(item):
     if item.get("verdict") != "remove":
         return item
     copy = dict(item)
-    if copy.get("replacement_market"):
+    selected_market = copy.get("selected_market") or {}
+    replacement_market = copy.get("replacement_market") or {}
+    if replacement_market and _replacement_is_meaningfully_better(selected_market, replacement_market):
         copy["verdict"] = "replace"
         copy["message"] = (
             copy.get("message")

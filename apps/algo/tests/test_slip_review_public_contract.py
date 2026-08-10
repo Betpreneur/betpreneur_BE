@@ -11,6 +11,7 @@ from apps.algo.views import (
     _manual_review_summary,
     _matched_fixture_with_statpal,
     _public_price_check_from_card,
+    _replacement_market_for_slip,
     _should_skip_core_on_demand,
     _slip_review_payload,
     _ticket_killers_message,
@@ -428,6 +429,40 @@ class SlipReviewPublicContractTests(SimpleTestCase):
         self.assertEqual(descriptor.family, "shots_on_target_total")
         self.assertEqual(descriptor.side, "under")
         self.assertEqual(descriptor.line, "9.5")
+
+    def test_broad_replacement_must_be_materially_stronger(self):
+        selected = {
+            "market": "Both Halves Over 1.5 - Yes",
+            "advisory_score": 54.0,
+            "market_taxonomy": describe_market("Both Halves Over 1.5 - Yes").to_dict(),
+        }
+        weak_broad = {
+            "market": "Corners Under 12.5",
+            "advisory_score": 55.9,
+            "market_taxonomy": describe_market("Corners Under 12.5").to_dict(),
+        }
+        strong_broad = {
+            "market": "Cards Under 3.5",
+            "advisory_score": 72.0,
+            "market_taxonomy": describe_market("Cards Under 3.5").to_dict(),
+        }
+
+        self.assertIsNone(
+            _replacement_market_for_slip(
+                {"markets": []},
+                selected_market=selected,
+                generated_markets=[weak_broad],
+                allow_safer_fallback=True,
+            )
+        )
+        replacement = _replacement_market_for_slip(
+            {"markets": []},
+            selected_market=selected,
+            generated_markets=[weak_broad, strong_broad],
+            allow_safer_fallback=True,
+        )
+
+        self.assertEqual(replacement["market"], "Cards Under 3.5")
 
     def test_ticket_killers_recommend_changing_not_removing(self):
         message = _ticket_killers_message(
