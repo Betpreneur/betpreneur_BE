@@ -5,6 +5,7 @@ import json
 import dataclasses
 import logging
 import math
+import os
 from decimal import Decimal, InvalidOperation
 
 from celery.result import AsyncResult
@@ -2914,6 +2915,39 @@ def _risk_level_from_confidence(score):
     return "low"
 
 
+def _bettor_verdict_from_confidence(score):
+    score = _float_or_none(score)
+    if score is None:
+        return "needs_review"
+    if score >= 70:
+        return "strong"
+    if score >= 55:
+        return "playable"
+    return "high_risk"
+
+
+def _bettor_verdict_label(code):
+    return {
+        "strong": "Strong pick",
+        "playable": "Playable",
+        "high_risk": "High risk",
+        "needs_review": "Needs review",
+    }.get(str(code or ""), "Needs review")
+
+
+def _bettor_pick_message(verdict_code, *, market="", action=""):
+    market = market or "This pick"
+    if action == "replace":
+        return f"The available statistics support a stronger option than {market}."
+    if verdict_code == "strong":
+        return "The available statistics strongly support this selection."
+    if verdict_code == "playable":
+        return "The available statistics give this selection some support, but it still carries risk."
+    if verdict_code == "high_risk":
+        return f"The available statistics do not strongly support {market}."
+    return "There is not enough reliable data to judge this selection confidently."
+
+
 def _ticket_issue_text(replace_count=0, remove_count=0, caution_count=0, unverified_count=0):
     parts = []
     if replace_count:
@@ -3313,6 +3347,9 @@ def _public_selection_card(item):
     technical_ref = {
         "status": item.get("status"),
         "match_resolution_score": card.get("match_resolution_score"),
+        "kickoff": (item.get("matched_fixture") or {}).get("kickoff_utc")
+        or (item.get("matched_fixture") or {}).get("kickoff")
+        or "",
         "market_recognized": (item.get("market_taxonomy") or {}).get("recognized"),
         "market_core_supported": (item.get("market_taxonomy") or {}).get("core_supported"),
         "market_support_level": capability.get("support_level") if capability else "",
@@ -3369,6 +3406,69 @@ def _public_selection_card(item):
 def _with_explanation(card):
     """Attach a plain-language explanation built only from values the model produced."""
     card["explanation"] = explanation_service.explain_leg(card).to_dict()
+    return card
+
+
+def _with_bettor_view(card):
+    user_pick = card.get("user_pick") or {}
+    ai_pick = card.get("ai_pick") or {}
+    action = "replace" if ai_pick.get("available") and (card.get("verdict") or {}).get("code") == "replace" else (
+        "keep" if (card.get("verdict") or {}).get("code") in {"keep", "caution"} else "review"
+    )
+    user_verdict = _bettor_verdict_from_confidence(user_pick.get("confidence_score"))
+    user_pick.update(
+        {
+            "verdict": "replace" if action == "replace" else user_verdict,
+            "verdict_label": _bettor_verdict_label(user_verdict),
+            "message": _bettor_pick_message(user_verdict, market=user_pick.get("market"), action=action),
+        }
+    )
+    card["user_pick"] = user_pick
+
+    evidence = list(dict.fromkeys(card.get("why") or []))[:5]
+    card["evidence"] = evidence
+    card["our_view"] = user_pick["message"]
+
+    if action == "replace":
+        recommendation_why = []
+        if ai_pick.get("market"):
+            recommendation_why.append(
+                f"{ai_pick.get('market')} has stronger statistical support than the original selection."
+            )
+        if card.get("comparison", {}).get("confidence_gain") is not None:
+            recommendation_why.append(
+                f"It improves this leg's confidence by {card['comparison']['confidence_gain']} points."
+            )
+        recommendation_why.extend(evidence[:2])
+        card["recommendation"] = {
+            "action": "replace",
+            "market": ai_pick.get("market"),
+            "confidence": ai_pick.get("confidence_score"),
+            "confidence_label": ai_pick.get("confidence_label"),
+            "risk_level": ai_pick.get("risk_level"),
+            "message": "Use the stronger backed alternative for this fixture.",
+            "why": list(dict.fromkeys(recommendation_why))[:4],
+        }
+    elif action == "keep":
+        card["recommendation"] = {
+            "action": "keep",
+            "market": user_pick.get("market"),
+            "confidence": user_pick.get("confidence_score"),
+            "confidence_label": user_pick.get("confidence_label"),
+            "risk_level": user_pick.get("risk_level"),
+            "message": "Keep this selection, but respect the stated risk level.",
+            "why": evidence[:4],
+        }
+    else:
+        card["recommendation"] = {
+            "action": "review",
+            "market": user_pick.get("market"),
+            "confidence": user_pick.get("confidence_score"),
+            "confidence_label": user_pick.get("confidence_label"),
+            "risk_level": user_pick.get("risk_level"),
+            "message": "Do not treat this as supported until more reliable match data is available.",
+            "why": evidence[:4],
+        }
     return card
 
 
@@ -3528,6 +3628,350 @@ def _repaired_ticket_confidence_score(ticket_risk):
     return round(math.exp(sum(math.log(probability) for probability in probabilities) / len(probabilities)) * 100, 1)
 
 
+def _bettor_pick_breakdown(selections):
+    breakdown = {"strong": 0, "playable": 0, "high_risk": 0, "needs_review": 0}
+    for selection in selections or []:
+        code = _bettor_verdict_from_confidence((selection.get("user_pick") or {}).get("confidence_score"))
+        breakdown[code] = breakdown.get(code, 0) + 1
+    return breakdown
+
+
+def _public_score(value):
+    value = _float_or_none(value)
+    return int(round(value)) if value is not None else None
+
+
+def _public_confidence_label(score):
+    score = _float_or_none(score)
+    if score is None:
+        return "Unknown"
+    if score >= 80:
+        return "Very Strong"
+    if score >= 70:
+        return "Strong"
+    if score >= 60:
+        return "Good"
+    if score >= 50:
+        return "Borderline"
+    if score >= 40:
+        return "Low"
+    return "Very Low"
+
+
+def _public_ticket_label(score):
+    score = _float_or_none(score)
+    if score is None:
+        return "Unknown"
+    if score >= 75:
+        return "Strong"
+    if score >= 65:
+        return "Good"
+    if score >= 55:
+        return "Playable"
+    if score >= 40:
+        return "Risky"
+    return "Poor"
+
+
+def _simple_pick_verdict(selection):
+    verdict = ((selection or {}).get("verdict") or {}).get("code") or ""
+    confidence = _float_or_none(((selection or {}).get("user_pick") or {}).get("confidence_score"))
+    if verdict == "replace":
+        return "risky"
+    if verdict == "keep":
+        return "keep"
+    if verdict == "caution":
+        return "risky" if confidence is not None and confidence < 55 else "caution"
+    if verdict in {"expired", "not_assessed", "unmatched", "unmatched_market", "pending_analysis"}:
+        return "review"
+    return "risky" if confidence is not None and confidence < 55 else "caution"
+
+
+def _evidence_is_risk(text):
+    lowered = str(text or "").lower()
+    return any(
+        token in lowered
+        for token in (
+            "risk",
+            "weak",
+            "only",
+            "limited",
+            "not enough",
+            "disagree",
+            "shorter",
+            "thin",
+            "close to",
+            "caution",
+            "unsupported",
+            "poor",
+        )
+    )
+
+
+def _split_bettor_evidence(selection):
+    raw = list(dict.fromkeys((selection or {}).get("evidence") or (selection or {}).get("why") or []))
+    verdict = _simple_pick_verdict(selection)
+    positive = [item for item in raw if not _evidence_is_risk(item)]
+    risky = [item for item in raw if _evidence_is_risk(item)]
+    user_pick = (selection or {}).get("user_pick") or {}
+    probability = user_pick.get("confidence_score")
+    market = user_pick.get("market") or "this selection"
+    if probability is not None:
+        support_line = f"The model gives {market} about {_public_score(probability)}% support."
+        if verdict in {"risky", "review"}:
+            risky.append(support_line)
+        else:
+            positive.append(support_line)
+    if verdict == "risky" and not risky:
+        risky = raw[:3] or [f"The available statistics do not strongly support {market}."]
+    if verdict in {"keep", "caution"} and not positive:
+        positive = raw[:3] or [f"The available statistics give {market} some support."]
+    return list(dict.fromkeys(positive))[:4], list(dict.fromkeys(risky))[:4]
+
+
+def _bettor_game_summary(selection):
+    user_pick = (selection or {}).get("user_pick") or {}
+    market = user_pick.get("market") or "this selection"
+    verdict = _simple_pick_verdict(selection)
+    if verdict == "keep":
+        return f"The statistics support keeping {market}."
+    if verdict == "caution":
+        return f"{market} is playable, but it is not one of the safest legs on this ticket."
+    if verdict == "risky":
+        return f"The statistics do not strongly support {market}."
+    return f"We need stronger match data before judging {market}."
+
+
+def _bettor_conclusion(selection):
+    user_pick = (selection or {}).get("user_pick") or {}
+    market = user_pick.get("market") or "this selection"
+    verdict = _simple_pick_verdict(selection)
+    if verdict == "keep":
+        return f"The available evidence supports keeping {market}."
+    if verdict == "caution":
+        return f"{market} is playable, but it carries enough risk to treat carefully."
+    if verdict == "risky":
+        return f"{market} carries too much risk based on the available match evidence."
+    return f"{market} has not been backed by enough reliable match evidence yet."
+
+
+def _bettor_recommendation(selection):
+    recommendation = (selection or {}).get("recommendation") or {}
+    user_pick = (selection or {}).get("user_pick") or {}
+    ai_pick = (selection or {}).get("ai_pick") or {}
+    action = recommendation.get("action") or "review"
+    if action == "replace" and ai_pick.get("available"):
+        pick = {
+            "market": ai_pick.get("market"),
+            "confidence_score": _public_score(ai_pick.get("confidence_score")),
+            "confidence_label": _public_confidence_label(ai_pick.get("confidence_score")),
+        }
+    elif action in {"keep", "caution"} or _simple_pick_verdict(selection) in {"keep", "caution"}:
+        action = "keep" if _simple_pick_verdict(selection) == "keep" else "caution"
+        pick = {
+            "market": user_pick.get("market"),
+            "confidence_score": _public_score(user_pick.get("confidence_score")),
+            "confidence_label": _public_confidence_label(user_pick.get("confidence_score")),
+        }
+    else:
+        pick = None
+    why = list(dict.fromkeys(recommendation.get("why") or []))[:4]
+    if not why:
+        if action == "replace":
+            why = ["This alternative has stronger statistical support than the original selection."]
+        elif action == "keep":
+            why = ["Your original selection already fits the statistical profile of the match."]
+        elif action == "caution":
+            why = ["There is not enough evidence for a stronger replacement to be recommended confidently."]
+        else:
+            why = ["No confident recommendation is available from the current match data."]
+    return {"action": action, "pick": pick, "why": why}
+
+
+def _build_bettor_public_payload(review, technical_public, *, enhance=False):
+    technical_public = technical_public or {}
+    ticket_summary = technical_public.get("ticket_summary") or {}
+    user_ticket = ticket_summary.get("user_ticket") or {}
+    ai_ticket = ticket_summary.get("ai_ticket") or {}
+    improvement = ticket_summary.get("improvement") or {}
+    breakdown = ticket_summary.get("pick_breakdown") or {}
+    games = []
+    recommended_picks = []
+    for selection in technical_public.get("selections") or []:
+        user_pick = selection.get("user_pick") or selection.get("your_pick") or {}
+        recommendation = _bettor_recommendation(selection)
+        positive_evidence, risk_evidence = _split_bettor_evidence(selection)
+        match = selection.get("match") or ""
+        selected_pick = recommendation.get("pick") or {
+            "market": user_pick.get("market"),
+            "confidence_score": _public_score(user_pick.get("confidence_score")),
+            "confidence_label": _public_confidence_label(user_pick.get("confidence_score")),
+        }
+        changed = recommendation.get("action") == "replace"
+        games.append(
+            {
+                "id": selection.get("id"),
+                "match": match,
+                "kickoff": (selection.get("technical_ref") or {}).get("kickoff")
+                or (selection.get("matched_fixture") or {}).get("kickoff_utc")
+                or "",
+                "user_pick": {
+                    "market": user_pick.get("market"),
+                    "odds": user_pick.get("odds"),
+                    "confidence_score": _public_score(user_pick.get("confidence_score")),
+                    "confidence_label": _public_confidence_label(user_pick.get("confidence_score")),
+                    "verdict": _simple_pick_verdict(selection),
+                    "summary": _bettor_game_summary(selection),
+                },
+                "analysis": {
+                    "positive_evidence": positive_evidence,
+                    "risk_evidence": risk_evidence,
+                    "conclusion": _bettor_conclusion(selection),
+                },
+                "recommendation": recommendation,
+            }
+        )
+        recommended_picks.append(
+            {
+                "match": match,
+                "market": (selected_pick or {}).get("market") or user_pick.get("market"),
+                "confidence_score": (selected_pick or {}).get("confidence_score")
+                or _public_score(user_pick.get("confidence_score")),
+                "changed": changed,
+            }
+        )
+
+    changes = int(improvement.get("picks_changed") or 0)
+    risky_count = int((breakdown.get("high_risk") or 0) + (breakdown.get("needs_review") or 0))
+    verdict_title = f"{changes} {_plural(changes, 'pick')} need changing" if changes else "No forced changes"
+    if changes:
+        verdict_message = (
+            f"Most of your ticket is playable, but {changes} {_plural(changes, 'selection')} "
+            "have weak statistical support. We found stronger alternatives for them."
+        )
+    elif risky_count:
+        verdict_message = (
+            f"{risky_count} {_plural(risky_count, 'selection')} need caution, but no stronger replacement "
+            "was found with enough statistical support."
+        )
+    else:
+        verdict_message = "Your selections are supported by the available match data."
+
+    payload = {
+        "id": review.id,
+        "source": review.source,
+        "status": review.status,
+        "ticket": {
+            "total_games": ticket_summary.get("total_legs") or len(games),
+            "original_odds": user_ticket.get("combined_odds"),
+            "user_picks": {
+                "confidence_score": _public_score(user_ticket.get("overall_confidence_score")),
+                "label": _public_ticket_label(user_ticket.get("overall_confidence_score")),
+                "estimated_success_percent": user_ticket.get("estimated_success_percent"),
+                "summary": {
+                    "strong": int(breakdown.get("strong") or 0),
+                    "playable": int(breakdown.get("playable") or 0),
+                    "risky": risky_count,
+                },
+            },
+            "recommended_picks": {
+                "confidence_score": _public_score(ai_ticket.get("overall_confidence_score")),
+                "label": _public_ticket_label(ai_ticket.get("overall_confidence_score")),
+                "estimated_success_percent": ai_ticket.get("estimated_success_percent"),
+                "estimated_odds": ai_ticket.get("combined_odds"),
+                "changes": changes,
+            },
+            "verdict": {"title": verdict_title, "message": verdict_message},
+        },
+        "games": games,
+        "recommended_ticket": {
+            "confidence_score": _public_score(ai_ticket.get("overall_confidence_score")),
+            "confidence_label": _public_ticket_label(ai_ticket.get("overall_confidence_score")),
+            "estimated_success_percent": ai_ticket.get("estimated_success_percent"),
+            "estimated_odds": ai_ticket.get("combined_odds"),
+            "picks": recommended_picks,
+        },
+        "disclaimer": (
+            "Confidence scores are statistical estimates based on available match data and do not guarantee an outcome."
+        ),
+    }
+    if enhance and review.source == SlipReview.Source.SPORTYBET:
+        payload = _enhance_bettor_public_with_deepseek(payload)
+    return payload
+
+
+def _enhance_bettor_public_with_deepseek(payload):
+    try:
+        from .grindalgo import algo_runner
+
+        if not algo_runner.llm_reasoning_enabled():
+            return payload
+        games = payload.get("games") or []
+        compact_games = [
+            {
+                "index": index,
+                "match": game.get("match"),
+                "user_pick": game.get("user_pick"),
+                "analysis": game.get("analysis"),
+                "recommendation": game.get("recommendation"),
+            }
+            for index, game in enumerate(games)
+        ]
+        model = os.environ.get("DEEPSEEK_MODEL", "deepseek-v4-flash")
+        deepseek_payload = {
+            "model": model,
+            "temperature": 0.15,
+            "top_p": 0.85,
+            "max_tokens": max(1800, min(7000, 850 * len(compact_games))),
+            "response_format": {"type": "json_object"},
+            "messages": [
+                {
+                    "role": "system",
+                    "content": (
+                        "You write simple football betslip analysis for bettors. Use only the supplied facts. "
+                        "Do not promise a win. Do not invent team form, injuries, odds, xG, lineups, or H2H. "
+                        "Keep the user's markets, scores, verdicts, and recommendation actions unchanged. "
+                        "Return strict valid JSON only."
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": (
+                        "Rewrite each game into bettor-facing analysis. For each game return: index, "
+                        "user_pick_summary, positive_evidence, risk_evidence, conclusion, recommendation_why. "
+                        "Evidence arrays must only rephrase supplied evidence and must be short bullet strings. "
+                        "Shape: {\"games\":[{\"index\":0,\"user_pick_summary\":\"...\","
+                        "\"positive_evidence\":[\"...\"],\"risk_evidence\":[\"...\"],"
+                        "\"conclusion\":\"...\",\"recommendation_why\":[\"...\"]}]}.\n"
+                        f"Data:\n{json.dumps(compact_games, ensure_ascii=True)}"
+                    ),
+                },
+            ],
+        }
+        content = algo_runner._deepseek_chat_completion(deepseek_payload, retries=1) or ""
+        parsed = algo_runner._parse_llm_json(content)
+        items = parsed.get("games") if isinstance(parsed, dict) else []
+        updates = {int(item.get("index")): item for item in items or [] if isinstance(item, dict) and str(item.get("index", "")).isdigit()}
+        for index, game in enumerate(games):
+            update = updates.get(index)
+            if not update:
+                continue
+            if update.get("user_pick_summary"):
+                game["user_pick"]["summary"] = str(update["user_pick_summary"]).strip()[:320]
+            if isinstance(update.get("positive_evidence"), list):
+                game["analysis"]["positive_evidence"] = [str(item).strip()[:240] for item in update["positive_evidence"] if str(item).strip()][:4]
+            if isinstance(update.get("risk_evidence"), list):
+                game["analysis"]["risk_evidence"] = [str(item).strip()[:240] for item in update["risk_evidence"] if str(item).strip()][:4]
+            if update.get("conclusion"):
+                game["analysis"]["conclusion"] = str(update["conclusion"]).strip()[:360]
+            if isinstance(update.get("recommendation_why"), list):
+                game["recommendation"]["why"] = [str(item).strip()[:240] for item in update["recommendation_why"] if str(item).strip()][:4]
+        log.info("DeepSeek SportyBet public analysis enhanced %s/%s games", len(updates), len(games))
+    except Exception as exc:
+        log.warning("DeepSeek SportyBet public analysis skipped: %s", exc)
+    return payload
+
+
 def _ticket_killers_message(ticket_risk):
     killers = ticket_risk.killers
     if not killers:
@@ -3679,9 +4123,10 @@ def _slip_intelligence(results):
     }
 
     public_selections = [
-        _with_explanation(_with_leg_risk(_public_selection_card(item), leg))
+        _with_explanation(_with_bettor_view(_with_leg_risk(_public_selection_card(item), leg)))
         for item, leg in zip(enriched, ticket_risk.legs)
     ]
+    bettor_breakdown = _bettor_pick_breakdown(public_selections)
     public_ticket_killers = _public_ticket_killers(ticket_risk)
     recommended_change_ids = [
         selection.get("id")
@@ -3765,6 +4210,7 @@ def _slip_intelligence(results):
         "ticket_health": ticket_health,
         "ticket_summary": {
             "total_legs": len(enriched),
+            "pick_breakdown": bettor_breakdown,
             "user_ticket": {
                 "overall_confidence_score": overall_score,
                 "estimated_success_percent": original_success,
@@ -4024,7 +4470,8 @@ def _log_slip_review_debug(review, summary):
                 "confidence_gain=%s ticket_lift=%s value=%s market_gap=%s disagreement=%s "
                 "price_status=%s statpal_source=%s statpal_cache=%s statpal_coverage=%s "
                 "statpal_required=%s statpal_missing=%s statpal_stale=%s statpal_snapshots=%s "
-                "warnings=%s tracking_reasons=%s reason_codes=%s"
+                "warnings=%s tracking_reasons=%s bettor_verdict=%s recommendation=%s "
+                "evidence_count=%s reason_codes=%s"
             ),
             review.id,
             index,
@@ -4059,6 +4506,9 @@ def _log_slip_review_debug(review, summary):
             technical.get("statpal_snapshot_types") or [],
             technical.get("market_capability_warnings") or [],
             untracked_by_id.get(selection_id, []),
+            user_pick.get("verdict"),
+            (selection.get("recommendation") or {}).get("action"),
+            len(selection.get("evidence") or []),
             selection.get("reason_codes") or [],
         )
 
@@ -4067,6 +4517,11 @@ def _populate_slip_review(review, results):
     safe_results = _json_safe(results)
     safe_results, _ = _slip_intelligence(safe_results)
     summary = _manual_review_summary(safe_results)
+    summary["bettor_public"] = _build_bettor_public_payload(
+        review,
+        (summary.get("public") or {}),
+        enhance=True,
+    )
     review.status = _review_status_from_summary(summary)
     review.summary = summary
     review.save(update_fields=["status", "summary", "updated_at"])
@@ -4195,14 +4650,12 @@ def _slip_review_payload(review, *, include_selections=True, public_only=False):
     summary = review.summary or {}
     public_payload = summary.get("public") or (summary.get("intelligence") or {}).get("public", {})
     if public_only:
-        return _api_response_payload({
-            "id": review.id,
-            "source": review.source,
-            "status": review.status,
-            "title": review.title,
-            "created_at": review.created_at,
-            "updated_at": review.updated_at,
-        } | public_payload)
+        bettor_payload = summary.get("bettor_public") or _build_bettor_public_payload(
+            review,
+            public_payload,
+            enhance=False,
+        )
+        return _api_response_payload(bettor_payload)
     payload = {
         "id": review.id,
         "source": review.source,

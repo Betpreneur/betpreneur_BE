@@ -7,6 +7,7 @@ from django.test import SimpleTestCase, TestCase
 from apps.algo.models import SlipReview
 from apps.algo.ticket_risk import SCORE_BANDS, Calibration
 from apps.algo.views import (
+    _build_bettor_public_payload,
     _has_statpal_hydration_identity,
     _manual_review_summary,
     _matched_fixture_with_statpal,
@@ -336,6 +337,7 @@ class SlipReviewPublicContractTests(SimpleTestCase):
         self.assertNotIn("recommended_changes", public)
         self.assertEqual(public["recommended_change_ids"], ["1581037"])
         self.assertEqual(public["ticket_summary"]["total_legs"], 1)
+        self.assertIn("pick_breakdown", public["ticket_summary"])
         self.assertIn("overall_confidence_score", public["ticket_summary"]["user_ticket"])
         self.assertIn("overall_confidence_score", public["ticket_summary"]["ai_ticket"])
         self.assertIn("confidence_score_change", public["ticket_summary"]["improvement"])
@@ -348,6 +350,15 @@ class SlipReviewPublicContractTests(SimpleTestCase):
         self.assertIn("confidence_label", selection["user_pick"])
         self.assertIn("data_confidence_score", selection["user_pick"])
         self.assertEqual(selection["user_pick"]["verdict"], "replace")
+        self.assertIn("verdict_label", selection["user_pick"])
+        self.assertIn("message", selection["user_pick"])
+        self.assertIn("evidence", selection)
+        self.assertTrue(selection["evidence"])
+        self.assertIn("our_view", selection)
+        self.assertEqual(selection["recommendation"]["action"], "replace")
+        self.assertEqual(selection["recommendation"]["market"], "Over 1.5")
+        self.assertIn("confidence", selection["recommendation"])
+        self.assertIn("why", selection["recommendation"])
         self.assertEqual(selection["your_pick"]["support_level"], "full")
         self.assertEqual(selection["your_pick"]["data_quality"], "strong")
         self.assertEqual(selection["your_pick"]["confidence_cap"], 88)
@@ -410,6 +421,30 @@ class SlipReviewPublicContractTests(SimpleTestCase):
         self.assertIn("confidence_gain=", text)
         self.assertIn("statpal_coverage=", text)
         self.assertIn("reason_codes=", text)
+
+    def test_bettor_public_payload_is_product_facing(self):
+        summary = _manual_review_summary([_sample_replace_result()])
+        review = SimpleNamespace(id=34, source="sportybet", status="completed")
+
+        payload = _build_bettor_public_payload(review, summary["public"], enhance=False)
+
+        self.assertEqual(payload["id"], 34)
+        self.assertEqual(payload["source"], "sportybet")
+        self.assertEqual(set(payload.keys()), {"id", "source", "status", "ticket", "games", "recommended_ticket", "disclaimer"})
+        self.assertIn("user_picks", payload["ticket"])
+        self.assertIn("recommended_picks", payload["ticket"])
+        self.assertIn("verdict", payload["ticket"])
+        self.assertEqual(len(payload["games"]), 1)
+        game = payload["games"][0]
+        self.assertEqual(game["user_pick"]["market"], "Away Win")
+        self.assertIn(game["user_pick"]["verdict"], {"risky", "caution", "keep", "review"})
+        self.assertIn("positive_evidence", game["analysis"])
+        self.assertIn("risk_evidence", game["analysis"])
+        self.assertIn("conclusion", game["analysis"])
+        self.assertIn("action", game["recommendation"])
+        self.assertNotIn("technical_ref", game)
+        self.assertNotIn("reason_codes", game)
+        self.assertEqual(payload["recommended_ticket"]["picks"][0]["match"], game["match"])
 
     def test_market_not_found_with_replacement_counts_as_analysed(self):
         summary = _manual_review_summary([_sample_market_not_found_with_replacement()])
@@ -553,12 +588,25 @@ class SlipReviewPayloadDbTests(TestCase):
         payload = _slip_review_payload(review, public_only=True)
 
         self.assertEqual(payload["id"], review.id)
-        self.assertEqual(payload["contract_version"], "match_checker_public_v2")
-        self.assertIn("selections", payload)
+        self.assertEqual(payload["source"], "sportybet")
+        self.assertIn("ticket", payload)
+        self.assertIn("games", payload)
+        self.assertIn("recommended_ticket", payload)
+        self.assertIn("disclaimer", payload)
+        self.assertEqual(payload["ticket"]["total_games"], 1)
+        self.assertIn("user_picks", payload["ticket"])
+        self.assertIn("recommended_picks", payload["ticket"])
+        self.assertEqual(payload["games"][0]["user_pick"]["market"], "Away Win")
+        self.assertIn("analysis", payload["games"][0])
+        self.assertIn("positive_evidence", payload["games"][0]["analysis"])
+        self.assertIn("risk_evidence", payload["games"][0]["analysis"])
+        self.assertIn("recommendation", payload["games"][0])
+        self.assertEqual(payload["recommended_ticket"]["picks"][0]["match"], payload["games"][0]["match"])
         self.assertNotIn("summary", payload)
         self.assertNotIn("intelligence", payload)
         self.assertNotIn("api_usage", payload)
-        self.assertNotIn("api_usage", payload["selections"][0])
+        self.assertNotIn("technical_ref", payload["games"][0])
+        self.assertNotIn("reason_codes", payload["games"][0])
 
     def test_full_api_review_payload_also_hides_api_usage(self):
         user = get_user_model().objects.create_user(username="tester2")
