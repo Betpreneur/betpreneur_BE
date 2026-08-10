@@ -14,6 +14,11 @@ class PickSerializer(serializers.ModelSerializer):
     backed_by_me = serializers.SerializerMethodField()
     selection_profile = serializers.SerializerMethodField()
     risk_level = serializers.SerializerMethodField()
+    bettor_view = serializers.SerializerMethodField()
+    analysis_summary = serializers.SerializerMethodField()
+    analysis_conclusion = serializers.SerializerMethodField()
+    positive_evidence = serializers.SerializerMethodField()
+    risk_evidence = serializers.SerializerMethodField()
 
     class Meta:
         model = Pick
@@ -35,6 +40,11 @@ class PickSerializer(serializers.ModelSerializer):
             "away_recent_form",
             "risk_flags",
             "insights",
+            "bettor_view",
+            "analysis_summary",
+            "analysis_conclusion",
+            "positive_evidence",
+            "risk_evidence",
             "selection_profile",
             "risk_level",
             "confidence",
@@ -156,6 +166,21 @@ class PickSerializer(serializers.ModelSerializer):
         if profile == "high_upside":
             return "high"
         return "medium"
+
+    def get_bettor_view(self, obj) -> dict:
+        return (obj.insights or {}).get("bettor_view") or {}
+
+    def get_analysis_summary(self, obj) -> str:
+        return (obj.insights or {}).get("summary", "")
+
+    def get_analysis_conclusion(self, obj) -> str:
+        return (obj.insights or {}).get("conclusion", "")
+
+    def get_positive_evidence(self, obj) -> list:
+        return (obj.insights or {}).get("positive_evidence") or []
+
+    def get_risk_evidence(self, obj) -> list:
+        return (obj.insights or {}).get("risk_evidence") or []
 
 
 class AlgoRunSerializer(serializers.ModelSerializer):
@@ -283,6 +308,11 @@ class FixtureMarketSerializer(serializers.Serializer):
     proven = serializers.BooleanField()
     eligible = serializers.BooleanField()
     risk_flags = serializers.ListField(child=serializers.CharField(), required=False)
+    bettor_view = serializers.JSONField(required=False)
+    analysis_summary = serializers.CharField(required=False, allow_blank=True)
+    analysis_conclusion = serializers.CharField(required=False, allow_blank=True)
+    positive_evidence = serializers.ListField(child=serializers.CharField(), required=False)
+    risk_evidence = serializers.ListField(child=serializers.CharField(), required=False)
     insights = serializers.JSONField(required=False)
     selected = serializers.BooleanField(required=False)
     selected_pick_id = serializers.IntegerField(required=False, allow_null=True)

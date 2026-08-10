@@ -2,6 +2,7 @@ import os
 import json
 import gc
 import logging
+import math
 import re
 import time
 import unicodedata
@@ -1741,11 +1742,80 @@ class AlgoRunnerService:
         payload.setdefault("kickoff_utc", cached.kickoff_utc.isoformat() if cached.kickoff_utc else "")
         payload.setdefault("match_id", cached.match_id)
         payload.setdefault("date", cached.match_date)
-        if str(cached.match_id).isdigit():
+        if cached.source == "statpal":
+            provider_match_id = str(
+                payload.get("provider_match_id")
+                or payload.get("main_id")
+                or str(cached.match_id).replace("statpal:", "", 1)
+                or ""
+            )
+            provider_competition_id = str(
+                payload.get("provider_competition_id")
+                or payload.get("statpal_provider_competition_id")
+                or payload.get("code")
+                or ""
+            )
+            home_team_id = str(payload.get("provider_home_team_id") or payload.get("statpal_home_team_id") or payload.get("hid") or "")
+            away_team_id = str(payload.get("provider_away_team_id") or payload.get("statpal_away_team_id") or payload.get("aid") or "")
+            payload["source"] = payload.get("source") or "statpal_daily_cache"
+            payload["statpal_match_id"] = cached.match_id
+            payload["statpal_provider_match_id"] = provider_match_id
+            payload["statpal_provider_competition_id"] = provider_competition_id
+            payload["statpal_home_team_id"] = home_team_id
+            payload["statpal_away_team_id"] = away_team_id
+            payload.setdefault("provider_match_id", provider_match_id)
+            payload.setdefault("provider_competition_id", provider_competition_id)
+            payload.setdefault("code", provider_competition_id)
+            payload.setdefault("hid", home_team_id)
+            payload.setdefault("aid", away_team_id)
+        elif str(cached.match_id).isdigit():
             payload.setdefault("aps_id", cached.match_id)
         if payload.get("aps_id") and not payload.get("match_id"):
             payload["match_id"] = payload["aps_id"]
         return json_safe(payload)
+
+    def _statpal_primary_daily_enabled(self):
+        return self._runner_env_bool("ALGO_DAILY_USE_STATPAL_FIXTURES", True)
+
+    def _statpal_cached_runner_fixtures(self, target_date):
+        rows = list(
+            FixtureCache.objects.filter(match_date=target_date, source="statpal")
+            .order_by("country", "league", "kickoff", "fixture")
+        )
+        return [self._cached_fixture_runner_payload(row) for row in rows]
+
+    def _daily_runner_fixtures(self, target_date):
+        from .grindalgo import algo_runner
+
+        statpal_errors = []
+        if self._statpal_primary_daily_enabled():
+            fixtures = self._statpal_cached_runner_fixtures(target_date)
+            if not fixtures:
+                try:
+                    sync_result = FixtureSearchService(runner_service=self).sync_statpal_universe(
+                        start_date=target_date,
+                        days=0,
+                    )
+                    statpal_errors = sync_result.get("errors") or []
+                    fixtures = self._statpal_cached_runner_fixtures(target_date)
+                except Exception as exc:
+                    statpal_errors = [{"provider": "statpal", "error": str(exc)}]
+            if fixtures:
+                return {
+                    "fixtures": fixtures,
+                    "source": "statpal",
+                    "fallback_used": False,
+                    "errors": statpal_errors,
+                }
+
+        fixtures = algo_runner.fetch_aps_fixtures(target_date.isoformat())
+        fixtures = self._attach_statpal_fixture_context(fixtures, target_date)
+        return {
+            "fixtures": fixtures,
+            "source": "api_football",
+            "fallback_used": self._statpal_primary_daily_enabled(),
+            "errors": statpal_errors,
+        }
 
     def _hydrate_statpal_scoring_context(self, fixture):
         provider_match_id = str(fixture.get("statpal_provider_match_id") or "").strip()
@@ -2013,12 +2083,212 @@ class AlgoRunnerService:
             MarketPrediction.objects.bulk_create(rows, ignore_conflicts=True, batch_size=500)
         return len(rows)
 
+    def _market_family_counts(self, markets):
+        counts = defaultdict(int)
+        for market in markets or []:
+            family = (
+                market.get("market_family")
+                or (market.get("insights") or {}).get("market_family")
+                or "unknown"
+            )
+            counts[str(family or "unknown")] += 1
+        return dict(sorted(counts.items()))
+
+    def _fixture_statpal_coverage(self, fixture):
+        source_payload = fixture.get("source_payload") if isinstance(fixture.get("source_payload"), dict) else {}
+        fixture_payload = {**source_payload, **fixture}
+        try:
+            from .statpal_daily_build import StatPalDailyBuildService
+
+            coverage = StatPalDailyBuildService().coverage_for_fixture(
+                fixture_payload,
+                include_optional=True,
+            )
+        except Exception as exc:
+            statpal_context = ((fixture.get("fixture_context") or {}).get("statpal") or {})
+            snapshots = sorted((statpal_context.get("snapshots") or {}).keys())
+            return {
+                "status": "error",
+                "coverage_percent": 0.0,
+                "present_snapshot_types": snapshots,
+                "missing_snapshot_types": [],
+                "stale_snapshot_types": [],
+                "required_snapshot_types": [],
+                "usable_field_count": 0,
+                "error": str(exc),
+            }
+
+        snapshots = coverage.get("snapshots") or {}
+        return {
+            "status": coverage.get("status", "unknown"),
+            "coverage_percent": coverage.get("coverage_percent", 0.0),
+            "present_snapshot_types": sorted(key for key, item in snapshots.items() if item.get("present")),
+            "missing_snapshot_types": coverage.get("missing_snapshot_types") or [],
+            "stale_snapshot_types": coverage.get("stale_snapshot_types") or [],
+            "required_snapshot_types": coverage.get("required_snapshot_types") or [],
+            "optional_snapshot_types": coverage.get("optional_snapshot_types") or [],
+            "usable_field_count": coverage.get("usable_field_count", 0),
+            "identity": coverage.get("identity") or {},
+            "endpoint_failures": coverage.get("endpoint_failures") or [],
+        }
+
+    def _market_statpal_diagnostics(self, market, statpal_context):
+        from .market_capabilities import MarketCapabilityService
+
+        capability = MarketCapabilityService().assess(
+            market.get("market", ""),
+            statpal_context=statpal_context or {},
+        )
+        return {
+            "support_level": capability.support_level,
+            "data_quality": capability.data_quality,
+            "confidence_cap": capability.confidence_cap,
+            "scoreable": capability.scoreable,
+            "required_snapshot_types": capability.required_snapshots,
+            "available_snapshot_types": capability.available_snapshots,
+            "missing_snapshot_types": capability.missing_snapshots,
+            "coverage_percent": capability.coverage_percent,
+            "warnings": capability.warnings,
+            "reason": capability.reason,
+        }
+
+    def _market_family_statpal_coverage(self, markets):
+        grouped = {}
+        for market in markets or []:
+            insights = market.get("insights") or {}
+            family = str(market.get("market_family") or insights.get("market_family") or "unknown")
+            diagnostics = insights.get("statpal_market_coverage") or {}
+            row = grouped.setdefault(
+                family,
+                {
+                    "markets": 0,
+                    "scoreable": 0,
+                    "full": 0,
+                    "partial": 0,
+                    "missing": 0,
+                    "coverage_total": 0.0,
+                    "missing_snapshot_types": set(),
+                    "warnings": set(),
+                },
+            )
+            coverage = float(diagnostics.get("coverage_percent") or 0)
+            row["markets"] += 1
+            row["coverage_total"] += coverage
+            if diagnostics.get("scoreable"):
+                row["scoreable"] += 1
+            if coverage >= 80:
+                row["full"] += 1
+            elif coverage > 0:
+                row["partial"] += 1
+            else:
+                row["missing"] += 1
+            row["missing_snapshot_types"].update(diagnostics.get("missing_snapshot_types") or [])
+            row["warnings"].update(diagnostics.get("warnings") or [])
+
+        result = {}
+        for family, row in grouped.items():
+            markets = row["markets"] or 1
+            result[family] = {
+                "markets": row["markets"],
+                "scoreable": row["scoreable"],
+                "full": row["full"],
+                "partial": row["partial"],
+                "missing": row["missing"],
+                "average_coverage_percent": round(row["coverage_total"] / markets, 1),
+                "missing_snapshot_types": sorted(row["missing_snapshot_types"]),
+                "warnings": sorted(row["warnings"]),
+            }
+        return dict(sorted(result.items()))
+
+    def _merge_market_family_statpal_coverage(self, aggregate, family_coverage):
+        for family, item in (family_coverage or {}).items():
+            row = aggregate.setdefault(
+                family,
+                {
+                    "markets": 0,
+                    "scoreable": 0,
+                    "full": 0,
+                    "partial": 0,
+                    "missing": 0,
+                    "coverage_total": 0.0,
+                    "missing_snapshot_types": set(),
+                    "warnings": set(),
+                },
+            )
+            markets = int(item.get("markets") or 0)
+            row["markets"] += markets
+            row["scoreable"] += int(item.get("scoreable") or 0)
+            row["full"] += int(item.get("full") or 0)
+            row["partial"] += int(item.get("partial") or 0)
+            row["missing"] += int(item.get("missing") or 0)
+            row["coverage_total"] += float(item.get("average_coverage_percent") or 0) * markets
+            row["missing_snapshot_types"].update(item.get("missing_snapshot_types") or [])
+            row["warnings"].update(item.get("warnings") or [])
+
+    def _finalize_market_family_statpal_coverage(self, aggregate):
+        result = {}
+        for family, row in (aggregate or {}).items():
+            markets = row["markets"] or 1
+            result[family] = {
+                "markets": row["markets"],
+                "scoreable": row["scoreable"],
+                "full": row["full"],
+                "partial": row["partial"],
+                "missing": row["missing"],
+                "average_coverage_percent": round(row["coverage_total"] / markets, 1),
+                "missing_snapshot_types": sorted(row["missing_snapshot_types"]),
+                "warnings": sorted(row["warnings"]),
+            }
+        return dict(sorted(result.items()))
+
+    def _prediction_market_family_counts(self, predictions):
+        counts = defaultdict(int)
+        for prediction in predictions or []:
+            insights = prediction.insights or {}
+            route = insights.get("daily_evaluation_route") or {}
+            family = route.get("family") or insights.get("market_family") or "unknown"
+            counts[str(family or "unknown")] += 1
+        return dict(sorted(counts.items()))
+
+    def _prediction_statpal_family_coverage(self, predictions):
+        markets = []
+        for prediction in predictions or []:
+            insights = prediction.insights or {}
+            markets.append({
+                "market": prediction.market,
+                "market_family": insights.get("market_family") or (insights.get("daily_evaluation_route") or {}).get("family"),
+                "insights": insights,
+            })
+        return self._market_family_statpal_coverage(markets)
+
+    def _enrich_fixture_statpal_diagnostics(self, fixture):
+        enriched = dict(fixture)
+        insights = dict(enriched.get("insights") or {})
+        fixture_context = enriched.get("fixture_context") or {}
+        statpal_context = fixture_context.get("statpal") or {}
+        fixture_coverage = self._fixture_statpal_coverage(enriched)
+        markets = []
+        for market in enriched.get("markets") or []:
+            market_payload = dict(market)
+            market_insights = dict(market_payload.get("insights") or {})
+            diagnostics = self._market_statpal_diagnostics(market_payload, statpal_context)
+            market_insights["statpal_market_coverage"] = diagnostics
+            market_payload["insights"] = market_insights
+            markets.append(market_payload)
+        family_coverage = self._market_family_statpal_coverage(markets)
+        insights["statpal_fixture_coverage"] = fixture_coverage
+        insights["statpal_market_family_coverage"] = family_coverage
+        enriched["markets"] = markets
+        enriched["insights"] = insights
+        return enriched
+
     def _selected_pick_payload_from_prediction(self, prediction, tier, bankroll):
         risk_flags = list(prediction.risk_flags or [])
         insights = dict(prediction.insights or {})
         council = insights.get("council_review") or {}
         final_confidence = council.get("final_confidence") or prediction.confidence
         insights["published_tier"] = tier
+        insights["optimization_profile"] = self._prediction_optimization_profile(prediction)
         profile = {
             Pick.Tier.BANKER: "reliability",
             Pick.Tier.VALUE_GEM: "mispriced_value",
@@ -2037,6 +2307,20 @@ class AlgoRunnerService:
             "tier": tier,
             "market": prediction.market,
             "meaning": prediction.meaning,
+            "market_family": insights.get("market_family", ""),
+            "market_category": insights.get("market_category", ""),
+            "assessment_type": insights.get("assessment_type", ""),
+            "evaluation_engine": insights.get("evaluation_engine", ""),
+            "daily_evaluation_route": insights.get("daily_evaluation_route") or {},
+            "market_identity": insights.get("market_identity") or {},
+            "market_support_level": insights.get("market_support_level", ""),
+            "optimization_profile": insights.get("optimization_profile") or {},
+            "evidence": insights.get("evidence") or {},
+            "bettor_view": insights.get("bettor_view") or {},
+            "positive_evidence": insights.get("positive_evidence") or [],
+            "risk_evidence": insights.get("risk_evidence") or [],
+            "analysis_summary": insights.get("summary", ""),
+            "analysis_conclusion": insights.get("conclusion", ""),
             "reasoning": "",
             "model_verdict": "",
             "home_recent_form": prediction.home_recent_form or {},
@@ -2062,6 +2346,20 @@ class AlgoRunnerService:
             "tier": payload.get("tier", ""),
             "market": payload.get("market", ""),
             "meaning": payload.get("meaning", ""),
+            "market_family": payload.get("market_family", ""),
+            "market_category": payload.get("market_category", ""),
+            "assessment_type": payload.get("assessment_type", ""),
+            "evaluation_engine": payload.get("evaluation_engine", ""),
+            "daily_evaluation_route": payload.get("daily_evaluation_route") or {},
+            "market_identity": payload.get("market_identity") or {},
+            "market_support_level": payload.get("market_support_level", ""),
+            "optimization_profile": payload.get("optimization_profile") or {},
+            "evidence": payload.get("evidence") or {},
+            "bettor_view": payload.get("bettor_view") or {},
+            "positive_evidence": payload.get("positive_evidence") or [],
+            "risk_evidence": payload.get("risk_evidence") or [],
+            "analysis_summary": payload.get("analysis_summary", ""),
+            "analysis_conclusion": payload.get("analysis_conclusion", ""),
             "conf": payload.get("final_confidence") or payload.get("confidence") or 0,
             "raw_confidence": payload.get("confidence") or 0,
             "final_confidence": payload.get("final_confidence") or payload.get("confidence") or 0,
@@ -2124,6 +2422,113 @@ class AlgoRunnerService:
         if market == "DC: 12":
             return max(0, self._runner_env_int("ALGO_MAX_DAILY_DC12_PICKS", 0))
         return max(0, self._runner_env_int("ALGO_MAX_DAILY_SAME_MARKET_PICKS", 0))
+
+    def _prediction_market_family(self, prediction):
+        insights = prediction.insights or {}
+        route = insights.get("daily_evaluation_route") or {}
+        family = route.get("family") or insights.get("market_family")
+        if family:
+            return str(family)
+        from .daily_market_catalog import daily_evaluation_route
+
+        return str(daily_evaluation_route(prediction.market).get("family") or "unknown")
+
+    def _family_daily_limit(self, family, max_daily):
+        raw_key = f"ALGO_MAX_DAILY_FAMILY_{str(family or '').upper()}_PICKS"
+        specific = self._runner_env_int(raw_key, -1)
+        if specific >= 0:
+            return specific
+        configured = self._runner_env_int("ALGO_MAX_DAILY_SAME_MARKET_FAMILY_PICKS", -1)
+        if configured >= 0:
+            return configured
+        return max(2, math.ceil(max_daily * 0.40))
+
+    def _allow_family_overflow(self):
+        return self._runner_env_bool("ALGO_ALLOW_MARKET_FAMILY_OVERFLOW", True)
+
+    def _prediction_can_overflow_family(self, prediction):
+        return int(prediction.confidence or 0) >= self._runner_env_int(
+            "ALGO_MARKET_FAMILY_OVERFLOW_MIN_CONFIDENCE",
+            80,
+        )
+
+    def _daily_optimization_mode(self):
+        mode = str(self._runner_env().get("ALGO_DAILY_OPTIMIZATION_MODE", "balanced") or "balanced").strip().lower()
+        return mode if mode in {"safer", "balanced", "value"} else "balanced"
+
+    def _prediction_value_score(self, prediction):
+        try:
+            ev = float(prediction.ev or 0)
+        except (TypeError, ValueError):
+            ev = 0.0
+        try:
+            odds = float(prediction.odds or 0)
+        except (TypeError, ValueError):
+            odds = 0.0
+        return round((ev * 100) + min(odds, 6.0), 2)
+
+    def _prediction_optimization_profile(self, prediction):
+        confidence = float(prediction.confidence or 0)
+        ev = float(prediction.ev or 0)
+        value_score = self._prediction_value_score(prediction)
+        risk_flags = {str(flag) for flag in (prediction.risk_flags or [])}
+        severe_risk = bool(risk_flags & {
+            "goal_line_boundary",
+            "draw_boundary_risk",
+            "under35_blowout_risk",
+            "nordic_under_volatility",
+            "wide_odds_market",
+            "best_price_far_above_consensus",
+        })
+        if confidence >= self._runner_env_int("ALGO_SAFER_MODE_MIN_CONFIDENCE", 78) and not severe_risk:
+            mode = "safer"
+            label = "Safer"
+        elif ev >= float(self._runner_env().get("ALGO_VALUE_MODE_MIN_EV", 0.08) or 0.08):
+            mode = "value"
+            label = "Value"
+        else:
+            mode = "balanced"
+            label = "Balanced"
+        return {
+            "mode": mode,
+            "label": label,
+            "confidence_score": round(confidence, 1),
+            "value_score": value_score,
+            "expected_value": round(ev, 3),
+        }
+
+    def _prediction_matches_optimization_mode(self, prediction, mode):
+        if mode == "balanced":
+            return True
+        profile = self._prediction_optimization_profile(prediction)
+        return profile["mode"] == mode
+
+    def _prediction_mode_rank(self, prediction):
+        mode = self._daily_optimization_mode()
+        confidence = float(prediction.confidence or 0)
+        ev = float(prediction.ev or 0)
+        if mode == "safer":
+            return (confidence, ev, -float(prediction.odds or 0))
+        if mode == "value":
+            return (ev, self._prediction_value_score(prediction), confidence)
+        return self._prediction_rank(prediction)
+
+    def _pick_family_counts(self, picks):
+        counts = defaultdict(int)
+        for pick in picks or []:
+            insights = pick.insights or {}
+            route = insights.get("daily_evaluation_route") or {}
+            family = route.get("family") or insights.get("market_family") or "unknown"
+            counts[str(family or "unknown")] += 1
+        return dict(sorted(counts.items()))
+
+    def _pick_optimization_counts(self, picks):
+        counts = defaultdict(int)
+        for pick in picks or []:
+            profile = (pick.insights or {}).get("optimization_profile") or {}
+            mode = profile.get("mode") or "balanced"
+            counts[str(mode or "balanced")] += 1
+        return dict(sorted(counts.items()))
 
     def _prediction_reviewer_score(self, prediction, reviewer_name):
         review = ((prediction.insights or {}).get("council_review") or {})
@@ -2221,6 +2626,7 @@ class AlgoRunnerService:
         insights = dict(prediction.insights or {})
         insights["league_trust"] = self._league_trust_for_prediction(prediction, performance)
         insights["calibration_trust"] = self._calibration_trust_for_prediction(prediction, performance)
+        insights["optimization_profile"] = self._prediction_optimization_profile(prediction)
         candidate = {
             "confidence": prediction.confidence,
             "ev": prediction.ev,
@@ -2242,6 +2648,7 @@ class AlgoRunnerService:
 
     def _select_prediction_ids(self, algo_run):
         max_daily = max(1, self._runner_env_int("ALGO_MAX_DAILY_PICKS", 15))
+        optimization_mode = self._daily_optimization_mode()
         performance = (algo_run.result or {}).get("performance_profile") or self._performance_profile()
 
         predictions = list(
@@ -2250,7 +2657,7 @@ class AlgoRunnerService:
             .exclude(ev__isnull=True)
             .order_by("-confidence", "-ev", "odds")
         )
-        predictions.sort(key=self._prediction_rank, reverse=True)
+        predictions.sort(key=self._prediction_mode_rank, reverse=True)
 
         buckets = {
             Pick.Tier.BANKER: [],
@@ -2259,9 +2666,18 @@ class AlgoRunnerService:
         }
         used_matches = set()
         market_counts = defaultdict(int)
+        family_counts = defaultdict(int)
+        family_limit_rejections = set()
 
-        def add_prediction(prediction):
+        def add_prediction(prediction, *, enforce_family_limit=True, enforce_mode=True):
             if prediction.match_id in used_matches:
+                return False
+            if enforce_mode and not self._prediction_matches_optimization_mode(prediction, optimization_mode):
+                return False
+            family = self._prediction_market_family(prediction)
+            family_limit = self._family_daily_limit(family, max_daily)
+            if enforce_family_limit and family_limit and family_counts[family] >= family_limit:
+                family_limit_rejections.add(prediction.id)
                 return False
             candidate = self._recommendation_candidate(prediction, performance)
             if not assess_recommendation(candidate)["recommended"]:
@@ -2269,9 +2685,19 @@ class AlgoRunnerService:
             tier = self._tier_after_council(prediction, candidate)
             if not tier:
                 return False
+            insights = dict(prediction.insights or {})
+            insights["selection_family"] = family
+            insights["selection_family_limit"] = family_limit
+            insights["selection_family_count_before_pick"] = family_counts[family]
+            insights["selection_optimization_mode"] = optimization_mode
+            insights["optimization_profile"] = self._prediction_optimization_profile(prediction)
+            if prediction.insights != insights:
+                prediction.insights = insights
+                prediction.save(update_fields=["insights"])
             buckets[tier].append(prediction.id)
             used_matches.add(prediction.match_id)
             market_counts[prediction.market] += 1
+            family_counts[family] += 1
             return True
 
         def selected_count():
@@ -2284,6 +2710,28 @@ class AlgoRunnerService:
             if market_limit and market_counts[prediction.market] >= market_limit:
                 continue
             add_prediction(prediction)
+
+        if selected_count() < max_daily and self._allow_family_overflow():
+            for prediction in predictions:
+                if selected_count() >= max_daily:
+                    break
+                if prediction.id not in family_limit_rejections:
+                    continue
+                if not self._prediction_can_overflow_family(prediction):
+                    continue
+                market_limit = self._market_daily_limit(prediction.market, max_daily)
+                if market_limit and market_counts[prediction.market] >= market_limit:
+                    continue
+                add_prediction(prediction, enforce_family_limit=False)
+
+        if selected_count() < max_daily and optimization_mode != "balanced":
+            for prediction in predictions:
+                if selected_count() >= max_daily:
+                    break
+                market_limit = self._market_daily_limit(prediction.market, max_daily)
+                if market_limit and market_counts[prediction.market] >= market_limit:
+                    continue
+                add_prediction(prediction, enforce_mode=False)
 
         return buckets
 
@@ -2330,6 +2778,12 @@ class AlgoRunnerService:
         self._refresh_recommendation_rejections(algo_run)
         selected_ids = self._select_prediction_ids(algo_run)
         flat_ids = [pk for ids in selected_ids.values() for pk in ids]
+        log.info(
+            "Top-pick family-aware selection run=%s selected=%s buckets=%s",
+            algo_run.id,
+            len(flat_ids),
+            {tier: len(ids) for tier, ids in selected_ids.items()},
+        )
         if not flat_ids:
             Pick.objects.filter(run=algo_run).delete()
             return []
@@ -2352,10 +2806,34 @@ class AlgoRunnerService:
             payload["reasoning"] = algo_runner.pick_reasoning(candidate)
             payload["model_verdict"] = algo_runner.pick_verdict(candidate)
         if use_llm:
-            algo_runner.enhance_pick_explanations_with_llm(reason_candidates)
+            with temporary_env(self._runner_env()):
+                algo_runner.enhance_pick_explanations_with_llm(reason_candidates)
             for payload, candidate in zip(payloads, reason_candidates):
                 payload["reasoning"] = candidate.get("reasoning", payload["reasoning"])
                 payload["model_verdict"] = candidate.get("model_verdict", payload["model_verdict"])
+                payload["insights"] = candidate.get("insights") or payload.get("insights") or {}
+                payload["bettor_view"] = (payload.get("insights") or {}).get("bettor_view") or payload.get("bettor_view") or {}
+                payload["evidence"] = (payload.get("insights") or {}).get("evidence") or payload.get("evidence") or {}
+                payload["positive_evidence"] = (
+                    (payload.get("insights") or {}).get("positive_evidence")
+                    or payload.get("positive_evidence")
+                    or []
+                )
+                payload["risk_evidence"] = (
+                    (payload.get("insights") or {}).get("risk_evidence")
+                    or payload.get("risk_evidence")
+                    or []
+                )
+                payload["analysis_summary"] = (
+                    (payload.get("insights") or {}).get("summary")
+                    or payload.get("analysis_summary")
+                    or ""
+                )
+                payload["analysis_conclusion"] = (
+                    (payload.get("insights") or {}).get("conclusion")
+                    or payload.get("analysis_conclusion")
+                    or ""
+                )
 
         picks = self._persist_selected_picks(algo_run, {"selected_picks": payloads}) or []
         pick_lookup = {(str(pick.match_id or ""), pick.market): pick for pick in picks}
@@ -2374,6 +2852,12 @@ class AlgoRunnerService:
                 ["published", "selected_pick", "rejection_reason"],
                 batch_size=500,
             )
+        log.info(
+            "Top-pick published counts run=%s market_families=%s optimization_modes=%s",
+            algo_run.id,
+            self._pick_family_counts(picks),
+            self._pick_optimization_counts(picks),
+        )
         return picks
 
     def explain_picks_for_run(self, algo_run):
@@ -2407,6 +2891,7 @@ class AlgoRunnerService:
                 "home_recent_form": pick.home_recent_form or {},
                 "away_recent_form": pick.away_recent_form or {},
                 "risk_flags": pick.risk_flags or [],
+                "insights": pick.insights or {},
                 "reasoning": pick.reasoning,
                 "model_verdict": pick.model_verdict,
             })
@@ -2416,11 +2901,25 @@ class AlgoRunnerService:
         for pick, candidate in zip(picks, candidates):
             reasoning = candidate.get("reasoning") or pick.reasoning
             verdict = candidate.get("model_verdict") or pick.model_verdict
-            if reasoning != pick.reasoning or verdict != pick.model_verdict:
+            insights = candidate.get("insights") or pick.insights or {}
+            changed = (
+                reasoning != pick.reasoning
+                or verdict != pick.model_verdict
+                or insights != (pick.insights or {})
+            )
+            if changed:
                 pick.reasoning = reasoning
                 pick.model_verdict = verdict
-                pick.save(update_fields=["reasoning", "model_verdict"])
+                pick.insights = insights
+                pick.save(update_fields=["reasoning", "model_verdict", "insights"])
                 updated += 1
+        log.info(
+            "DeepSeek top-pick explanation task run=%s updated=%s total=%s structured_fields=%s",
+            algo_run.id,
+            updated,
+            len(picks),
+            ["bettor_view", "summary", "positive_evidence", "risk_evidence", "conclusion"],
+        )
         return {"run_id": algo_run.id, "updated": updated, "total": len(picks)}
 
     def _persist_failed_fixture(self, algo_run, fixture, error):
@@ -2487,10 +2986,17 @@ class AlgoRunnerService:
                 from .grindalgo import algo_runner
 
                 bankroll = algo_runner.get_bankroll(None)
-                fixtures = algo_runner.fetch_aps_fixtures(algo_run.target_date.isoformat())
-                fixtures = self._limit_fixtures(fixtures)
-                fixtures = self._attach_statpal_fixture_context(fixtures, algo_run.target_date)
-                fixtures = self._attach_statpal_fixture_context(fixtures, algo_run.target_date)
+                fixture_bundle = self._daily_runner_fixtures(algo_run.target_date)
+                fixtures = self._limit_fixtures(fixture_bundle.get("fixtures") or [])
+
+            log.info(
+                "Daily fixture source run=%s source=%s fixtures=%s fallback=%s errors=%s",
+                algo_run.id,
+                fixture_bundle.get("source"),
+                len(fixtures),
+                fixture_bundle.get("fallback_used"),
+                fixture_bundle.get("errors") or [],
+            )
 
             Pick.objects.filter(run=algo_run).delete()
             AlgoFixture.objects.filter(run=algo_run).delete()
@@ -2530,6 +3036,10 @@ class AlgoRunnerService:
                     "status": AlgoRun.Status.RUNNING,
                     "date": algo_run.target_date.isoformat(),
                     "publish_policy": "celery_fanout_pipeline",
+                    "fixture_source": fixture_bundle.get("source"),
+                    "statpal_primary_enabled": self._statpal_primary_daily_enabled(),
+                    "statpal_fallback_used": fixture_bundle.get("fallback_used"),
+                    "statpal_fixture_errors": fixture_bundle.get("errors") or [],
                     "strategy_profile": strategy_profile,
                     "performance_profile": performance_profile,
                     "storage": self._run_storage_payload(),
@@ -2541,6 +3051,10 @@ class AlgoRunnerService:
                     "status": AlgoRun.Status.REST_DAY,
                     "date": algo_run.target_date.isoformat(),
                     "picks_count": 0,
+                    "fixture_source": fixture_bundle.get("source"),
+                    "statpal_primary_enabled": self._statpal_primary_daily_enabled(),
+                    "statpal_fallback_used": fixture_bundle.get("fallback_used"),
+                    "statpal_fixture_errors": fixture_bundle.get("errors") or [],
                     "strategy_profile": strategy_profile,
                     "storage": self._run_storage_payload(),
                 }
@@ -2584,10 +3098,27 @@ class AlgoRunnerService:
                     [real_odds],
                 )[0]
                 summary["source_payload"] = scored_fixture
+                summary = self._enrich_fixture_statpal_diagnostics(summary)
                 self._persist_fixture_summary(algo_run, summary)
                 market_count = self._persist_fixture_market_predictions(algo_run, summary)
+                family_counts = self._market_family_counts(summary.get("markets") or [])
+                statpal_family_coverage = (summary.get("insights") or {}).get("statpal_market_family_coverage") or {}
+                log.info(
+                    "Daily fixture scored run=%s match_id=%s markets=%s market_families=%s statpal_family_coverage=%s",
+                    algo_run.id,
+                    summary.get("match_id"),
+                    market_count,
+                    family_counts,
+                    statpal_family_coverage,
+                )
                 algo_runner.clear_runtime_caches()
-            return {"fixture_id": fixture.id, "status": "scored", "market_count": market_count}
+            return {
+                "fixture_id": fixture.id,
+                "status": "scored",
+                "market_count": market_count,
+                "market_families": family_counts,
+                "statpal_market_family_coverage": statpal_family_coverage,
+            }
         except Exception as exc:
             fixture.status = AlgoFixture.Status.FAILED
             fixture.error = str(exc)[:2000]
@@ -2632,28 +3163,6 @@ class AlgoRunnerService:
             },
         )
         source_payload = self._cached_fixture_runner_payload(cached)
-        if not source_payload.get("aps_id"):
-            message = "api_football_fixture_id_required_for_on_demand_scoring"
-            algo_run.status = AlgoRun.Status.NO_DATA
-            algo_run.error = message
-            algo_run.finished_at = timezone.now()
-            run_result = dict(algo_run.result or {})
-            run_result.update({
-                "status": algo_run.status,
-                "total_scored": 0,
-                "market_count": 0,
-                "on_demand_match_id": match_id,
-                "error": message,
-            })
-            algo_run.result = run_result
-            algo_run.save(update_fields=["status", "error", "finished_at", "result", "updated_at"])
-            return {
-                "status": "failed",
-                "match_id": match_id,
-                "run_id": algo_run.id,
-                "target_date": target_date.isoformat(),
-                "error": message,
-            }
         fixture = AlgoFixture.objects.create(
             run=algo_run,
             match_date=target_date,
@@ -2697,6 +3206,7 @@ class AlgoRunnerService:
             "market_count": market_count,
             "on_demand_match_id": match_id,
             "on_demand_fixture_id": fixture.id,
+            "statpal_market_family_coverage": result.get("statpal_market_family_coverage") or {},
         })
         if result.get("error"):
             algo_run.error = str(result.get("error"))[:2000]
@@ -2718,6 +3228,7 @@ class AlgoRunnerService:
         picks = self._publish_selected_predictions(algo_run, bankroll)
         scored_count = AlgoFixture.objects.filter(run=algo_run, status=AlgoFixture.Status.SCORED).count()
         failed_count = AlgoFixture.objects.filter(run=algo_run, status=AlgoFixture.Status.FAILED).count()
+        predictions = list(MarketPrediction.objects.filter(run=algo_run).only("market", "insights"))
         aggregate = MarketPrediction.objects.filter(run=algo_run).aggregate(
             market_count=Count("id"),
             markets_70_plus=Count("id", filter=Q(confidence__gte=70)),
@@ -2743,6 +3254,11 @@ class AlgoRunnerService:
             "strategy_profile": result.get("strategy_profile", {}),
             "performance_profile": result.get("performance_profile", {}),
             "market_count": aggregate.get("market_count") or 0,
+            "market_family_counts": self._prediction_market_family_counts(predictions),
+            "statpal_market_family_coverage": self._prediction_statpal_family_coverage(predictions),
+            "top_pick_market_family_counts": self._pick_family_counts(picks),
+            "top_pick_optimization_counts": self._pick_optimization_counts(picks),
+            "daily_optimization_mode": self._daily_optimization_mode(),
             "markets_70_plus": aggregate.get("markets_70_plus") or 0,
             "markets_65_plus": aggregate.get("markets_65_plus") or 0,
             "fixture_count": scored_count,
@@ -2752,6 +3268,12 @@ class AlgoRunnerService:
             "bankroll": float(bankroll),
             "storage": self._run_storage_payload(),
         }
+        log.info(
+            "Daily run published run=%s market_families=%s statpal_family_coverage=%s",
+            algo_run.id,
+            algo_run.result.get("market_family_counts") or {},
+            algo_run.result.get("statpal_market_family_coverage") or {},
+        )
         algo_run.finished_at = timezone.now()
         algo_run.save()
         return algo_run
@@ -2801,8 +3323,17 @@ class AlgoRunnerService:
                 algo_runner.clear_runtime_caches()
                 algo_runner.log_memory("staged_start")
                 bankroll = algo_runner.get_bankroll(None)
-                fixtures = algo_runner.fetch_aps_fixtures(algo_run.target_date.isoformat())
-                fixtures = self._limit_fixtures(fixtures)
+                fixture_bundle = self._daily_runner_fixtures(algo_run.target_date)
+                fixtures = self._limit_fixtures(fixture_bundle.get("fixtures") or [])
+
+                log.info(
+                    "Daily fixture source run=%s source=%s fixtures=%s fallback=%s errors=%s",
+                    algo_run.id,
+                    fixture_bundle.get("source"),
+                    len(fixtures),
+                    fixture_bundle.get("fallback_used"),
+                    fixture_bundle.get("errors") or [],
+                )
 
                 algo_run.aps_fixtures = len(fixtures)
                 algo_run.fd_fixtures = 0
@@ -2819,6 +3350,10 @@ class AlgoRunnerService:
                         "status": AlgoRun.Status.REST_DAY,
                         "date": algo_run.target_date.isoformat(),
                         "picks_count": 0,
+                        "fixture_source": fixture_bundle.get("source"),
+                        "statpal_primary_enabled": self._statpal_primary_daily_enabled(),
+                        "statpal_fallback_used": fixture_bundle.get("fallback_used"),
+                        "statpal_fixture_errors": fixture_bundle.get("errors") or [],
                         "strategy_profile": strategy_profile,
                         "storage": {
                             "fixtures": "algo_algofixture",
@@ -2832,6 +3367,8 @@ class AlgoRunnerService:
                 market_count = 0
                 markets_70_plus = 0
                 markets_65_plus = 0
+                market_family_counts = defaultdict(int)
+                statpal_family_coverage = {}
                 for index, fixture in enumerate(fixtures, start=1):
                     try:
                         fixture = self._hydrate_statpal_scoring_context(fixture)
@@ -2841,6 +3378,14 @@ class AlgoRunnerService:
                             [confs],
                             [real_odds],
                         )[0]
+                        summary["source_payload"] = scored_fixture
+                        summary = self._enrich_fixture_statpal_diagnostics(summary)
+                        for family, count in self._market_family_counts(summary.get("markets") or []).items():
+                            market_family_counts[family] += count
+                        self._merge_market_family_statpal_coverage(
+                            statpal_family_coverage,
+                            (summary.get("insights") or {}).get("statpal_market_family_coverage") or {},
+                        )
                         self._persist_fixture_summary(algo_run, summary)
                         market_count += self._persist_fixture_market_predictions(algo_run, summary)
                         markets_70_plus += summary.get("markets_70_plus", 0)
@@ -2848,6 +3393,15 @@ class AlgoRunnerService:
                         scored_count += 1
                         if index % 10 == 0 or index == len(fixtures):
                             algo_runner.log_memory(f"staged_scored_{index}_of_{len(fixtures)}")
+                            log.info(
+                                "Daily scoring progress run=%s fixtures=%s/%s markets=%s market_families=%s statpal_family_coverage=%s",
+                                algo_run.id,
+                                index,
+                                len(fixtures),
+                                market_count,
+                                dict(sorted(market_family_counts.items())),
+                                self._finalize_market_family_statpal_coverage(statpal_family_coverage),
+                            )
                     except Exception as exc:
                         self._persist_failed_fixture(algo_run, fixture, exc)
 
@@ -2872,7 +3426,16 @@ class AlgoRunnerService:
                 "publish_policy": "staged_db_pipeline",
                 "strategy_profile": strategy_profile,
                 "performance_profile": performance_profile,
+                "fixture_source": fixture_bundle.get("source"),
+                "statpal_primary_enabled": self._statpal_primary_daily_enabled(),
+                "statpal_fallback_used": fixture_bundle.get("fallback_used"),
+                "statpal_fixture_errors": fixture_bundle.get("errors") or [],
                 "market_count": market_count,
+                "market_family_counts": dict(sorted(market_family_counts.items())),
+                "statpal_market_family_coverage": self._finalize_market_family_statpal_coverage(statpal_family_coverage),
+                "top_pick_market_family_counts": self._pick_family_counts(picks),
+                "top_pick_optimization_counts": self._pick_optimization_counts(picks),
+                "daily_optimization_mode": self._daily_optimization_mode(),
                 "markets_70_plus": markets_70_plus,
                 "markets_65_plus": markets_65_plus,
                 "fixture_count": scored_count,
@@ -3609,6 +4172,18 @@ class AlgoRunnerService:
             algo_run.value_gems = result.get("value_gems", 0)
             algo_run.wild_cards = result.get("wild_cards", 0)
             algo_run.bankroll = result.get("bankroll")
+            if result.get("fixture_summaries"):
+                result["fixture_summaries"] = [
+                    self._enrich_fixture_statpal_diagnostics(fixture)
+                    for fixture in result.get("fixture_summaries") or []
+                ]
+                aggregate = {}
+                for fixture in result["fixture_summaries"]:
+                    self._merge_market_family_statpal_coverage(
+                        aggregate,
+                        (fixture.get("insights") or {}).get("statpal_market_family_coverage") or {},
+                    )
+                result["statpal_market_family_coverage"] = self._finalize_market_family_statpal_coverage(aggregate)
             self._persist_selected_picks(algo_run, result)
             self._persist_fixtures(algo_run, result)
             self._persist_market_predictions(algo_run, result)

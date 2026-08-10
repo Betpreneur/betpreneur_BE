@@ -861,6 +861,7 @@ def _market_prediction_payload(prediction):
         fallback_confidence=prediction.confidence,
         fallback_tier=prediction.selected_pick.tier if prediction.selected_pick_id else "",
     )
+    insights = prediction.insights or {}
     return {
         "market": prediction.market,
         "meaning": prediction.meaning,
@@ -875,7 +876,12 @@ def _market_prediction_payload(prediction):
         "proven": False,
         "eligible": prediction.eligible,
         "risk_flags": prediction.risk_flags or [],
-        "insights": prediction.insights or {},
+        "bettor_view": insights.get("bettor_view") or {},
+        "analysis_summary": insights.get("summary", ""),
+        "analysis_conclusion": insights.get("conclusion", ""),
+        "positive_evidence": insights.get("positive_evidence") or [],
+        "risk_evidence": insights.get("risk_evidence") or [],
+        "insights": insights,
         "selected": prediction.published,
         "selected_pick_id": prediction.selected_pick_id,
         "selected_tier": _effective_pick_tier(prediction.selected_pick) if prediction.selected_pick_id else "",

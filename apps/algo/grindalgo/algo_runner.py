@@ -30,6 +30,18 @@ from reportlab.platypus import (
 )
 from googleapiclient.http import MediaFileUpload
 
+from apps.algo.daily_market_catalog import (
+    DAILY_MARKET_MEANINGS,
+    EXCLUDED_DAILY_MARKETS,
+    PROVEN_DAILY_MARKETS,
+    build_daily_market_scores,
+    daily_catalog_entry,
+    daily_evaluation_route,
+    daily_market_family_payload,
+    daily_odds_key_map,
+)
+from apps.algo.evaluators.registry import QUANTITATIVE
+
 log = logging.getLogger(__name__)
 WAT = timezone(timedelta(hours=1))
 
@@ -235,28 +247,13 @@ def tracked_leagues():
 def aps_track_all_leagues():
     return _env_bool("APS_TRACK_ALL_LEAGUES", False)
 
-MARKET_MEANINGS = {
-    "Home Win":"Home team to win","Away Win":"Away team to win",
-    "Draw":"Match ends in a draw",
-    "Over 1.5":"2 or more total goals","Under 1.5":"1 or 0 total goals",
-    "Over 2.5":"3 or more total goals","Under 2.5":"2 or fewer total goals",
-    "Under 3.5":"3 or fewer total goals","Over 3.5":"4 or more total goals",
-    "GG / BTTS Yes":"Both teams to score","GG + Over 2.5":"Both score & 3+ goals",
-    "DC: 12":"Home or Away win",
-    "DNB Home":"Home win (Draw = refund)","DNB Away":"Away win (Draw = refund)",
-    "Home CS":"Home team keeps clean sheet","Away CS":"Away team keeps clean sheet",
-    "AH Home +0.5":"Home win or draw (+0.5)","AH Away +0.5":"Away win or draw (+0.5)",
-    "First to Score H":"Home team scores first","First to Score A":"Away team scores first",
-}
-EXCLUDED_MARKETS = {"DC: 1X", "DC: X2"}
+MARKET_MEANINGS = DAILY_MARKET_MEANINGS
+EXCLUDED_MARKETS = EXCLUDED_DAILY_MARKETS
 
 def market_meaning(market):
-    if market.startswith("Corners Over "):
-        line = market.rsplit(" ", 1)[-1]
-        return f"Match to finish with more than {line} total corners"
-    if market.startswith("Corners Under "):
-        line = market.rsplit(" ", 1)[-1]
-        return f"Match to finish with fewer than {line} total corners"
+    entry = daily_catalog_entry(market)
+    if entry:
+        return entry.meaning
     return MARKET_MEANINGS.get(market, "")
 
 # ── HELPERS ───────────────────────────────────────────────────────
@@ -1303,11 +1300,13 @@ def score_fixture(hf, af, h2h, real_odds, api_preds=None, corner_profile=None, f
     fts_h = min(83,round(hf["avg_scored"]/ta*100*1.12+6))
     fts_a = min(50,max(10,round(af["avg_scored"]/ta*100*0.70-8)))
 
-    scores = {
+    under35 = min(90, 100 - round(o25 * 0.55))
+    o35 = max(5, 100 - under35)
+    score_values = {
         "Home Win":hc,"Away Win":ac,"Draw":draw_conf,
         "Over 1.5":o15,"Under 1.5":100-o15,
         "Over 2.5":o25,"Under 2.5":100-o25,
-        "Under 3.5":min(90,100-round(o25*0.55)),
+        "Over 3.5":o35,"Under 3.5":under35,
         "GG / BTTS Yes":gg,"GG + Over 2.5":round(gg*o25/100),
         "DC: 12":dc12,
         "DNB Home":hc,"DNB Away":ac,
@@ -1316,6 +1315,7 @@ def score_fixture(hf, af, h2h, real_odds, api_preds=None, corner_profile=None, f
         "AH Away +0.5":min(95,ac+draw_conf),
         "First to Score H":fts_h,"First to Score A":fts_a,
     }
+    scores = build_daily_market_scores(score_values)
     fixture_context["goal_model"] = {
         "expected_total": round(exp_total, 2),
         "draw_confidence": draw_conf,
@@ -1348,7 +1348,7 @@ def score_fixture(hf, af, h2h, real_odds, api_preds=None, corner_profile=None, f
             scores["Over 2.5"] = 100 - scores["Under 2.5"]
         scores["Over 2.5"] = min(scores["Over 2.5"], 62)
         scores["Under 3.5"] = min(92, scores["Under 3.5"] + 4)
-    scores.update(score_corner_markets(real_odds, corner_profile))
+    scores = build_daily_market_scores(scores, score_corner_markets(real_odds, corner_profile))
     return {market: value for market, value in scores.items() if market not in EXCLUDED_MARKETS}
 
 # ── API-FOOTBALL ODDS FETCH ───────────────────────────────────────
@@ -1465,7 +1465,7 @@ def get_api_football_odds(fixture_id):
     return odds
 
 # ── PICK SELECTOR ─────────────────────────────────────────────────
-PROVEN_MARKETS = {"First to Score H","Over 1.5","AH Home +0.5","Under 3.5","GG / BTTS Yes"}
+PROVEN_MARKETS = PROVEN_DAILY_MARKETS
 MARKET_THRESHOLDS = {
     "Home Win":64,"Away Win":85,"Draw":68,"Over 1.5":58,"Under 1.5":68,
     "Over 2.5":80,"Under 2.5":65,"Under 3.5":60,"Over 3.5":68,
@@ -1478,12 +1478,7 @@ MIN_ODDS=1.25; BANKER_MIN=80; VALUE_MIN=70; WILD_MIN=60
 # Scale targets: aim for 10–15 picks on a busy fixture day
 MAX_BANKERS=3; MAX_VALUE_GEMS=7; MAX_WILD_CARDS=10
 TARGET_MIN=10; TARGET_MAX=15
-ODDS_KEYS_MAP = {
-    "Home Win":"hw","Away Win":"aw","Draw":"d","Over 1.5":"o15",
-    "Under 1.5":"u15","Over 2.5":"o25","Under 2.5":"u25",
-    "Under 3.5":"u35","Over 3.5":"o35","GG / BTTS Yes":"btts_yes",
-    "DC: 12":"12",
-}
+ODDS_KEYS_MAP = daily_odds_key_map()
 
 def est_odds(c): return round(1/max(c/100,0.05)*1.05,2)
 
@@ -1996,6 +1991,9 @@ def passes_publish_gate(candidate):
         return False
     if candidate["market"] in EXCLUDED_MARKETS:
         return False
+    route = candidate.get("daily_evaluation_route") or daily_evaluation_route(candidate["market"])
+    if route.get("assessment_type") != QUANTITATIVE or not route.get("publishes_probability"):
+        return False
     if candidate["market"] == "DC: 12" and candidate["conf"] < VALUE_MIN:
         return False
     if candidate["market"].startswith("Corners ") and not corner_market_allowed(
@@ -2321,6 +2319,19 @@ def build_market_insights(market, confidence, odds, ev, risk_flags=None, fixture
     if confidence >= 80 and eligible and not avoid_reasons:
         strategy = "Strong pre-match candidate."
 
+    evidence = build_daily_market_evidence(
+        market,
+        confidence,
+        risk_flags=risk_flags,
+        fixture_context=fixture_context,
+        home_form=home_form,
+        away_form=away_form,
+        corner_profile=corner_profile,
+        odds=odds,
+        ev=ev,
+        eligible=eligible,
+    )
+
     return {
         "pre_match_strategy": strategy,
         "market_state": profile_data.get("state", "untracked"),
@@ -2328,8 +2339,221 @@ def build_market_insights(market, confidence, odds, ev, risk_flags=None, fixture
         "confidence_drivers": _compact_items(confidence_drivers),
         "risk_warnings": _compact_items(risk_flags, 10),
         "avoid_reason": "; ".join(_compact_items(avoid_reasons, 5)),
+        "evidence": evidence,
+        "positive_evidence": evidence["positive"],
+        "risk_evidence": evidence["risk"],
+        "summary": evidence["summary"],
+        "conclusion": evidence["conclusion"],
+        "bettor_view": evidence["bettor_view"],
         "league_trust": league_trust,
         "calibration_trust": calibration_trust,
+    }
+
+def confidence_label(confidence):
+    try:
+        confidence = float(confidence or 0)
+    except (TypeError, ValueError):
+        confidence = 0
+    if confidence >= 80:
+        return "Very strong"
+    if confidence >= 70:
+        return "Strong"
+    if confidence >= 60:
+        return "Good"
+    if confidence >= 50:
+        return "Borderline"
+    if confidence >= 40:
+        return "Low"
+    return "Very low"
+
+def _market_verdict(confidence, eligible):
+    try:
+        confidence = float(confidence or 0)
+    except (TypeError, ValueError):
+        confidence = 0
+    if confidence >= 70 and eligible:
+        return "strong"
+    if confidence >= 60:
+        return "playable"
+    if confidence >= 50:
+        return "caution"
+    return "risky"
+
+def _risk_level_from_confidence(confidence):
+    try:
+        confidence = float(confidence or 0)
+    except (TypeError, ValueError):
+        confidence = 0
+    if confidence >= 70:
+        return "low"
+    if confidence >= 55:
+        return "medium"
+    return "high"
+
+def _bettor_action(confidence, eligible):
+    verdict = _market_verdict(confidence, eligible)
+    if verdict == "strong":
+        return "recommend"
+    if verdict == "playable":
+        return "consider"
+    if verdict == "caution":
+        return "caution"
+    return "avoid"
+
+def _line_from_identity(identity):
+    try:
+        return float((identity or {}).get("line") or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+def build_daily_market_evidence(market, confidence, *, risk_flags=None, fixture_context=None, home_form=None, away_form=None, corner_profile=None, odds=None, ev=None, eligible=False):
+    route = daily_evaluation_route(market)
+    identity = daily_market_family_payload(market).get("market_identity") or {}
+    family = route.get("family") or "unknown"
+    side = str(identity.get("side") or identity.get("selection") or "").lower()
+    line = _line_from_identity(identity)
+    risk_flags = list(risk_flags or [])
+    fixture_context = fixture_context or {}
+    goal_model = fixture_context.get("goal_model") or {}
+    home_form = home_form or {}
+    away_form = away_form or {}
+    positive = []
+    risk = []
+
+    home_name = fixture_context.get("home_team") or "Home team"
+    away_name = fixture_context.get("away_team") or "Away team"
+    expected_total = goal_model.get("expected_total")
+    draw_confidence = goal_model.get("draw_confidence")
+
+    if family in {"match_result", "draw_no_bet", "double_chance", "asian_handicap", "handicap"}:
+        if home_form.get("games"):
+            _append_unique(
+                positive,
+                f"{home_name} recent home profile: {home_form.get('wins', 0)} wins, {home_form.get('draws', 0)} draws and {home_form.get('losses', 0)} losses from {home_form.get('games')} matches.",
+            )
+            _append_unique(
+                positive,
+                f"{home_name} average {home_form.get('avg_scored', 0)} goals scored and {home_form.get('avg_conceded', 0)} conceded in the recent sample.",
+            )
+        if away_form.get("games"):
+            _append_unique(
+                positive,
+                f"{away_name} recent away profile: {away_form.get('wins', 0)} wins, {away_form.get('draws', 0)} draws and {away_form.get('losses', 0)} losses from {away_form.get('games')} matches.",
+            )
+            _append_unique(
+                positive,
+                f"{away_name} average {away_form.get('avg_scored', 0)} goals scored and {away_form.get('avg_conceded', 0)} conceded in the recent sample.",
+            )
+        if draw_confidence is not None and family == "double_chance":
+            _append_unique(
+                risk if str(identity.get("canonical")) == "DC: 12" else positive,
+                f"The draw confidence is around {draw_confidence}%, which matters for double-chance markets.",
+            )
+
+    if family in {"total_goals", "total_btts", "btts"}:
+        if expected_total is not None:
+            _append_unique(positive, f"The goal model projects about {expected_total} total goals.")
+            if line and abs(float(expected_total) - line) <= 0.25:
+                _append_unique(risk, f"The expected-goals total is very close to the {line:g} line.")
+        if home_form.get("games"):
+            _append_unique(positive, f"{home_name} over 2.5 rate is {home_form.get('over25_rate', 0)}% in the recent sample.")
+            _append_unique(positive, f"{home_name} BTTS rate is {home_form.get('btts_rate', 0)}%.")
+        if away_form.get("games"):
+            _append_unique(positive, f"{away_name} over 2.5 rate is {away_form.get('over25_rate', 0)}% in the recent sample.")
+            _append_unique(positive, f"{away_name} BTTS rate is {away_form.get('btts_rate', 0)}%.")
+        if family in {"btts", "total_btts"} and (
+            float(home_form.get("avg_scored") or 0) < 1.0 or float(away_form.get("avg_scored") or 0) < 1.0
+        ):
+            _append_unique(risk, "One side's recent scoring average is below one goal per match.")
+
+    if family == "clean_sheet":
+        team_form = home_form if side == "home" else away_form if side == "away" else {}
+        opponent_form = away_form if side == "home" else home_form if side == "away" else {}
+        team_name = home_name if side == "home" else away_name if side == "away" else "Selected team"
+        opponent_name = away_name if side == "home" else home_name if side == "away" else "Opponent"
+        if team_form.get("games"):
+            _append_unique(positive, f"{team_name} kept {team_form.get('clean_sheets', 0)} clean sheets in {team_form.get('games')} recent matches.")
+        if opponent_form.get("games"):
+            _append_unique(risk, f"{opponent_name} average {opponent_form.get('avg_scored', 0)} goals scored in the recent sample.")
+
+    if family == "first_to_score":
+        if home_form.get("games") and away_form.get("games"):
+            _append_unique(positive, f"{home_name} average {home_form.get('avg_scored', 0)} goals scored; {away_name} average {away_form.get('avg_scored', 0)}.")
+            _append_unique(risk, "First-to-score remains sensitive to match tempo and early chances.")
+
+    if family == "corners_total":
+        profile = corner_profile or {}
+        if profile.get("expected_total") is not None:
+            _append_unique(positive, f"The corner model projects about {profile.get('expected_total')} total corners.")
+            if line and abs(float(profile.get("expected_total") or 0) - line) <= 0.75:
+                _append_unique(risk, f"The projected corner total is close to the {line:g} line.")
+        home_corners = profile.get("home") or {}
+        away_corners = profile.get("away") or {}
+        if home_corners:
+            _append_unique(positive, f"{home_name} corner profile: {home_corners.get('avg_for', 'unknown')} for and {home_corners.get('avg_against', 'unknown')} against.")
+        if away_corners:
+            _append_unique(positive, f"{away_name} corner profile: {away_corners.get('avg_for', 'unknown')} for and {away_corners.get('avg_against', 'unknown')} against.")
+
+    if ev is not None and odds:
+        if ev > 0:
+            _append_unique(positive, f"The price has positive model value at odds {odds}.")
+        elif ev < 0:
+            _append_unique(risk, f"The price does not offer positive model value at odds {odds}.")
+
+    for flag in risk_flags:
+        if flag in {"goal_line_boundary", "draw_boundary_risk", "under35_blowout_risk", "nordic_under_volatility", "thin_edge", "wide_odds_market", "best_price_far_above_consensus"}:
+            _append_unique(risk, flag.replace("_", " "))
+
+    if not positive:
+        _append_unique(positive, "The market is recognised and routed through the daily evaluator registry.")
+    if not risk and confidence < 60:
+        _append_unique(risk, "The confidence score is not high enough to treat this as a strong pick.")
+    if not risk and not eligible:
+        _append_unique(risk, "This market did not pass the daily publish gate.")
+
+    label = confidence_label(confidence)
+    verdict = _market_verdict(confidence, eligible)
+    if verdict == "strong":
+        summary = f"The available match data supports {market}."
+        conclusion = "This is a strong daily candidate if the price remains acceptable."
+    elif verdict == "playable":
+        summary = f"The available match data gives {market} playable support."
+        conclusion = "This market is usable, but it should still be compared with stronger fixture options."
+    elif verdict == "caution":
+        summary = f"{market} is possible, but the support is borderline."
+        conclusion = "Treat this market carefully; the evidence is not strong enough for a confident top pick."
+    else:
+        summary = f"The available match data does not strongly support {market}."
+        conclusion = "Avoid publishing this market unless no stronger alternatives exist."
+
+    confidence_score = round(float(confidence or 0), 1)
+    bettor_view = {
+        "market": market,
+        "confidence_score": confidence_score,
+        "confidence_label": label,
+        "risk_level": _risk_level_from_confidence(confidence),
+        "verdict": verdict,
+        "action": _bettor_action(confidence, eligible),
+        "summary": summary,
+        "positive_evidence": _compact_items(positive, 5),
+        "risk_evidence": _compact_items(risk, 5),
+        "conclusion": conclusion,
+    }
+
+    return {
+        "summary": summary,
+        "positive": bettor_view["positive_evidence"],
+        "risk": bettor_view["risk_evidence"],
+        "conclusion": conclusion,
+        "confidence_score": confidence_score,
+        "confidence_label": label,
+        "risk_level": bettor_view["risk_level"],
+        "verdict": verdict,
+        "action": bettor_view["action"],
+        "market_family": family,
+        "evaluation_engine": route.get("engine", ""),
+        "assessment_type": route.get("assessment_type", ""),
+        "bettor_view": bettor_view,
     }
 
 def _market_evidence(pick):
@@ -2480,10 +2704,15 @@ def _deepseek_explanation_payload(model, compact_picks):
                     "For every input item, return the same index with:\n"
                     "- reasoning: 2-3 short sentences. Explain the football logic first, then mention confidence/odds/EV, then name the key risk if there is one.\n"
                     "- model_verdict: 1 direct sentence that tells the user how to treat the pick, without hype.\n"
+                    "- summary: 1 short sentence saying whether the statistics support this exact market.\n"
+                    "- positive_evidence: 2-4 short bullets from the supplied data that support the pick.\n"
+                    "- risk_evidence: 1-3 short bullets from the supplied data that explain caution/risk.\n"
+                    "- conclusion: 1 direct sentence telling the bettor whether to recommend, consider, or avoid this market.\n"
                     "Avoid generic phrases like 'the model prefers this market from the available fixture markets'. "
                     "Avoid listing raw stats without interpretation. If the data is thin, say so naturally.\n"
                     "Return JSON shaped exactly as: "
-                    '{"picks":[{"index":0,"reasoning":"...","model_verdict":"..."}]}.\n'
+                    '{"picks":[{"index":0,"reasoning":"...","model_verdict":"...",'
+                    '"summary":"...","positive_evidence":["..."],"risk_evidence":["..."],"conclusion":"..."}]}.\n'
                     f"Data:\n{json.dumps(compact_picks, ensure_ascii=True)}"
                 ),
             },
@@ -2526,9 +2755,19 @@ def _generated_explanations_from_content(content, expected_count=0):
         if len(reasoning) < 40 or len(verdict) < 10:
             skipped += 1
             continue
+        positive_evidence = item.get("positive_evidence") or item.get("supporting_evidence") or []
+        risk_evidence = item.get("risk_evidence") or item.get("risks") or []
+        if not isinstance(positive_evidence, list):
+            positive_evidence = [str(positive_evidence)]
+        if not isinstance(risk_evidence, list):
+            risk_evidence = [str(risk_evidence)]
         generated_by_index[index] = {
             "reasoning": reasoning[:900],
             "model_verdict": verdict[:280],
+            "summary": str(item.get("summary") or "").strip()[:240],
+            "positive_evidence": _compact_items([str(value).strip() for value in positive_evidence], 4),
+            "risk_evidence": _compact_items([str(value).strip() for value in risk_evidence], 3),
+            "conclusion": str(item.get("conclusion") or "").strip()[:280],
         }
     if skipped or (expected_count and len(generated_by_index) != expected_count):
         log.info(
@@ -2645,6 +2884,31 @@ def enhance_pick_explanations_with_llm(picks):
             continue
         pick["reasoning"] = generated["reasoning"]
         pick["model_verdict"] = generated["model_verdict"]
+        insights = dict(pick.get("insights") or {})
+        bettor_view = dict(insights.get("bettor_view") or {})
+        evidence = dict(insights.get("evidence") or {})
+        if generated.get("summary"):
+            bettor_view["summary"] = generated["summary"]
+            evidence["summary"] = generated["summary"]
+            insights["summary"] = generated["summary"]
+        if generated.get("positive_evidence"):
+            bettor_view["positive_evidence"] = generated["positive_evidence"]
+            evidence["positive"] = generated["positive_evidence"]
+            insights["positive_evidence"] = generated["positive_evidence"]
+        if generated.get("risk_evidence"):
+            bettor_view["risk_evidence"] = generated["risk_evidence"]
+            evidence["risk"] = generated["risk_evidence"]
+            insights["risk_evidence"] = generated["risk_evidence"]
+        if generated.get("conclusion"):
+            bettor_view["conclusion"] = generated["conclusion"]
+            evidence["conclusion"] = generated["conclusion"]
+            insights["conclusion"] = generated["conclusion"]
+        if bettor_view:
+            insights["bettor_view"] = bettor_view
+        if evidence:
+            insights["evidence"] = evidence
+        if insights:
+            pick["insights"] = insights
         updated += 1
     log.info("LLM pick explanations updated %s/%s selected picks", updated, len(picks))
 
@@ -2867,6 +3131,8 @@ def serialize_fixture_markets(confs, real_odds=None, league=None, corner_profile
     profile = load_performance_profile()
     strategy = load_strategy_profile()
     for market, confidence in sorted(confs.items(), key=lambda item: item[1], reverse=True):
+        market_family = daily_market_family_payload(market)
+        evaluation_route = daily_evaluation_route(market)
         key = ODDS_KEYS_MAP.get(market)
         real_odd = (real_odds.get(key) if key else None) or real_odds.get(market)
         odds_meta = ((real_odds.get("_meta") or {}).get(key) if key else None) or (real_odds.get("_meta") or {}).get(market) or {}
@@ -2910,11 +3176,40 @@ def serialize_fixture_markets(confs, real_odds=None, league=None, corner_profile
             "league": league or "",
             "country": (fixture_context or {}).get("country", ""),
             "risk_flags": risk_flags,
+            "daily_evaluation_route": evaluation_route,
         }
         eligible = passes_publish_gate(gate_candidate)
+        insights = build_market_insights(
+            market,
+            calibrated_confidence,
+            odds,
+            ev,
+            risk_flags,
+            fixture_context or {},
+            home_recent_form or {},
+            away_recent_form or {},
+            corner_profile or {},
+            profile_data,
+            eligible=eligible,
+            league_trust=build_league_market_trust(league_profile_data, market_profile_data),
+            calibration_trust=build_calibration_trust(confidence_band_data),
+        )
+        insights["market_family"] = market_family["market_family"]
+        insights["market_category"] = market_family["market_category"]
+        insights["assessment_type"] = market_family["assessment_type"]
+        insights["evaluation_engine"] = market_family["evaluation_engine"]
+        insights["market_identity"] = market_family["market_identity"]
+        insights["market_support_level"] = market_family["market_support_level"]
+        insights["market_core_supported"] = market_family["market_core_supported"]
+        insights["publishes_probability"] = market_family["publishes_probability"]
+        insights["required_capabilities"] = market_family["required_capabilities"]
+        insights["optional_capabilities"] = market_family["optional_capabilities"]
+        insights["daily_evaluation_route"] = evaluation_route
         markets.append({
             "market": market,
             "meaning": market_meaning(market),
+            **market_family,
+            "daily_evaluation_route": evaluation_route,
             "raw_confidence": confidence,
             "confidence": calibrated_confidence,
             "odds": odds,
@@ -2924,21 +3219,12 @@ def serialize_fixture_markets(confs, real_odds=None, league=None, corner_profile
             "proven": market in PROVEN_MARKETS,
             "eligible": eligible,
             "risk_flags": risk_flags,
-            "insights": build_market_insights(
-                market,
-                calibrated_confidence,
-                odds,
-                ev,
-                risk_flags,
-                fixture_context or {},
-                home_recent_form or {},
-                away_recent_form or {},
-                corner_profile or {},
-                profile_data,
-                eligible=eligible,
-                league_trust=build_league_market_trust(league_profile_data, market_profile_data),
-                calibration_trust=build_calibration_trust(confidence_band_data),
-            ),
+            "bettor_view": insights["bettor_view"],
+            "analysis_summary": insights["summary"],
+            "analysis_conclusion": insights["conclusion"],
+            "positive_evidence": insights["positive_evidence"],
+            "risk_evidence": insights["risk_evidence"],
+            "insights": insights,
         })
     return markets
 
@@ -2950,6 +3236,8 @@ def serialize_fixture_summaries(scored_fxs, all_confs, odds_list=None):
             **(fx.get("fixture_context", {}) or {}),
             "country": fx.get("country", ""),
             "league": fx.get("league", ""),
+            "home_team": fx.get("hname", ""),
+            "away_team": fx.get("aname", ""),
         }
         summaries.append({
             "fixture": fx.get("fixture", ""),
@@ -2989,7 +3277,9 @@ def serialize_fixture_summaries(scored_fxs, all_confs, odds_list=None):
 
 
 def score_aps_fixture_for_pipeline(fx):
-    pred_data = fetch_prediction_data(fx["aps_id"])
+    aps_id = fx.get("aps_id")
+    has_api_football_fixture = bool(aps_id)
+    pred_data = fetch_prediction_data(aps_id) if has_api_football_fixture else None
     if pred_data:
         teams_data = pred_data.get("teams",{})
         comparison = pred_data.get("comparison",{})
@@ -3010,11 +3300,15 @@ def score_aps_fixture_for_pipeline(fx):
         af["defence_str"] = _percent_to_ratio(a_comp.get("def"), af.get("defence_str", 0.5))
         h2h = parse_aps_h2h(pred_data.get("h2h",[]),fx["hname"])
     else:
-        hf=fetch_team_recent_form(fx.get("hid"), venue="home") or fetch_team_recent_form(fx.get("hid")) or _default_form()
-        af=fetch_team_recent_form(fx.get("aid"), venue="away") or fetch_team_recent_form(fx.get("aid")) or _default_form()
-        strength = league_strength_factor(fx)
-        hf = apply_league_strength(hf, strength)
-        af = apply_league_strength(af, strength)
+        if has_api_football_fixture:
+            hf=fetch_team_recent_form(fx.get("hid"), venue="home") or fetch_team_recent_form(fx.get("hid")) or _default_form()
+            af=fetch_team_recent_form(fx.get("aid"), venue="away") or fetch_team_recent_form(fx.get("aid")) or _default_form()
+            strength = league_strength_factor(fx)
+            hf = apply_league_strength(hf, strength)
+            af = apply_league_strength(af, strength)
+        else:
+            hf = _default_form()
+            af = _default_form()
         h2h = parse_aps_h2h([], fx["hname"])
     fx["home_recent_form"] = recent_form_summary(hf)
     fx["away_recent_form"] = recent_form_summary(af)
@@ -3026,13 +3320,27 @@ def score_aps_fixture_for_pipeline(fx):
     context_flags = set(fixture_context.get("flags") or [])
     context_flags.add("h2h_available" if int(h2h.get("games") or 0) >= 2 else "h2h_unavailable")
     context_flags.update(statpal_context.get("flags") or [])
+    if not has_api_football_fixture:
+        context_flags.add("api_football_fixture_unavailable")
+        context_flags.add("statpal_fixture_source")
     fixture_context["flags"] = sorted(context_flags)
-    team_news = fetch_fixture_team_news(fx.get("aps_id"), fx.get("hid"), fx.get("aid"))
+    team_news = (
+        fetch_fixture_team_news(aps_id, fx.get("hid"), fx.get("aid"))
+        if has_api_football_fixture
+        else {
+            "available": False,
+            "injuries_available": False,
+            "lineups_available": False,
+            "home": {"injuries": 0},
+            "away": {"injuries": 0},
+            "flags": ["api_football_fixture_unavailable"],
+        }
+    )
     fx["fixture_context"] = fixture_context
     fx["team_news"] = team_news
-    real_odds = get_api_football_odds(fx["aps_id"])
+    real_odds = get_api_football_odds(aps_id) if has_api_football_fixture else {}
     corner_odds_available = any(key.startswith("Corners ") for key in real_odds)
-    corner_profile = build_corner_profile(fx) if corner_odds_available else {}
+    corner_profile = build_corner_profile(fx) if has_api_football_fixture and corner_odds_available else {}
     fx["corner_profile"] = corner_profile
     confs = score_fixture(
         hf,
