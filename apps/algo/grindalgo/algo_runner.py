@@ -384,6 +384,285 @@ def _default_form():
             "games":10,"scope":"overall","last_played":"","streak":0,"attack_str":0.5,"defence_str":0.5,
             "scoreline_profile":_scoreline_profile([])}
 
+def _empty_form(source="unavailable"):
+    return {"wins":0,"draws":0,"losses":0,"form":"",
+            "avg_scored":0.0,"avg_conceded":0.0,
+            "btts_count":0,"over25_count":0,"clean_sheets":0,
+            "games":0,"scope":source,"last_played":"","streak":0,"attack_str":0.5,"defence_str":0.5,
+            "scoreline_profile":_scoreline_profile([])}
+
+def _statpal_team_form(team_summary, *, source="statpal_team_stats"):
+    team_summary = team_summary or {}
+    sample_size = int(team_summary.get("sample_size") or 0)
+    avg_for = _num(team_summary.get("avg_goals_for"))
+    avg_against = _num(team_summary.get("avg_goals_against"))
+    if sample_size <= 0 or avg_for is None or avg_against is None:
+        return None
+    clean_sheets = int(team_summary.get("clean_sheets") or 0)
+    failed_to_score = int(team_summary.get("failed_to_score") or 0)
+    avg_total = _num(team_summary.get("avg_total_goals"))
+    over25_count = round(sample_size * 0.5)
+    if avg_total is not None:
+        over25_count = round(sample_size * max(0.0, min(0.85, (avg_total - 1.5) / 3.0)))
+    btts_count = round(sample_size * max(0.0, min(0.9, min(avg_for, 1.0) * min(avg_against, 1.0))))
+    return {
+        "wins": 0,
+        "draws": 0,
+        "losses": 0,
+        "form": "",
+        "avg_scored": round(avg_for, 2),
+        "avg_conceded": round(avg_against, 2),
+        "btts_count": btts_count,
+        "over25_count": over25_count,
+        "clean_sheets": clean_sheets,
+        "failed_to_score": failed_to_score,
+        "games": sample_size,
+        "scope": source,
+        "last_played": "",
+        "streak": 0,
+        "attack_str": 0.5,
+        "defence_str": 0.5,
+        "scoreline_profile": _scoreline_profile([]),
+    }
+
+def _statpal_xg_forms(statpal_context):
+    statpal_context = statpal_context or {}
+    predictions = statpal_context.get("predictions") or {}
+    detailed = statpal_context.get("detailed_stats") or {}
+    home_xg = _num(detailed.get("home_xg")) or _num(predictions.get("home_xg"))
+    away_xg = _num(detailed.get("away_xg")) or _num(predictions.get("away_xg"))
+    if home_xg is None or away_xg is None:
+        return None, None
+    if not (0.1 <= home_xg <= 5.5 and 0.1 <= away_xg <= 5.5):
+        return None, None
+    home = _empty_form("statpal_fixture_xg")
+    away = _empty_form("statpal_fixture_xg")
+    home.update({"avg_scored": round(home_xg, 2), "avg_conceded": round(away_xg, 2), "games": 1})
+    away.update({"avg_scored": round(away_xg, 2), "avg_conceded": round(home_xg, 2), "games": 1})
+    return home, away
+
+def _statpal_forms(statpal_context):
+    team_stats = (statpal_context or {}).get("team_stats") or {}
+    home = _statpal_team_form(team_stats.get("home") or {})
+    away = _statpal_team_form(team_stats.get("away") or {})
+    if home and away:
+        return home, away
+    return _statpal_xg_forms(statpal_context)
+
+def _statpal_real_odds(statpal_context):
+    prematch = (statpal_context or {}).get("prematch_odds") or {}
+    odds = {}
+    mapping = {
+        "home_odds": "hw",
+        "draw_odds": "d",
+        "away_odds": "aw",
+        "over15_odds": "o15",
+        "under15_odds": "u15",
+        "over25_odds": "o25",
+        "under25_odds": "u25",
+        "over35_odds": "o35",
+        "under35_odds": "u35",
+        "btts_yes_odds": "btts_yes",
+        "btts_no_odds": "btts_no",
+        "double_chance_12_odds": "12",
+    }
+    for source_key, odds_key in mapping.items():
+        value = prematch.get(source_key)
+        if value:
+            _remember_odd(odds, odds_key, value)
+    return _finalize_odds_meta(odds)
+
+def _statpal_league_rows(statpal_context, snapshot_type):
+    snapshot = ((statpal_context or {}).get("snapshots") or {}).get(snapshot_type) or {}
+    payload = snapshot.get("payload") if isinstance(snapshot, dict) else {}
+    rows = (payload or {}).get("standings" if snapshot_type == "league_standings" else "players") or []
+    return rows if isinstance(rows, list) else []
+
+def _statpal_standing_row(statpal_context, team_id):
+    team_id = str(team_id or "").strip()
+    if not team_id:
+        return {}
+    for row in _statpal_league_rows(statpal_context, "league_standings"):
+        if isinstance(row, dict) and str(row.get("team_id") or "").strip() == team_id:
+            return row
+    return {}
+
+def _standing_context(row, total_teams):
+    if not row:
+        return {}
+    return {
+        "rank": row.get("position"),
+        "points": row.get("points"),
+        "total": total_teams,
+        "team_id": row.get("team_id") or "",
+        "team_name": row.get("team_name") or "",
+        "goal_difference": row.get("goal_difference"),
+        "recent_form": row.get("recent_form") or "",
+        "description": row.get("description") or "",
+        "overall": row.get("overall") or {},
+        "home": row.get("home") or {},
+        "away": row.get("away") or {},
+    }
+
+def _apply_statpal_standings_context(fixture_context, statpal_context, fx):
+    rows = _statpal_league_rows(statpal_context, "league_standings")
+    if not rows:
+        return fixture_context
+    fixture_context = dict(fixture_context or {})
+    flags = set(fixture_context.get("flags") or [])
+    home_row = _statpal_standing_row(statpal_context, fx.get("hid") or fx.get("statpal_home_team_id"))
+    away_row = _statpal_standing_row(statpal_context, fx.get("aid") or fx.get("statpal_away_team_id"))
+    total = len({str(row.get("team_id") or "") for row in rows if isinstance(row, dict) and row.get("team_id")})
+    if home_row:
+        fixture_context["home_standing"] = _standing_context(home_row, total)
+        flags.add("statpal_standings_context")
+    if away_row:
+        fixture_context["away_standing"] = _standing_context(away_row, total)
+        flags.add("statpal_standings_context")
+
+    for label, row in (("home", home_row), ("away", away_row)):
+        rank = int(row.get("position") or 0) if row else 0
+        if rank and total:
+            if rank <= 4:
+                flags.add(f"{label}_top_table")
+            if rank >= max(total - 3, 1):
+                flags.add(f"{label}_relegation_zone")
+    if home_row and away_row and total:
+        home_rank = int(home_row.get("position") or 0)
+        away_rank = int(away_row.get("position") or 0)
+        if total * 0.35 < home_rank < total * 0.75 and total * 0.35 < away_rank < total * 0.75:
+            flags.add("mid_table_context")
+    fixture_context["flags"] = sorted(flags)
+    return fixture_context
+
+def _statpal_league_stats_summary(statpal_context, team_id):
+    team_id = str(team_id or "").strip()
+    if not team_id:
+        return {}
+    summary = (statpal_context or {}).get("league_stats") or {}
+    for item in summary.get("team_summaries") or []:
+        if isinstance(item, dict) and str(item.get("team_id") or "").strip() == team_id:
+            return item
+    players = _statpal_league_rows(statpal_context, "league_stats")
+    rows = [row for row in players if isinstance(row, dict) and str(row.get("team_id") or "").strip() == team_id]
+    if not rows:
+        return {}
+    stat_fields = ("appearances", "minutes_played", "goals", "assists", "shots_total", "shots_on", "yellowcards", "redcards", "saves", "rating")
+    return {
+        "team_id": team_id,
+        "team_name": rows[0].get("team_name") or "",
+        "venue": rows[0].get("venue") or {},
+        "coach": rows[0].get("coach") or {},
+        "squad_count": len(rows),
+        "injured_count": sum(1 for row in rows if row.get("injured")),
+        "populated_player_stat_count": sum(1 for row in rows if any(row.get(field) not in (None, "") for field in stat_fields)),
+    }
+
+def _apply_statpal_league_stats_context(fixture_context, statpal_context, fx):
+    home = _statpal_league_stats_summary(statpal_context, fx.get("hid") or fx.get("statpal_home_team_id"))
+    away = _statpal_league_stats_summary(statpal_context, fx.get("aid") or fx.get("statpal_away_team_id"))
+    if not home and not away:
+        return fixture_context
+    fixture_context = dict(fixture_context or {})
+    flags = set(fixture_context.get("flags") or [])
+    flags.add("statpal_league_stats_context")
+    if home:
+        fixture_context["home_league_stats"] = home
+        if int(home.get("injured_count") or 0) >= 3:
+            flags.add("home_squad_injury_risk")
+    if away:
+        fixture_context["away_league_stats"] = away
+        if int(away.get("injured_count") or 0) >= 3:
+            flags.add("away_squad_injury_risk")
+    if not any(int(item.get("populated_player_stat_count") or 0) for item in (home, away) if item):
+        flags.add("statpal_league_player_stats_unpopulated")
+    fixture_context["flags"] = sorted(flags)
+    return fixture_context
+
+def _statpal_h2h(statpal_context, fx):
+    h2h_payload = (((statpal_context or {}).get("snapshots") or {}).get("head_to_head") or {}).get("payload") or {}
+    h2h_summary = (statpal_context or {}).get("head_to_head") or {}
+    if not h2h_payload and not h2h_summary:
+        return parse_aps_h2h([], (fx or {}).get("hname", ""))
+
+    home_id = str((fx or {}).get("hid") or (fx or {}).get("statpal_home_team_id") or "").strip()
+    away_id = str((fx or {}).get("aid") or (fx or {}).get("statpal_away_team_id") or "").strip()
+    team1_id = str(h2h_payload.get("team1_id") or h2h_summary.get("team1_id") or "").strip()
+    team2_id = str(h2h_payload.get("team2_id") or h2h_summary.get("team2_id") or "").strip()
+    total = ((h2h_payload.get("overall_record") or {}).get("total") or {}) if isinstance(h2h_payload, dict) else {}
+    goals = ((h2h_payload.get("goals") or {}).get("total") or {}) if isinstance(h2h_payload, dict) else {}
+
+    games = int(total.get("games") or h2h_summary.get("games") or 0)
+    if games <= 0:
+        return parse_aps_h2h([], (fx or {}).get("hname", ""))
+    team1_won = int(total.get("team1_won") or h2h_summary.get("team1_won") or 0)
+    team2_won = int(total.get("team2_won") or h2h_summary.get("team2_won") or 0)
+    draws = int(total.get("draws") or h2h_summary.get("draws") or 0)
+    team1_scored = float(goals.get("team1_scored") or h2h_summary.get("team1_scored") or 0)
+    team2_scored = float(goals.get("team2_scored") or h2h_summary.get("team2_scored") or 0)
+
+    home_is_team1 = bool(home_id and team1_id and home_id == team1_id)
+    home_is_team2 = bool(home_id and team2_id and home_id == team2_id)
+    if home_is_team1:
+        t1w, t2w = team1_won, team2_won
+    elif home_is_team2:
+        t1w, t2w = team2_won, team1_won
+    else:
+        t1w, t2w = team1_won, team2_won
+
+    recent = h2h_payload.get("recent_meetings") if isinstance(h2h_payload, dict) else []
+    score_samples = []
+    o25 = u25 = u35 = btts = goals_total = 0
+    for match in recent or []:
+        if not isinstance(match, dict):
+            continue
+        s1 = match.get("team1_score")
+        s2 = match.get("team2_score")
+        if s1 is None or s2 is None:
+            continue
+        s1 = int(s1)
+        s2 = int(s2)
+        total_goals = s1 + s2
+        goals_total += total_goals
+        if total_goals > 2:
+            o25 += 1
+        if total_goals < 3:
+            u25 += 1
+        if total_goals < 4:
+            u35 += 1
+        if s1 > 0 and s2 > 0:
+            btts += 1
+        match_team1 = str(match.get("team1_id") or "").strip()
+        match_team2 = str(match.get("team2_id") or "").strip()
+        if home_id and home_id == match_team1:
+            scored, conceded = s1, s2
+        elif home_id and home_id == match_team2:
+            scored, conceded = s2, s1
+        elif home_is_team2:
+            scored, conceded = s2, s1
+        else:
+            scored, conceded = s1, s2
+        score_samples.append({"scored": scored, "conceded": conceded})
+
+    rate_games = len(score_samples) or games
+    if not score_samples and games:
+        goals_total = team1_scored + team2_scored
+    return {
+        "games": games,
+        "t1w": t1w,
+        "t2w": t2w,
+        "draws": draws,
+        "o25": o25,
+        "u25": u25,
+        "u35": u35,
+        "btts": btts,
+        "avg_goals": round(goals_total / rate_games, 2) if rate_games else 0.0,
+        "scoreline_profile": _scoreline_profile(score_samples),
+        "source": "statpal_head_to_head",
+        "team1_id": team1_id,
+        "team2_id": team2_id,
+    }
+
 def _percent_to_ratio(value, default=0.5):
     try:
         return float(str(value).replace("%", "")) / 100
@@ -852,6 +1131,97 @@ def fetch_fixture_team_news(fixture_id, home_id=None, away_id=None):
     _injuries_cache[fixture_id] = news
     return news
 
+
+def _statpal_team_news(statpal_context):
+    snapshots = (statpal_context or {}).get("snapshots") or {}
+    lineups = (statpal_context or {}).get("lineups") or {}
+    injuries = (statpal_context or {}).get("injuries_suspensions") or {}
+    team_stats = (statpal_context or {}).get("team_stats") or {}
+    lineup_payload = ((snapshots.get("lineups") or {}).get("payload") or {})
+
+    news = {
+        "available": False,
+        "injuries_available": False,
+        "lineups_available": False,
+        "home": {"injuries": 0},
+        "away": {"injuries": 0},
+        "flags": ["api_football_fixture_unavailable"],
+    }
+
+    if injuries:
+        home_injury_context = injuries.get("home") or {}
+        away_injury_context = injuries.get("away") or {}
+        home_injuries = int((home_injury_context.get("to_miss_count") or 0) or 0)
+        away_injuries = int((away_injury_context.get("to_miss_count") or 0) or 0)
+        news["available"] = True
+        news["injuries_available"] = True
+        news["home"]["injuries"] = home_injuries
+        news["away"]["injuries"] = away_injuries
+        news["home"]["questionable_count"] = int((home_injury_context.get("questionable_count") or 0) or 0)
+        news["away"]["questionable_count"] = int((away_injury_context.get("questionable_count") or 0) or 0)
+        news["home"]["to_miss"] = home_injury_context.get("to_miss") or []
+        news["away"]["to_miss"] = away_injury_context.get("to_miss") or []
+        news["home"]["questionable"] = home_injury_context.get("questionable") or []
+        news["away"]["questionable"] = away_injury_context.get("questionable") or []
+        news["home"]["availability_risk"] = home_injury_context.get("availability_risk") or "low"
+        news["away"]["availability_risk"] = away_injury_context.get("availability_risk") or "low"
+        total_absences = home_injuries + away_injuries
+        if total_absences >= 5:
+            news["flags"].append("team_news_heavy_absences")
+        elif total_absences >= 2:
+            news["flags"].append("team_news_absences")
+
+    if lineups:
+        news["available"] = True
+        news["lineups_available"] = True
+        news["flags"].append("statpal_lineups_available")
+        lineup_status = str(lineups.get("status") or "").strip().lower()
+        if lineup_status:
+            news["lineup_status"] = lineup_status
+            if lineup_status == "projected":
+                news["flags"].append("statpal_projected_lineups")
+            elif lineup_status == "confirmed":
+                news["flags"].append("statpal_confirmed_lineups")
+
+        for side in ("home", "away"):
+            side_payload = (lineup_payload.get(side) or {}) if isinstance(lineup_payload, dict) else {}
+            news[side].update(
+                {
+                    "formation": lineups.get(f"{side}_formation") or side_payload.get("formation", ""),
+                    "starter_count": int((side_payload.get("starting_count") or 0) or 0),
+                    "substitute_count": int((side_payload.get("bench_count") or 0) or 0),
+                    "lineup_confidence": lineups.get(f"{side}_confidence"),
+                    "sidelined_count": int((lineups.get(f"{side}_sidelined_count") or 0) or 0),
+                }
+            )
+
+    for side in ("home", "away"):
+        team = team_stats.get(side) or {}
+        injured_count = int((team.get("injured_player_count") or 0) or 0)
+        if injured_count:
+            news["available"] = True
+            news[side]["injuries"] = max(int(news[side].get("injuries") or 0), injured_count)
+            news[side]["squad_injured_count"] = injured_count
+            news["flags"].append(f"statpal_{side}_squad_injury_context")
+        if team.get("squad_count") is not None:
+            news[side]["squad_count"] = team.get("squad_count")
+        if team.get("populated_player_stat_count") is not None:
+            news[side]["populated_player_stat_count"] = team.get("populated_player_stat_count")
+
+    team_stats_absences = int(news["home"].get("injuries") or 0) + int(news["away"].get("injuries") or 0)
+    if not injuries and team_stats_absences:
+        news["injuries_available"] = True
+        if team_stats_absences >= 5:
+            news["flags"].append("team_news_heavy_absences")
+        elif team_stats_absences >= 2:
+            news["flags"].append("team_news_absences")
+
+    if not news["lineups_available"]:
+        news["flags"].append("lineups_unavailable")
+
+    news["flags"] = sorted(dict.fromkeys(news["flags"]))
+    return news
+
 def _is_knockout_round(round_name):
     round_name = normalize(round_name)
     knockout_terms = (
@@ -899,7 +1269,7 @@ def build_fixture_context(fx, home_form=None, away_form=None):
     if away_rest is not None and away_rest < 4:
         flags.append("away_short_rest")
 
-    standings = fetch_league_standings(fx.get("code"), fx.get("season"))
+    standings = fetch_league_standings(fx.get("code"), fx.get("season")) if fx.get("aps_id") else {}
     home_pos = standings.get(fx.get("hid"), {})
     away_pos = standings.get(fx.get("aid"), {})
     for label, pos in (("home", home_pos), ("away", away_pos)):
@@ -1034,8 +1404,12 @@ def _num(value):
 
 def statpal_scoring_context(statpal_context):
     snapshots = (statpal_context or {}).get("snapshots") or {}
-    data = {"available": bool(snapshots), "flags": []}
-    for key in ("predictions", "detailed_stats", "prematch_odds", "lineups", "injuries_suspensions"):
+    data = {"available": bool(snapshots), "flags": [], "snapshots": {}}
+    for key, snapshot in snapshots.items():
+        summary = (snapshot or {}).get("summary") or {}
+        payload = (snapshot or {}).get("payload") or {}
+        data["snapshots"][key] = {"summary": summary, "payload": payload}
+    for key in ("predictions", "detailed_stats", "prematch_odds", "lineups", "injuries_suspensions", "team_stats", "league_standings", "league_stats", "head_to_head"):
         summary = (snapshots.get(key) or {}).get("summary") or {}
         if summary:
             data[key] = summary
@@ -1059,6 +1433,8 @@ def statpal_scoring_context(statpal_context):
         data["flags"].append("statpal_prediction_context")
     if data.get("detailed_stats"):
         data["flags"].append("statpal_xg_context")
+    if data.get("head_to_head"):
+        data["flags"].append("statpal_h2h_context")
     return data
 
 # ── 19-PARAMETER CONFIDENCE SCORER ───────────────────────────────
@@ -3279,6 +3655,7 @@ def serialize_fixture_summaries(scored_fxs, all_confs, odds_list=None):
 def score_aps_fixture_for_pipeline(fx):
     aps_id = fx.get("aps_id")
     has_api_football_fixture = bool(aps_id)
+    statpal_context = statpal_scoring_context(fx.get("statpal_context") or {})
     pred_data = fetch_prediction_data(aps_id) if has_api_football_fixture else None
     if pred_data:
         teams_data = pred_data.get("teams",{})
@@ -3307,16 +3684,19 @@ def score_aps_fixture_for_pipeline(fx):
             hf = apply_league_strength(hf, strength)
             af = apply_league_strength(af, strength)
         else:
-            hf = _default_form()
-            af = _default_form()
-        h2h = parse_aps_h2h([], fx["hname"])
+            hf, af = _statpal_forms(statpal_context)
+            if not hf or not af:
+                hf = _empty_form()
+                af = _empty_form()
+        h2h = parse_aps_h2h([], fx["hname"]) if has_api_football_fixture else _statpal_h2h(statpal_context, fx)
     fx["home_recent_form"] = recent_form_summary(hf)
     fx["away_recent_form"] = recent_form_summary(af)
     fixture_context = build_fixture_context(fx, hf, af)
     fixture_context["h2h"] = h2h
     fixture_context["scoreline_profile"] = build_matchup_scoreline_profile(hf, af, h2h)
-    statpal_context = statpal_scoring_context(fx.get("statpal_context") or {})
     fixture_context["statpal"] = statpal_context
+    fixture_context = _apply_statpal_standings_context(fixture_context, statpal_context, fx)
+    fixture_context = _apply_statpal_league_stats_context(fixture_context, statpal_context, fx)
     context_flags = set(fixture_context.get("flags") or [])
     context_flags.add("h2h_available" if int(h2h.get("games") or 0) >= 2 else "h2h_unavailable")
     context_flags.update(statpal_context.get("flags") or [])
@@ -3327,18 +3707,20 @@ def score_aps_fixture_for_pipeline(fx):
     team_news = (
         fetch_fixture_team_news(aps_id, fx.get("hid"), fx.get("aid"))
         if has_api_football_fixture
-        else {
-            "available": False,
-            "injuries_available": False,
-            "lineups_available": False,
-            "home": {"injuries": 0},
-            "away": {"injuries": 0},
-            "flags": ["api_football_fixture_unavailable"],
-        }
+        else _statpal_team_news(statpal_context)
     )
     fx["fixture_context"] = fixture_context
     fx["team_news"] = team_news
-    real_odds = get_api_football_odds(aps_id) if has_api_football_fixture else {}
+    real_odds = get_api_football_odds(aps_id) if has_api_football_fixture else _statpal_real_odds(statpal_context)
+    if not has_api_football_fixture and not (hf.get("games") and af.get("games")):
+        context_flags.add("insufficient_statpal_fixture_data")
+        fixture_context["flags"] = sorted(context_flags)
+        log.info(
+            "Daily fixture skipped market scoring match_id=%s reason=insufficient_statpal_fixture_data snapshots=%s",
+            fx.get("match_id"),
+            sorted((statpal_context.get("snapshots") or {}).keys()),
+        )
+        return fx, {}, real_odds
     corner_odds_available = any(key.startswith("Corners ") for key in real_odds)
     corner_profile = build_corner_profile(fx) if has_api_football_fixture and corner_odds_available else {}
     fx["corner_profile"] = corner_profile

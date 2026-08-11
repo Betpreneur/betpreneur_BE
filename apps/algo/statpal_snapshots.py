@@ -834,7 +834,7 @@ class StatPalSnapshotService:
         rows = _as_list((payload or {}).get(row_key))
         teams = {str(row.get("team_id") or "") for row in rows if isinstance(row, dict) and row.get("team_id")}
         players = {str(row.get("player_id") or "") for row in rows if isinstance(row, dict) and row.get("player_id")}
-        return {
+        summary = {
             "match_id": match_id,
             "provider_match_id": provider_match_id,
             "row_key": row_key,
@@ -846,6 +846,55 @@ class StatPalSnapshotService:
             "country": str((payload or {}).get("country") or ""),
             "top_level_keys": sorted((payload or {}).keys()) if isinstance(payload, dict) else [],
         }
+        if row_key == "players":
+            team_summaries = {}
+            populated_player_count = 0
+            injured_player_count = 0
+            stat_fields = (
+                "appearances",
+                "minutes_played",
+                "goals",
+                "assists",
+                "shots_total",
+                "shots_on",
+                "yellowcards",
+                "redcards",
+                "saves",
+                "rating",
+            )
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                team_id = str(row.get("team_id") or "")
+                if not team_id:
+                    continue
+                item = team_summaries.setdefault(
+                    team_id,
+                    {
+                        "team_id": team_id,
+                        "team_name": row.get("team_name") or "",
+                        "venue": row.get("venue") or {},
+                        "coach": row.get("coach") or {},
+                        "squad_count": 0,
+                        "injured_count": 0,
+                        "populated_player_stat_count": 0,
+                    },
+                )
+                item["squad_count"] += 1
+                has_stats = any(row.get(field) not in (None, "") for field in stat_fields)
+                if has_stats:
+                    item["populated_player_stat_count"] += 1
+                    populated_player_count += 1
+                if row.get("injured"):
+                    item["injured_count"] += 1
+                    injured_player_count += 1
+            summary["populated_player_stat_count"] = populated_player_count
+            summary["injured_player_count"] = injured_player_count
+            summary["team_summaries"] = sorted(
+                team_summaries.values(),
+                key=lambda item: (str(item.get("team_name") or ""), str(item.get("team_id") or "")),
+            )
+        return summary
 
     @staticmethod
     def _summarize_weather(payload: dict[str, Any], match_id="", provider_match_id="") -> dict[str, Any]:
@@ -865,6 +914,17 @@ class StatPalSnapshotService:
     @staticmethod
     def _summarize_injuries(payload: dict[str, Any]) -> dict[str, Any]:
         if isinstance(payload, dict) and "total_to_miss_count" in payload:
+            def player_list(side, key):
+                return [
+                    {
+                        "id": str(player.get("id") or ""),
+                        "name": str(player.get("name") or ""),
+                        "status": str(player.get("status") or ""),
+                    }
+                    for player in _as_list(((payload.get(side) or {}).get(key) or []))
+                    if isinstance(player, dict) and (player.get("id") or player.get("name"))
+                ]
+
             return {
                 "league": payload.get("league") or "",
                 "provider_match_id": payload.get("provider_match_id") or "",
@@ -876,6 +936,8 @@ class StatPalSnapshotService:
                     "to_miss_count": (payload.get("home") or {}).get("to_miss_count", 0),
                     "questionable_count": (payload.get("home") or {}).get("questionable_count", 0),
                     "availability_risk": (payload.get("home") or {}).get("availability_risk", "low"),
+                    "to_miss": player_list("home", "to_miss"),
+                    "questionable": player_list("home", "questionable"),
                 },
                 "away": {
                     "team_id": (payload.get("away") or {}).get("team_id", ""),
@@ -883,6 +945,8 @@ class StatPalSnapshotService:
                     "to_miss_count": (payload.get("away") or {}).get("to_miss_count", 0),
                     "questionable_count": (payload.get("away") or {}).get("questionable_count", 0),
                     "availability_risk": (payload.get("away") or {}).get("availability_risk", "low"),
+                    "to_miss": player_list("away", "to_miss"),
+                    "questionable": player_list("away", "questionable"),
                 },
                 "total_to_miss_count": payload.get("total_to_miss_count", 0),
                 "total_questionable_count": payload.get("total_questionable_count", 0),
@@ -932,6 +996,25 @@ class StatPalSnapshotService:
             fulltime = current.get("fulltime") or {}
             firsthalf = current.get("firsthalf") or {}
             secondhalf = current.get("secondhalf") or {}
+            squad = _as_list(payload.get("squad"))
+            stat_fields = (
+                "appearances",
+                "minutes_played",
+                "goals",
+                "assists",
+                "shots_total",
+                "shots_on",
+                "yellowcards",
+                "redcards",
+                "saves",
+                "rating",
+            )
+            position_counts = {}
+            for player in squad:
+                if not isinstance(player, dict):
+                    continue
+                position = str(player.get("position") or "unknown").strip() or "unknown"
+                position_counts[position] = position_counts.get(position, 0) + 1
             games_played = StatPalSnapshotService._team_phase_value(fulltime, "win")
             games_played = (games_played or 0) + (StatPalSnapshotService._team_phase_value(fulltime, "draw") or 0) + (StatPalSnapshotService._team_phase_value(fulltime, "lost") or 0)
             goals_for_avg = StatPalSnapshotService._team_goal_average_value(fulltime, "avg_goals_per_game_scored")
@@ -949,6 +1032,15 @@ class StatPalSnapshotService:
                 "normalized_team_name": normalize_fixture_text(payload.get("name") or ""),
                 "fixture_side": payload.get("fixture_side") or "",
                 "squad_count": payload.get("squad_count"),
+                "injured_player_count": sum(1 for player in squad if isinstance(player, dict) and player.get("injured")),
+                "populated_player_stat_count": sum(
+                    1
+                    for player in squad
+                    if isinstance(player, dict) and any(player.get(field) not in (None, "") for field in stat_fields)
+                ),
+                "position_counts": position_counts,
+                "venue": payload.get("venue") or {},
+                "coach": payload.get("coach") or {},
                 "league_count": len(league_stats),
                 "sample_size": int(games_played) if games_played is not None else None,
                 "current_league": current.get("league") or "",
@@ -1223,8 +1315,27 @@ class StatPalSnapshotService:
                 "home_odds": simple.get("home"),
                 "draw_odds": simple.get("draw"),
                 "away_odds": simple.get("away"),
+                "home_away_home_odds": simple.get("home_away_home"),
+                "home_away_away_odds": simple.get("home_away_away"),
+                "over15_odds": simple.get("over15"),
+                "under15_odds": simple.get("under15"),
                 "over25_odds": simple.get("over25"),
                 "under25_odds": simple.get("under25"),
+                "over35_odds": simple.get("over35"),
+                "under35_odds": simple.get("under35"),
+                "btts_yes_odds": simple.get("btts_yes"),
+                "btts_no_odds": simple.get("btts_no"),
+                "double_chance_1x_odds": simple.get("1x"),
+                "double_chance_12_odds": simple.get("12"),
+                "double_chance_x2_odds": simple.get("x2"),
+                "first_half_over05_odds": simple.get("1h_o05"),
+                "first_half_under05_odds": simple.get("1h_u05"),
+                "first_half_over15_odds": simple.get("1h_o15"),
+                "first_half_under15_odds": simple.get("1h_u15"),
+                "second_half_over05_odds": simple.get("2h_o05"),
+                "second_half_under05_odds": simple.get("2h_u05"),
+                "second_half_over15_odds": simple.get("2h_o15"),
+                "second_half_under15_odds": simple.get("2h_u15"),
                 "top_level_keys": sorted(payload.keys()),
             }
         return {
@@ -1240,31 +1351,100 @@ class StatPalSnapshotService:
 
     @staticmethod
     def _simple_market_odds(payload: dict[str, Any]) -> dict[str, float | None]:
-        values = {}
+        samples = {}
+
+        def remember(key, value):
+            try:
+                odd = float(value)
+            except (TypeError, ValueError):
+                return
+            if odd <= 0:
+                return
+            samples.setdefault(key, []).append(odd)
+
+        def remember_odd_items(prefix_map, odds):
+            for odd in odds or []:
+                odd_name = normalize_fixture_text(odd.get("name") or "")
+                key = prefix_map.get(odd_name)
+                if key:
+                    remember(key, odd.get("value"))
+
+        def remember_total(prefix, total):
+            line = total.get("line")
+            if line is None:
+                return
+            try:
+                line_text = f"{float(line):g}"
+            except (TypeError, ValueError):
+                return
+            for odd in total.get("odds") or []:
+                odd_name = normalize_fixture_text(odd.get("name") or "")
+                if odd_name == "over":
+                    remember(f"{prefix}o{line_text.replace('.', '')}", odd.get("value"))
+                elif odd_name == "under":
+                    remember(f"{prefix}u{line_text.replace('.', '')}", odd.get("value"))
+
         for market in payload.get("markets") or []:
             market_name = normalize_fixture_text(market.get("name") or "")
             for bookmaker in market.get("bookmakers") or []:
-                for odd in bookmaker.get("odds") or []:
-                    odd_name = normalize_fixture_text(odd.get("name") or "")
-                    if odd_name in {"home", "draw", "away"} and odd_name not in values:
-                        values[odd_name] = odd.get("value")
-                for total in bookmaker.get("totals") or []:
-                    if total.get("line") != 2.5:
-                        continue
-                    for odd in total.get("odds") or []:
-                        odd_name = normalize_fixture_text(odd.get("name") or "")
-                        if odd_name == "over":
-                            values.setdefault("over25", odd.get("value"))
-                        elif odd_name == "under":
-                            values.setdefault("under25", odd.get("value"))
-            if {"1x2", "1 x 2"} & {market_name} and all(key in values for key in ("home", "draw", "away")):
-                continue
+                if market_name in {"1x2", "1 x 2", "match winner", "fulltime result"}:
+                    remember_odd_items({"home": "home", "draw": "draw", "away": "away"}, bookmaker.get("odds"))
+                elif market_name == "home/away":
+                    remember_odd_items({"home": "home_away_home", "away": "home_away_away"}, bookmaker.get("odds"))
+                elif market_name in {"both teams to score", "both teams score", "btts"}:
+                    remember_odd_items({"yes": "btts_yes", "no": "btts_no"}, bookmaker.get("odds"))
+                elif market_name == "double chance":
+                    remember_odd_items({
+                        "home/draw": "1x",
+                        "home draw": "1x",
+                        "home/away": "12",
+                        "home away": "12",
+                        "draw/away": "x2",
+                        "draw away": "x2",
+                        "1x": "1x",
+                        "12": "12",
+                        "x2": "x2",
+                    }, bookmaker.get("odds"))
+                elif market_name in {"over/under", "over under"}:
+                    for total in bookmaker.get("totals") or []:
+                        remember_total("", total)
+                elif market_name in {"over/under 1st half", "over under 1st half"}:
+                    for total in bookmaker.get("totals") or []:
+                        remember_total("1h_", total)
+                elif market_name in {"over/under 2nd half", "over under 2nd half"}:
+                    for total in bookmaker.get("totals") or []:
+                        remember_total("2h_", total)
+
+        values = {
+            key: round(max(items), 3)
+            for key, items in samples.items()
+            if items
+        }
         return {
             "home": values.get("home"),
             "draw": values.get("draw"),
             "away": values.get("away"),
-            "over25": values.get("over25"),
-            "under25": values.get("under25"),
+            "home_away_home": values.get("home_away_home"),
+            "home_away_away": values.get("home_away_away"),
+            "over15": values.get("o15"),
+            "under15": values.get("u15"),
+            "over25": values.get("o25"),
+            "under25": values.get("u25"),
+            "over35": values.get("o35"),
+            "under35": values.get("u35"),
+            "btts_yes": values.get("btts_yes"),
+            "btts_no": values.get("btts_no"),
+            "1x": values.get("1x"),
+            "12": values.get("12"),
+            "x2": values.get("x2"),
+            "1h_o05": values.get("1h_o05"),
+            "1h_u05": values.get("1h_u05"),
+            "1h_o15": values.get("1h_o15"),
+            "1h_u15": values.get("1h_u15"),
+            "2h_o05": values.get("2h_o05"),
+            "2h_u05": values.get("2h_u05"),
+            "2h_o15": values.get("2h_o15"),
+            "2h_u15": values.get("2h_u15"),
         }
 
     @staticmethod

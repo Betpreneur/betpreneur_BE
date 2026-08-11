@@ -1855,6 +1855,7 @@ class AlgoRunnerService:
         if not provider_match_id and not match_id:
             return fixture
 
+        from .models import StatPalFixtureSnapshot
         from .statpal_snapshots import statpal_snapshot_service
 
         try:
@@ -1878,6 +1879,24 @@ class AlgoRunnerService:
                 match_id=match_id,
                 provider_match_id=provider_match_id,
             )
+            if provider_competition_id:
+                league_rows = (
+                    StatPalFixtureSnapshot.objects.filter(
+                        status="available",
+                        provider_competition_id=provider_competition_id,
+                        snapshot_type__in=[
+                            StatPalFixtureSnapshot.SnapshotType.LEAGUE_STANDINGS,
+                            StatPalFixtureSnapshot.SnapshotType.LEAGUE_STATS,
+                        ],
+                    )
+                    .order_by("snapshot_type", "-fetched_at", "-updated_at")
+                )
+                snapshots = dict(context.get("snapshots") or {})
+                for row in league_rows:
+                    if row.snapshot_type in snapshots:
+                        continue
+                    snapshots[row.snapshot_type] = statpal_snapshot_service._snapshot_context(row)
+                context = {**context, "available": bool(snapshots), "snapshots": snapshots}
         except Exception as exc:
             refresh = {"errors": [{"provider": "statpal", "error": str(exc)}]}
             context = {"available": False, "snapshots": {}}

@@ -24,8 +24,14 @@ INJURY_PAYLOAD = {
                             "id": "home-1",
                             "name": "Liverpool",
                             "sidelined": {
-                                "to_miss": {"player": [{"id": "p1"}, {"id": "p2"}, {"id": "p3"}]},
-                                "questionable": {"player": {"id": "p4"}},
+                                "to_miss": {
+                                    "player": [
+                                        {"id": "p1", "name": "Player One", "status": "Knee Injury"},
+                                        {"id": "p2", "name": "Player Two", "status": "Suspended"},
+                                        {"id": "p3", "name": "Player Three", "status": "Injury"},
+                                    ]
+                                },
+                                "questionable": {"player": {"id": "p4", "name": "Player Four", "status": "Doubtful"}},
                             },
                         },
                         "away": {
@@ -64,6 +70,13 @@ class StatPalSnapshotContextPayloadTests(SimpleTestCase):
                 "provider_team_id": "2340835",
                 "name": "Arsenal",
                 "squad_count": 25,
+                "venue": {"name": "Emirates Stadium"},
+                "coach": {"name": "Mikel Arteta"},
+                "squad": [
+                    {"position": "F", "injured": False, "goals": 6},
+                    {"position": "M", "injured": True, "assists": 2},
+                    {"position": "M", "injured": False},
+                ],
                 "league_stats": [
                     {
                         "league": "Premier League",
@@ -94,6 +107,11 @@ class StatPalSnapshotContextPayloadTests(SimpleTestCase):
 
         self.assertEqual(summary["team_id"], "2340835")
         self.assertEqual(summary["normalized_team_name"], "arsenal")
+        self.assertEqual(summary["injured_player_count"], 1)
+        self.assertEqual(summary["populated_player_stat_count"], 2)
+        self.assertEqual(summary["position_counts"], {"F": 1, "M": 2})
+        self.assertEqual(summary["venue"]["name"], "Emirates Stadium")
+        self.assertEqual(summary["coach"]["name"], "Mikel Arteta")
         self.assertEqual(summary["sample_size"], 19)
         self.assertEqual(summary["current_league"], "Premier League")
         self.assertEqual(summary["avg_goals_for"], 2.1)
@@ -238,6 +256,9 @@ class StatPalSnapshotServiceTests(TestCase):
         self.assertEqual(snapshot.snapshot_type, StatPalFixtureSnapshot.SnapshotType.INJURIES_SUSPENSIONS)
         self.assertEqual(snapshot.summary["home"]["to_miss_count"], 3)
         self.assertEqual(snapshot.summary["home"]["availability_risk"], "high")
+        self.assertEqual(snapshot.summary["home"]["to_miss"][0]["name"], "Player One")
+        self.assertEqual(snapshot.summary["home"]["to_miss"][1]["status"], "Suspended")
+        self.assertEqual(snapshot.summary["home"]["questionable"][0]["name"], "Player Four")
         self.assertEqual(snapshot.summary["away"]["questionable_count"], 1)
 
     def test_fixture_context_returns_compact_snapshot_data(self):
@@ -407,7 +428,78 @@ class StatPalSnapshotServiceTests(TestCase):
                                                 ],
                                             }
                                         ],
-                                    }
+                                    },
+                                    {
+                                        "id": "1838",
+                                        "name": "Over/Under",
+                                        "stop": "False",
+                                        "bookmaker": [
+                                            {
+                                                "id": "1847",
+                                                "name": "10Bet",
+                                                "timestamp": "1765252069",
+                                                "total": [
+                                                    {
+                                                        "name": "1.5",
+                                                        "stop": "False",
+                                                        "odd": [
+                                                            {"name": "Over", "value": "1.18"},
+                                                            {"name": "Under", "value": "4.75"},
+                                                        ],
+                                                    },
+                                                    {
+                                                        "name": "2.5",
+                                                        "stop": "False",
+                                                        "odd": [
+                                                            {"name": "Over", "value": "1.85"},
+                                                            {"name": "Under", "value": "1.95"},
+                                                        ],
+                                                    },
+                                                    {
+                                                        "name": "3.5",
+                                                        "stop": "False",
+                                                        "odd": [
+                                                            {"name": "Over", "value": "3.20"},
+                                                            {"name": "Under", "value": "1.34"},
+                                                        ],
+                                                    },
+                                                ],
+                                            }
+                                        ],
+                                    },
+                                    {
+                                        "id": "1848",
+                                        "name": "Both Teams To Score",
+                                        "stop": "False",
+                                        "bookmaker": [
+                                            {
+                                                "id": "1847",
+                                                "name": "10Bet",
+                                                "timestamp": "1765252069",
+                                                "odd": [
+                                                    {"name": "Yes", "value": "1.72"},
+                                                    {"name": "No", "value": "2.05"},
+                                                ],
+                                            }
+                                        ],
+                                    },
+                                    {
+                                        "id": "1851",
+                                        "name": "Double Chance",
+                                        "stop": "False",
+                                        "bookmaker": [
+                                            {
+                                                "id": "1847",
+                                                "name": "10Bet",
+                                                "timestamp": "1765252069",
+                                                "odd": [
+                                                    {"name": "Home/Draw", "value": "1.20"},
+                                                    {"name": "Home/Away", "value": "1.31"},
+                                                    {"name": "Draw/Away", "value": "2.10"},
+                                                ],
+                                            }
+                                        ],
+                                    },
                                 ],
                             }
                         ],
@@ -421,6 +513,15 @@ class StatPalSnapshotServiceTests(TestCase):
         self.assertEqual(row.summary["home_odds"], 1.64)
         self.assertEqual(row.summary["draw_odds"], 3.75)
         self.assertEqual(row.summary["away_odds"], 5.1)
+        self.assertEqual(row.summary["over15_odds"], 1.18)
+        self.assertEqual(row.summary["under15_odds"], 4.75)
+        self.assertEqual(row.summary["over25_odds"], 1.85)
+        self.assertEqual(row.summary["under25_odds"], 1.95)
+        self.assertEqual(row.summary["over35_odds"], 3.2)
+        self.assertEqual(row.summary["under35_odds"], 1.34)
+        self.assertEqual(row.summary["btts_yes_odds"], 1.72)
+        self.assertEqual(row.summary["btts_no_odds"], 2.05)
+        self.assertEqual(row.summary["double_chance_12_odds"], 1.31)
 
     def test_prediction_summary_extracts_core_scoring_signals(self):
         summary = StatPalSnapshotService().summarize(
