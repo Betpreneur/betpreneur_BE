@@ -1777,11 +1777,42 @@ class AlgoRunnerService:
     def _statpal_primary_daily_enabled(self):
         return self._runner_env_bool("ALGO_DAILY_USE_STATPAL_FIXTURES", True)
 
+    def _statpal_track_all_leagues(self):
+        return self._runner_env_bool("STATPAL_TRACK_ALL_LEAGUES", False)
+
+    def _statpal_tracked_league_ids(self):
+        raw = str(os.environ.get("STATPAL_TRACKED_LEAGUES") or "").strip()
+        if not raw:
+            return set()
+        league_ids = set()
+        for item in raw.replace("\n", ",").split(","):
+            value = item.strip()
+            if not value:
+                continue
+            if "|" in value:
+                value = value.split("|", 1)[0].strip()
+            if ":" in value:
+                value = value.split(":", 1)[0].strip()
+            league_ids.add(value)
+        return league_ids
+
+    def _statpal_fixture_league_id(self, fixture):
+        payload = fixture.api_payload or {}
+        raw_league = payload.get("league") if isinstance(payload.get("league"), dict) else {}
+        return str(
+            payload.get("statpal_provider_competition_id")
+            or payload.get("provider_competition_id")
+            or payload.get("code")
+            or raw_league.get("id")
+            or ""
+        ).strip()
+
     def _statpal_cached_runner_fixtures(self, target_date):
-        rows = list(
-            FixtureCache.objects.filter(match_date=target_date, source="statpal")
-            .order_by("country", "league", "kickoff", "fixture")
-        )
+        queryset = FixtureCache.objects.filter(match_date=target_date, source="statpal")
+        tracked = self._statpal_tracked_league_ids()
+        rows = list(queryset.order_by("country", "league", "kickoff", "fixture"))
+        if tracked and not self._statpal_track_all_leagues():
+            rows = [row for row in rows if self._statpal_fixture_league_id(row) in tracked]
         return [self._cached_fixture_runner_payload(row) for row in rows]
 
     def _daily_runner_fixtures(self, target_date):

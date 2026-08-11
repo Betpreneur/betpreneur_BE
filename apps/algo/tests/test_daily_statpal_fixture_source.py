@@ -2,9 +2,10 @@ from unittest.mock import patch
 from datetime import datetime, timezone
 import json
 
-from django.test import SimpleTestCase
+from django.test import SimpleTestCase, TestCase, override_settings
 
 from apps.algo.grindalgo import algo_runner
+from apps.algo.models import FixtureCache
 from apps.algo.services import AlgoRunnerService
 
 
@@ -166,3 +167,45 @@ class DailyStatPalFixtureSourceTests(SimpleTestCase):
             defaults["fixture_context"]["statpal"]["snapshots"]["team_stats"]["feed_updated"],
             "2026-08-11 00:49:00+00:00",
         )
+
+    def test_statpal_tracked_league_ids_accept_multiline_export(self):
+        service = AlgoRunnerService()
+        with patch.dict(
+            "os.environ",
+            {
+                "STATPAL_TRACKED_LEAGUES": "3037 | Premier League | england\n3240 | Allsvenskan | sweden",
+            },
+        ):
+            self.assertEqual(service._statpal_tracked_league_ids(), {"3037", "3240"})
+
+
+class DailyStatPalFixtureSourceDbTests(TestCase):
+    @override_settings(CELERY_TASK_ALWAYS_EAGER=True)
+    def test_statpal_daily_fixture_source_respects_tracked_league_allowlist(self):
+        target_date = datetime(2026, 8, 11, tzinfo=timezone.utc).date()
+        FixtureCache.objects.create(
+            match_date=target_date,
+            fixture="Allowed FC vs Visitor FC",
+            home_team="Allowed FC",
+            away_team="Visitor FC",
+            league="Premier League",
+            match_id="statpal:allowed",
+            source="statpal",
+            api_payload={"provider_competition_id": "3037"},
+        )
+        FixtureCache.objects.create(
+            match_date=target_date,
+            fixture="Blocked FC vs Visitor FC",
+            home_team="Blocked FC",
+            away_team="Visitor FC",
+            league="Lower League",
+            match_id="statpal:blocked",
+            source="statpal",
+            api_payload={"provider_competition_id": "999999"},
+        )
+
+        service = AlgoRunnerService()
+        with patch.dict("os.environ", {"STATPAL_TRACKED_LEAGUES": "3037"}):
+            fixtures = service._statpal_cached_runner_fixtures(target_date)
+
+        self.assertEqual([fixture["fixture"] for fixture in fixtures], ["Allowed FC vs Visitor FC"])
