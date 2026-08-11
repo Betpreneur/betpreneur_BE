@@ -1017,6 +1017,9 @@ class StatPalSnapshotService:
                 position_counts[position] = position_counts.get(position, 0) + 1
             games_played = StatPalSnapshotService._team_phase_value(fulltime, "win")
             games_played = (games_played or 0) + (StatPalSnapshotService._team_phase_value(fulltime, "draw") or 0) + (StatPalSnapshotService._team_phase_value(fulltime, "lost") or 0)
+            wins = StatPalSnapshotService._team_phase_value(fulltime, "win")
+            draws = StatPalSnapshotService._team_phase_value(fulltime, "draw")
+            losses = StatPalSnapshotService._team_phase_value(fulltime, "lost")
             goals_for_avg = StatPalSnapshotService._team_goal_average_value(fulltime, "avg_goals_per_game_scored")
             goals_against_avg = StatPalSnapshotService._team_goal_average_value(fulltime, "avg_goals_per_game_conceded")
             avg_total_goals = None
@@ -1043,6 +1046,9 @@ class StatPalSnapshotService:
                 "coach": payload.get("coach") or {},
                 "league_count": len(league_stats),
                 "sample_size": int(games_played) if games_played is not None else None,
+                "wins": int(wins or 0),
+                "draws": int(draws or 0),
+                "losses": int(losses or 0),
                 "current_league": current.get("league") or "",
                 "current_season": current.get("season") or "",
                 "avg_goals_for": goals_for_avg,

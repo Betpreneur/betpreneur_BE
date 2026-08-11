@@ -27,6 +27,9 @@ class DailyStatPalFixtureSourceTests(SimpleTestCase):
                         "summary": {
                             "home": {
                                 "sample_size": 10,
+                                "wins": 5,
+                                "draws": 3,
+                                "losses": 2,
                                 "avg_goals_for": 1.6,
                                 "avg_goals_against": 1.1,
                                 "clean_sheets": 3,
@@ -36,6 +39,9 @@ class DailyStatPalFixtureSourceTests(SimpleTestCase):
                             },
                             "away": {
                                 "sample_size": 10,
+                                "wins": 3,
+                                "draws": 2,
+                                "losses": 5,
                                 "avg_goals_for": 1.3,
                                 "avg_goals_against": 1.4,
                                 "clean_sheets": 2,
@@ -256,6 +262,12 @@ class DailyStatPalFixtureSourceTests(SimpleTestCase):
         self.assertEqual(scored_fixture["fixture_context"]["h2h"]["t2w"], 1)
         self.assertEqual(scored_fixture["fixture_context"]["h2h"]["draws"], 1)
         self.assertEqual(scored_fixture["fixture_context"]["h2h"]["avg_goals"], 3.0)
+        self.assertEqual(scored_fixture["home_recent_form"]["wins"], 5)
+        self.assertEqual(scored_fixture["home_recent_form"]["draws"], 3)
+        self.assertEqual(scored_fixture["home_recent_form"]["losses"], 2)
+        self.assertEqual(scored_fixture["away_recent_form"]["wins"], 3)
+        self.assertEqual(scored_fixture["away_recent_form"]["draws"], 2)
+        self.assertEqual(scored_fixture["away_recent_form"]["losses"], 5)
         self.assertEqual(scored_fixture["fixture_context"]["home_standing"]["rank"], 1)
         self.assertEqual(scored_fixture["fixture_context"]["away_standing"]["points"], 34)
         self.assertEqual(scored_fixture["fixture_context"]["home_league_stats"]["squad_count"], 15)
@@ -317,6 +329,59 @@ class DailyStatPalFixtureSourceTests(SimpleTestCase):
         self.assertEqual(scored_fixture["home_recent_form"]["games"], 0)
         self.assertEqual(scored_fixture["away_recent_form"]["games"], 0)
         self.assertIn("insufficient_statpal_fixture_data", scored_fixture["fixture_context"]["flags"])
+
+    def test_statpal_standings_can_supply_form_when_team_stats_are_missing(self):
+        context = {
+            "snapshots": {
+                "league_standings": {
+                    "payload": {
+                        "standings": [
+                            {
+                                "team_id": "home-1",
+                                "team_name": "Home",
+                                "recent_form": "WWDLW",
+                                "overall": {
+                                    "games_played": 12,
+                                    "wins": 7,
+                                    "draws": 2,
+                                    "losses": 3,
+                                    "goals_for": 20,
+                                    "goals_against": 13,
+                                },
+                            },
+                            {
+                                "team_id": "away-1",
+                                "team_name": "Away",
+                                "recent_form": "LLDWW",
+                                "overall": {
+                                    "games_played": 12,
+                                    "wins": 4,
+                                    "draws": 3,
+                                    "losses": 5,
+                                    "goals_for": 14,
+                                    "goals_against": 19,
+                                },
+                            },
+                        ]
+                    }
+                }
+            }
+        }
+
+        statpal_context = algo_runner.statpal_scoring_context(context)
+        home, away = algo_runner._statpal_forms(
+            statpal_context,
+            {"hid": "home-1", "aid": "away-1"},
+        )
+
+        self.assertEqual(home["scope"], "statpal_standings")
+        self.assertEqual(home["wins"], 7)
+        self.assertEqual(home["draws"], 2)
+        self.assertEqual(home["losses"], 3)
+        self.assertEqual(home["games"], 12)
+        self.assertEqual(home["avg_scored"], 1.67)
+        self.assertEqual(away["wins"], 4)
+        self.assertEqual(away["avg_conceded"], 1.58)
 
     def test_market_family_statpal_coverage_aggregates_market_diagnostics(self):
         service = AlgoRunnerService()

@@ -405,10 +405,15 @@ def _statpal_team_form(team_summary, *, source="statpal_team_stats"):
     if avg_total is not None:
         over25_count = round(sample_size * max(0.0, min(0.85, (avg_total - 1.5) / 3.0)))
     btts_count = round(sample_size * max(0.0, min(0.9, min(avg_for, 1.0) * min(avg_against, 1.0))))
+    wins = int(team_summary.get("wins") or 0)
+    draws = int(team_summary.get("draws") or 0)
+    losses = int(team_summary.get("losses") or 0)
+    if wins + draws + losses > sample_size:
+        wins = draws = losses = 0
     return {
-        "wins": 0,
-        "draws": 0,
-        "losses": 0,
+        "wins": wins,
+        "draws": draws,
+        "losses": losses,
         "form": "",
         "avg_scored": round(avg_for, 2),
         "avg_conceded": round(avg_against, 2),
@@ -441,10 +446,76 @@ def _statpal_xg_forms(statpal_context):
     away.update({"avg_scored": round(away_xg, 2), "avg_conceded": round(home_xg, 2), "games": 1})
     return home, away
 
-def _statpal_forms(statpal_context):
+def _statpal_standing_form(row, *, source="statpal_standings"):
+    row = row or {}
+    overall = row.get("overall") or {}
+    games = int(overall.get("games_played") or overall.get("played") or 0)
+    if games <= 0:
+        return None
+    wins = int(overall.get("wins") or 0)
+    draws = int(overall.get("draws") or 0)
+    losses = int(overall.get("losses") or 0)
+    goals_for = _num(overall.get("goals_for"))
+    goals_against = _num(overall.get("goals_against"))
+    avg_for = round(goals_for / games, 2) if goals_for is not None else 0.0
+    avg_against = round(goals_against / games, 2) if goals_against is not None else 0.0
+    form = str(row.get("recent_form") or "")[:10]
+    return {
+        "wins": wins,
+        "draws": draws,
+        "losses": losses,
+        "form": form,
+        "avg_scored": avg_for,
+        "avg_conceded": avg_against,
+        "btts_count": 0,
+        "over25_count": 0,
+        "clean_sheets": 0,
+        "games": games,
+        "scope": source,
+        "last_played": "",
+        "streak": 0,
+        "attack_str": 0.5,
+        "defence_str": 0.5,
+        "scoreline_profile": _scoreline_profile([]),
+    }
+
+def _statpal_standing_forms(statpal_context, fx=None):
+    summary = (statpal_context or {}).get("league_standings") or {}
+    home = _statpal_standing_form(summary.get("home") or {})
+    away = _statpal_standing_form(summary.get("away") or {})
+    if home and away:
+        return home, away
+    payload = (((statpal_context or {}).get("snapshots") or {}).get("league_standings") or {}).get("payload") or {}
+    rows = payload.get("standings") if isinstance(payload, dict) else []
+    if not isinstance(rows, list):
+        return None, None
+    fx = fx or {}
+    team_stats = (statpal_context or {}).get("team_stats") or {}
+    home_id = str(
+        (team_stats.get("home") or {}).get("team_id")
+        or fx.get("hid")
+        or fx.get("statpal_home_team_id")
+        or ""
+    ).strip()
+    away_id = str(
+        (team_stats.get("away") or {}).get("team_id")
+        or fx.get("aid")
+        or fx.get("statpal_away_team_id")
+        or ""
+    ).strip()
+    home_row = next((row for row in rows if isinstance(row, dict) and str(row.get("team_id") or "") == home_id), {})
+    away_row = next((row for row in rows if isinstance(row, dict) and str(row.get("team_id") or "") == away_id), {})
+    home = _statpal_standing_form(home_row)
+    away = _statpal_standing_form(away_row)
+    return (home, away) if home and away else (None, None)
+
+def _statpal_forms(statpal_context, fx=None):
     team_stats = (statpal_context or {}).get("team_stats") or {}
     home = _statpal_team_form(team_stats.get("home") or {})
     away = _statpal_team_form(team_stats.get("away") or {})
+    if home and away:
+        return home, away
+    home, away = _statpal_standing_forms(statpal_context, fx)
     if home and away:
         return home, away
     return _statpal_xg_forms(statpal_context)
@@ -3663,7 +3734,7 @@ def score_aps_fixture_for_pipeline(fx):
     statpal_context = statpal_scoring_context(fx.get("statpal_context") or {})
     pred_data = fetch_prediction_data(aps_id) if has_api_football_fixture else None
 
-    statpal_hf, statpal_af = _statpal_forms(statpal_context)
+    statpal_hf, statpal_af = _statpal_forms(statpal_context, fx)
     statpal_h2h = _statpal_h2h(statpal_context, fx)
 
     if is_statpal_fixture and statpal_hf and statpal_af:

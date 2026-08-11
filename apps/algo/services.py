@@ -1929,7 +1929,7 @@ class AlgoRunnerService:
         from .grindalgo import algo_runner
 
         try:
-            with temporary_env(self._runner_env({"APS_MAX_FIXTURES": "0"})):
+            with temporary_env(self._runner_env({"APS_TRACK_ALL_LEAGUES": "True", "APS_MAX_FIXTURES": "0"})):
                 fixtures = algo_runner.fetch_aps_fixtures(target_date.isoformat())
             synced = FixtureSearchService(runner_service=self)._upsert_fixtures(fixtures, target_date)
             return {"synced": synced, "errors": []}
