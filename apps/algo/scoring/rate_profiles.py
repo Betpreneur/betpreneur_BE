@@ -12,14 +12,17 @@ from __future__ import annotations
 import logging
 from datetime import timedelta
 
+from django.db.models import Q
 from django.utils import timezone
 
-from ..models import TeamRateProfile
+from ..models import StatPalFixtureSnapshot, TeamRateProfile
 from .fitting import normalize_team_name
 
 log = logging.getLogger(__name__)
 
 PROFILE_TTL = timedelta(hours=12)
+FAILURE_TTL = timedelta(minutes=10)
+_fetch_failures: dict[str, object] = {}
 
 
 def _num(value):
@@ -112,6 +115,14 @@ class TeamRateProfileService:
     def _fresh(self, profile) -> bool:
         return bool(profile and profile.fetched_at and timezone.now() - profile.fetched_at < PROFILE_TTL)
 
+    def _recent_failure(self, team_id: str) -> bool:
+        failed_at = _fetch_failures.get(str(team_id or ""))
+        return bool(failed_at and timezone.now() - failed_at < FAILURE_TTL)
+
+    def _remember_failure(self, team_id: str):
+        if team_id:
+            _fetch_failures[str(team_id)] = timezone.now()
+
     @staticmethod
     def _missing_new_rate_fields(profile) -> bool:
         if profile is None:
@@ -120,6 +131,46 @@ class TeamRateProfileService:
             getattr(profile, "shots_on_target_home", None) is None
             and getattr(profile, "shots_on_target_away", None) is None
         )
+
+    @staticmethod
+    def _payload_from_snapshot(team_id: str) -> dict:
+        if not team_id:
+            return {}
+        row = (
+            StatPalFixtureSnapshot.objects.filter(
+                Q(provider_match_id=str(team_id)) | Q(provider_match_id__endswith=f":{team_id}"),
+                provider="statpal",
+                snapshot_type=StatPalFixtureSnapshot.SnapshotType.TEAM_STATS,
+                status="available",
+            )
+            .order_by("-fetched_at", "-updated_at")
+            .first()
+        )
+        return row.payload if row else {}
+
+    def _profile_from_payload(self, *, team_id: str, payload: dict) -> TeamRateProfile | None:
+        parsed = parse_team_payload(payload)
+        if not parsed:
+            return None
+        profile, _ = TeamRateProfile.objects.update_or_create(
+            provider="statpal",
+            team_id=parsed["team_id"] or team_id,
+            defaults={
+                "team_name": parsed["team_name"],
+                "team_name_normalized": normalize_team_name(parsed["team_name"]),
+                "league_id": parsed["league_id"],
+                "corners_home": parsed["corners_home"],
+                "corners_away": parsed["corners_away"],
+                "cards_home": parsed["cards_home"],
+                "cards_away": parsed["cards_away"],
+                "shots_on_target_home": parsed["shots_on_target_home"],
+                "shots_on_target_away": parsed["shots_on_target_away"],
+                "fouls_per_game": parsed["fouls_per_game"],
+                "matches": parsed["matches"],
+                "payload": payload or {},
+            },
+        )
+        return profile
 
     def profile_for(self, *, team_id="", team_name="") -> TeamRateProfile | None:
         """Cached profile for a team, refreshed from StatPal when stale."""
@@ -138,34 +189,23 @@ class TeamRateProfileService:
             # Without an id there is nothing to fetch; a stale profile beats nothing.
             return profile
 
+        snapshot_payload = self._payload_from_snapshot(team_id)
+        if snapshot_payload:
+            snapshot_profile = self._profile_from_payload(team_id=team_id, payload=snapshot_payload)
+            if snapshot_profile:
+                return snapshot_profile
+
+        if self._recent_failure(team_id):
+            return profile
+
         try:
             payload = self.client.soccer_endpoint("SOCCER_TEAM", team_id=team_id)
-            parsed = parse_team_payload(payload)
         except Exception as exc:
+            self._remember_failure(team_id)
             log.info("Team rate profile fetch failed team_id=%s error=%s", team_id, str(exc)[:200])
             return profile
 
-        if not parsed:
-            return profile
-
-        profile, _ = TeamRateProfile.objects.update_or_create(
-            provider="statpal",
-            team_id=parsed["team_id"] or team_id,
-            defaults={
-                "team_name": parsed["team_name"],
-                "team_name_normalized": normalize_team_name(parsed["team_name"]),
-                "league_id": parsed["league_id"],
-                "corners_home": parsed["corners_home"],
-                "corners_away": parsed["corners_away"],
-                "cards_home": parsed["cards_home"],
-                "cards_away": parsed["cards_away"],
-                "shots_on_target_home": parsed["shots_on_target_home"],
-                "shots_on_target_away": parsed["shots_on_target_away"],
-                "fouls_per_game": parsed["fouls_per_game"],
-                "matches": parsed["matches"],
-            },
-        )
-        return profile
+        return self._profile_from_payload(team_id=team_id, payload=payload) or profile
 
 
 team_rate_profile_service = TeamRateProfileService()

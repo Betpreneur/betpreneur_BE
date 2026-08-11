@@ -6,16 +6,16 @@ not carry, so they returned a constant that ignored the line while claiming to b
 quantitative. `Corners Over 9.5` and `Corners Over 12.5` scored identically.
 """
 
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from django.test import SimpleTestCase, TestCase
 
 from apps.algo.evaluators import count_market_evaluator
 from apps.algo.evaluators.registry import COUNT_MODEL_ENGINE, evaluator_for
 from apps.algo.market_taxonomy import MarketDescriptor, describe_market
-from apps.algo.models import TeamRateProfile
+from apps.algo.models import StatPalFixtureSnapshot, TeamRateProfile
 from apps.algo.scoring import counts
-from apps.algo.scoring.rate_profiles import parse_team_payload
+from apps.algo.scoring.rate_profiles import TeamRateProfileService, _fetch_failures, parse_team_payload
 
 
 class PoissonLineTests(SimpleTestCase):
@@ -517,6 +517,63 @@ class CountEvaluatorTests(TestCase):
         self.assertFalse(result["available"])
         self.assertEqual(result["basis"], "count_market_no_team_rates")
         self.assertIn("no_team_rate_profile", result["warnings"])
+
+
+class TeamRateProfileServiceTests(TestCase):
+    def setUp(self):
+        _fetch_failures.clear()
+
+    def test_profile_for_uses_saved_team_snapshot_before_network(self):
+        StatPalFixtureSnapshot.objects.create(
+            provider="statpal",
+            match_id="statpal:team:2341001",
+            provider_match_id="2341001",
+            snapshot_type=StatPalFixtureSnapshot.SnapshotType.TEAM_STATS,
+            status="available",
+            payload={
+                "team": {
+                    "id": "2341001",
+                    "name": "Alpha",
+                    "league_stats": {
+                        "league": [
+                            {
+                                "id": "3363",
+                                "fulltime": {
+                                    "win": {"total": 4},
+                                    "draw": {"total": 2},
+                                    "lost": {"total": 2},
+                                    "avg_corners": {"home": 6.2, "away": 4.1},
+                                    "avg_yellowcards": {"home": 2.0, "away": 1.5},
+                                    "avg_redcards": {"home": 0.1, "away": 0.0},
+                                    "shots_on_goal": {"home": 32, "away": 24},
+                                },
+                            }
+                        ]
+                    },
+                }
+            },
+        )
+        client = Mock()
+
+        profile = TeamRateProfileService(client=client).profile_for(team_id="2341001", team_name="Alpha")
+
+        self.assertEqual(profile.team_id, "2341001")
+        self.assertEqual(profile.team_name, "Alpha")
+        self.assertEqual(profile.corners_home, 6.2)
+        self.assertEqual(profile.shots_on_target_home, 4.0)
+        self.assertFalse(client.soccer_endpoint.called)
+
+    def test_profile_for_negative_caches_fetch_failures(self):
+        client = Mock()
+        client.soccer_endpoint.side_effect = TimeoutError("timeout")
+        service = TeamRateProfileService(client=client)
+
+        first = service.profile_for(team_id="2341001", team_name="Alpha")
+        second = service.profile_for(team_id="2341001", team_name="Alpha")
+
+        self.assertIsNone(first)
+        self.assertIsNone(second)
+        self.assertEqual(client.soccer_endpoint.call_count, 1)
 
     def test_booking_points_line_is_converted_to_bookings(self):
         result = count_market_evaluator.evaluate(
