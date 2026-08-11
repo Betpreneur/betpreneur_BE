@@ -3655,43 +3655,65 @@ def serialize_fixture_summaries(scored_fxs, all_confs, odds_list=None):
 def score_aps_fixture_for_pipeline(fx):
     aps_id = fx.get("aps_id")
     has_api_football_fixture = bool(aps_id)
+    is_statpal_fixture = str(fx.get("source") or "").startswith("statpal") or str(fx.get("match_id") or "").startswith("statpal:")
+    api_home_id = fx.get("api_football_home_team_id") or (fx.get("hid") if not is_statpal_fixture else None)
+    api_away_id = fx.get("api_football_away_team_id") or (fx.get("aid") if not is_statpal_fixture else None)
+    api_league_id = fx.get("api_football_league_id") or (fx.get("code") if not is_statpal_fixture else None)
+    api_fx = {**fx, "hid": api_home_id, "aid": api_away_id, "code": str(api_league_id or "")}
     statpal_context = statpal_scoring_context(fx.get("statpal_context") or {})
     pred_data = fetch_prediction_data(aps_id) if has_api_football_fixture else None
-    if pred_data:
+
+    statpal_hf, statpal_af = _statpal_forms(statpal_context)
+    statpal_h2h = _statpal_h2h(statpal_context, fx)
+
+    if is_statpal_fixture and statpal_hf and statpal_af:
+        hf, af = statpal_hf, statpal_af
+        if pred_data:
+            comparison = pred_data.get("comparison", {})
+            h_comp = {"att": comparison.get("att", {}).get("home", "50%"),
+                      "def": comparison.get("def", {}).get("home", "50%")}
+            a_comp = {"att": comparison.get("att", {}).get("away", "50%"),
+                      "def": comparison.get("def", {}).get("away", "50%")}
+            hf["attack_str"] = _percent_to_ratio(h_comp.get("att"), hf.get("attack_str", 0.5))
+            af["attack_str"] = _percent_to_ratio(a_comp.get("att"), af.get("attack_str", 0.5))
+            hf["defence_str"] = _percent_to_ratio(h_comp.get("def"), hf.get("defence_str", 0.5))
+            af["defence_str"] = _percent_to_ratio(a_comp.get("def"), af.get("defence_str", 0.5))
+        h2h = statpal_h2h if int(statpal_h2h.get("games") or 0) >= 2 else parse_aps_h2h((pred_data or {}).get("h2h", []), fx["hname"])
+    elif pred_data:
         teams_data = pred_data.get("teams",{})
         comparison = pred_data.get("comparison",{})
         h_comp = {"att":comparison.get("att",{}).get("home","50%"),
                   "def":comparison.get("def",{}).get("home","50%")}
         a_comp = {"att":comparison.get("att",{}).get("away","50%"),
                   "def":comparison.get("def",{}).get("away","50%")}
-        hf_overall = fetch_team_recent_form(fx.get("hid"))
-        af_overall = fetch_team_recent_form(fx.get("aid"))
-        hf = fetch_team_recent_form(fx.get("hid"), venue="home") or hf_overall or map_aps_to_form(teams_data.get("home"),h_comp)
-        af = fetch_team_recent_form(fx.get("aid"), venue="away") or af_overall or map_aps_to_form(teams_data.get("away"),a_comp)
-        strength = league_strength_factor(fx)
+        hf_overall = fetch_team_recent_form(api_home_id)
+        af_overall = fetch_team_recent_form(api_away_id)
+        hf = fetch_team_recent_form(api_home_id, venue="home") or hf_overall or map_aps_to_form(teams_data.get("home"),h_comp)
+        af = fetch_team_recent_form(api_away_id, venue="away") or af_overall or map_aps_to_form(teams_data.get("away"),a_comp)
+        strength = league_strength_factor(api_fx)
         hf = apply_league_strength(hf, strength)
         af = apply_league_strength(af, strength)
         hf["attack_str"] = _percent_to_ratio(h_comp.get("att"), hf.get("attack_str", 0.5))
         af["attack_str"] = _percent_to_ratio(a_comp.get("att"), af.get("attack_str", 0.5))
         hf["defence_str"] = _percent_to_ratio(h_comp.get("def"), hf.get("defence_str", 0.5))
         af["defence_str"] = _percent_to_ratio(a_comp.get("def"), af.get("defence_str", 0.5))
-        h2h = parse_aps_h2h(pred_data.get("h2h",[]),fx["hname"])
+        h2h = statpal_h2h if is_statpal_fixture and int(statpal_h2h.get("games") or 0) >= 2 else parse_aps_h2h(pred_data.get("h2h",[]),fx["hname"])
     else:
         if has_api_football_fixture:
-            hf=fetch_team_recent_form(fx.get("hid"), venue="home") or fetch_team_recent_form(fx.get("hid")) or _default_form()
-            af=fetch_team_recent_form(fx.get("aid"), venue="away") or fetch_team_recent_form(fx.get("aid")) or _default_form()
-            strength = league_strength_factor(fx)
+            hf=fetch_team_recent_form(api_home_id, venue="home") or fetch_team_recent_form(api_home_id) or _default_form()
+            af=fetch_team_recent_form(api_away_id, venue="away") or fetch_team_recent_form(api_away_id) or _default_form()
+            strength = league_strength_factor(api_fx)
             hf = apply_league_strength(hf, strength)
             af = apply_league_strength(af, strength)
         else:
-            hf, af = _statpal_forms(statpal_context)
+            hf, af = statpal_hf, statpal_af
             if not hf or not af:
                 hf = _empty_form()
                 af = _empty_form()
-        h2h = parse_aps_h2h([], fx["hname"]) if has_api_football_fixture else _statpal_h2h(statpal_context, fx)
+        h2h = parse_aps_h2h([], fx["hname"]) if has_api_football_fixture else statpal_h2h
     fx["home_recent_form"] = recent_form_summary(hf)
     fx["away_recent_form"] = recent_form_summary(af)
-    fixture_context = build_fixture_context(fx, hf, af)
+    fixture_context = build_fixture_context(api_fx if has_api_football_fixture else fx, hf, af)
     fixture_context["h2h"] = h2h
     fixture_context["scoreline_profile"] = build_matchup_scoreline_profile(hf, af, h2h)
     fixture_context["statpal"] = statpal_context
@@ -3700,19 +3722,27 @@ def score_aps_fixture_for_pipeline(fx):
     context_flags = set(fixture_context.get("flags") or [])
     context_flags.add("h2h_available" if int(h2h.get("games") or 0) >= 2 else "h2h_unavailable")
     context_flags.update(statpal_context.get("flags") or [])
+    if is_statpal_fixture:
+        context_flags.add("statpal_fixture_source")
     if not has_api_football_fixture:
         context_flags.add("api_football_fixture_unavailable")
-        context_flags.add("statpal_fixture_source")
+    elif is_statpal_fixture:
+        context_flags.add("api_football_fixture_enriched")
     fixture_context["flags"] = sorted(context_flags)
-    team_news = (
-        fetch_fixture_team_news(aps_id, fx.get("hid"), fx.get("aid"))
-        if has_api_football_fixture
-        else _statpal_team_news(statpal_context)
-    )
+    if is_statpal_fixture:
+        team_news = _statpal_team_news(statpal_context)
+        if has_api_football_fixture and not team_news.get("available"):
+            team_news = fetch_fixture_team_news(aps_id, fx.get("api_football_home_team_id") or fx.get("hid"), fx.get("api_football_away_team_id") or fx.get("aid"))
+            team_news.setdefault("flags", []).append("api_football_team_news_fallback")
+    else:
+        team_news = fetch_fixture_team_news(aps_id, fx.get("hid"), fx.get("aid")) if has_api_football_fixture else _statpal_team_news(statpal_context)
     fx["fixture_context"] = fixture_context
     fx["team_news"] = team_news
-    real_odds = get_api_football_odds(aps_id) if has_api_football_fixture else _statpal_real_odds(statpal_context)
-    if not has_api_football_fixture and not (hf.get("games") and af.get("games")):
+    real_odds = _statpal_real_odds(statpal_context) if is_statpal_fixture else {}
+    if has_api_football_fixture:
+        api_odds = get_api_football_odds(aps_id)
+        real_odds = {**api_odds, **real_odds} if is_statpal_fixture else api_odds
+    if not (hf.get("games") and af.get("games")):
         context_flags.add("insufficient_statpal_fixture_data")
         fixture_context["flags"] = sorted(context_flags)
         log.info(
@@ -3722,7 +3752,7 @@ def score_aps_fixture_for_pipeline(fx):
         )
         return fx, {}, real_odds
     corner_odds_available = any(key.startswith("Corners ") for key in real_odds)
-    corner_profile = build_corner_profile(fx) if has_api_football_fixture and corner_odds_available else {}
+    corner_profile = build_corner_profile(api_fx) if has_api_football_fixture and corner_odds_available else {}
     fx["corner_profile"] = corner_profile
     confs = score_fixture(
         hf,

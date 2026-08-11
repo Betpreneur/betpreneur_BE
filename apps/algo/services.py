@@ -1807,6 +1807,135 @@ class AlgoRunnerService:
             or ""
         ).strip()
 
+    def _api_enrichment_rows(self, target_date):
+        return list(
+            FixtureCache.objects.filter(match_date=target_date)
+            .exclude(source="statpal")
+            .only(
+                "match_id",
+                "match_date",
+                "fixture",
+                "home_team",
+                "away_team",
+                "home_team_normalized",
+                "away_team_normalized",
+                "fixture_normalized",
+                "home_logo",
+                "away_logo",
+                "league",
+                "league_logo",
+                "country",
+                "country_flag",
+                "round",
+                "league_type",
+                "kickoff",
+                "kickoff_utc",
+                "api_payload",
+                "source",
+            )
+        )
+
+    def _api_enrichment_match(self, fixture, api_rows):
+        home_query = normalize_fixture_text(fixture.get("hname") or fixture.get("home_team") or "")
+        away_query = normalize_fixture_text(fixture.get("aname") or fixture.get("away_team") or "")
+        normalized_query = normalize_fixture_text(fixture.get("fixture") or "")
+        best = None
+        for row in api_rows:
+            if home_query and away_query:
+                direct = (
+                    _token_side_score(home_query, row.home_team_normalized or row.home_team)
+                    + _token_side_score(away_query, row.away_team_normalized or row.away_team)
+                ) / 2
+                reversed_match = (
+                    _token_side_score(home_query, row.away_team_normalized or row.away_team)
+                    + _token_side_score(away_query, row.home_team_normalized or row.home_team)
+                ) / 2
+                orientation = "reversed" if reversed_match > direct else "direct"
+                score = max(direct, reversed_match) * 100
+            else:
+                orientation = "unknown"
+                score = SequenceMatcher(None, normalized_query, row.fixture_normalized or normalize_fixture_text(row.fixture)).ratio() * 100
+            if score >= 82 and (best is None or score > best[0]):
+                best = (round(score, 2), orientation, row)
+        return best
+
+    def _merge_api_football_enrichment(self, fixture, api_row, *, score=0, orientation="unknown"):
+        item = dict(fixture or {})
+        if not api_row:
+            item.setdefault("provider_merge", {})["api_football"] = {"matched": False}
+            return item
+        payload = api_row.api_payload or {}
+        api_home_id = payload.get("provider_home_team_id") or payload.get("hid") or payload.get("home_team_id")
+        api_away_id = payload.get("provider_away_team_id") or payload.get("aid") or payload.get("away_team_id")
+        api_league_id = payload.get("provider_competition_id") or payload.get("code") or payload.get("league_id")
+        api_provider_match_id = payload.get("provider_match_id") or payload.get("main_id") or api_row.match_id
+
+        def fill(key, value):
+            if item.get(key) in (None, "") and value not in (None, ""):
+                item[key] = value
+
+        fill("home_logo", api_row.home_logo)
+        fill("away_logo", api_row.away_logo)
+        fill("league_logo", api_row.league_logo)
+        fill("country_flag", api_row.country_flag)
+        fill("round", api_row.round)
+        fill("league_type", api_row.league_type)
+        fill("kickoff_utc", api_row.kickoff_utc.isoformat() if api_row.kickoff_utc else "")
+        fill("country", api_row.country)
+        item["api_football_fixture_id"] = str(api_row.match_id or "")
+        item["api_football_provider_match_id"] = str(api_provider_match_id or "")
+        item["api_football_league_id"] = str(api_league_id or "")
+        item["api_football_home_team_id"] = api_home_id
+        item["api_football_away_team_id"] = api_away_id
+        item["api_football_source"] = api_row.source
+        item["aps_id"] = str(api_row.match_id or "")
+        provider_merge = dict(item.get("provider_merge") or {})
+        provider_merge["api_football"] = {
+            "matched": True,
+            "match_id": str(api_row.match_id or ""),
+            "league_id": str(api_league_id or ""),
+            "home_team_id": str(api_home_id or ""),
+            "away_team_id": str(api_away_id or ""),
+            "score": score,
+            "orientation": orientation,
+            "used_for": ["metadata", "odds_fallback", "team_form_fallback", "prediction_fallback"],
+        }
+        provider_merge["primary"] = "statpal"
+        item["provider_merge"] = provider_merge
+        return item
+
+    def _enrich_statpal_fixtures_with_api_football(self, fixtures, target_date):
+        api_rows = self._api_enrichment_rows(target_date)
+        enriched = []
+        matched = 0
+        for fixture in fixtures or []:
+            match = self._api_enrichment_match(fixture, api_rows)
+            if match:
+                score, orientation, row = match
+                enriched.append(self._merge_api_football_enrichment(fixture, row, score=score, orientation=orientation))
+                matched += 1
+            else:
+                enriched.append(self._merge_api_football_enrichment(fixture, None))
+        log.info(
+            "Daily StatPal/API-Football provider merge date=%s statpal_fixtures=%s api_candidates=%s matched=%s",
+            target_date,
+            len(fixtures or []),
+            len(api_rows),
+            matched,
+        )
+        return enriched
+
+    def _sync_api_football_enrichment_cache(self, target_date):
+        from .grindalgo import algo_runner
+
+        try:
+            with temporary_env(self._runner_env({"APS_MAX_FIXTURES": "0"})):
+                fixtures = algo_runner.fetch_aps_fixtures(target_date.isoformat())
+            synced = FixtureSearchService(runner_service=self)._upsert_api_fixtures(fixtures, target_date)
+            return {"synced": synced, "errors": []}
+        except Exception as exc:
+            return {"synced": 0, "errors": [{"provider": "api_football", "error": str(exc)}]}
+
     def _statpal_cached_runner_fixtures(self, target_date):
         queryset = FixtureCache.objects.filter(match_date=target_date, source="statpal")
         tracked = self._statpal_tracked_league_ids()
@@ -1832,6 +1961,9 @@ class AlgoRunnerService:
                 except Exception as exc:
                     statpal_errors = [{"provider": "statpal", "error": str(exc)}]
             if fixtures:
+                api_sync = self._sync_api_football_enrichment_cache(target_date)
+                statpal_errors.extend(api_sync.get("errors") or [])
+                fixtures = self._enrich_statpal_fixtures_with_api_football(fixtures, target_date)
                 return {
                     "fixtures": fixtures,
                     "source": "statpal",
@@ -3154,11 +3286,12 @@ class AlgoRunnerService:
                 family_counts = self._market_family_counts(summary.get("markets") or [])
                 statpal_family_coverage = (summary.get("insights") or {}).get("statpal_market_family_coverage") or {}
                 log.info(
-                    "Daily fixture scored run=%s match_id=%s markets=%s market_families=%s statpal_family_coverage=%s",
+                    "Daily fixture scored run=%s match_id=%s markets=%s market_families=%s provider_merge=%s statpal_family_coverage=%s",
                     algo_run.id,
                     summary.get("match_id"),
                     market_count,
                     family_counts,
+                    (scored_fixture.get("provider_merge") or {}),
                     statpal_family_coverage,
                 )
                 algo_runner.clear_runtime_caches()

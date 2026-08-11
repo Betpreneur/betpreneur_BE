@@ -5,7 +5,7 @@ from django.test import SimpleTestCase, TestCase
 
 from apps.algo.grindalgo import algo_runner
 from apps.algo.models import FixtureCache
-from apps.algo.services import FixtureSearchService
+from apps.algo.services import AlgoRunnerService, FixtureSearchService
 
 
 def _form(avg_scored=1.2, wins=3):
@@ -100,6 +100,64 @@ class StatPalFixtureMappingPureTests(SimpleTestCase):
         self.assertEqual(fixture["statpal_provider_competition_id"], "1")
         self.assertEqual(fixture["statpal_home_team_id"], "2339730")
         self.assertEqual(fixture["statpal_away_team_id"], "2346325")
+
+    def test_statpal_daily_fixture_merges_api_football_metadata_without_overwriting_statpal_ids(self):
+        api_row = FixtureCache(
+            match_date=date(2026, 8, 11),
+            fixture="CSKA 1948 Sofia vs Panathinaikos",
+            home_team="CSKA 1948 Sofia",
+            away_team="Panathinaikos",
+            home_team_normalized="cska 1948 sofia",
+            away_team_normalized="panathinaikos",
+            fixture_normalized="cska 1948 sofia vs panathinaikos",
+            home_logo="https://api-football/home.png",
+            away_logo="https://api-football/away.png",
+            league_logo="https://api-football/league.png",
+            country_flag="https://api-football/eu.svg",
+            round="Qualifying Round",
+            league_type="Cup",
+            match_id="123456",
+            source="aps_provider_lookup",
+            api_payload={
+                "provider_competition_id": "848",
+                "provider_home_team_id": "10",
+                "provider_away_team_id": "20",
+            },
+        )
+        statpal_fixture = {
+            "fixture": "CSKA 1948 Sofia vs Panathinaikos",
+            "hname": "CSKA 1948 Sofia",
+            "aname": "Panathinaikos",
+            "home_logo": "",
+            "away_logo": "",
+            "league_logo": "",
+            "country_flag": "",
+            "match_id": "statpal:2026081139083",
+            "source": "statpal_daily_cache",
+            "statpal_provider_match_id": "2026081139083",
+            "statpal_provider_competition_id": "20686",
+            "statpal_home_team_id": "2341111",
+            "statpal_away_team_id": "2342222",
+            "hid": "2341111",
+            "aid": "2342222",
+            "code": "20686",
+        }
+
+        merged = AlgoRunnerService()._merge_api_football_enrichment(statpal_fixture, api_row, score=98.0, orientation="direct")
+
+        self.assertEqual(merged["match_id"], "statpal:2026081139083")
+        self.assertEqual(merged["hid"], "2341111")
+        self.assertEqual(merged["aid"], "2342222")
+        self.assertEqual(merged["code"], "20686")
+        self.assertEqual(merged["statpal_provider_competition_id"], "20686")
+        self.assertEqual(merged["home_logo"], "https://api-football/home.png")
+        self.assertEqual(merged["away_logo"], "https://api-football/away.png")
+        self.assertEqual(merged["api_football_fixture_id"], "123456")
+        self.assertEqual(merged["api_football_league_id"], "848")
+        self.assertEqual(merged["api_football_home_team_id"], "10")
+        self.assertEqual(merged["api_football_away_team_id"], "20")
+        self.assertEqual(merged["aps_id"], "123456")
+        self.assertEqual(merged["provider_merge"]["primary"], "statpal")
 
 
 class StatPalFixtureMappingTests(TestCase):
