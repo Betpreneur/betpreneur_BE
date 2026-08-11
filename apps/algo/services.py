@@ -1931,7 +1931,7 @@ class AlgoRunnerService:
         try:
             with temporary_env(self._runner_env({"APS_MAX_FIXTURES": "0"})):
                 fixtures = algo_runner.fetch_aps_fixtures(target_date.isoformat())
-            synced = FixtureSearchService(runner_service=self)._upsert_api_fixtures(fixtures, target_date)
+            synced = FixtureSearchService(runner_service=self)._upsert_fixtures(fixtures, target_date)
             return {"synced": synced, "errors": []}
         except Exception as exc:
             return {"synced": 0, "errors": [{"provider": "api_football", "error": str(exc)}]}
