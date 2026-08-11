@@ -1,4 +1,6 @@
 from unittest.mock import patch
+from datetime import datetime, timezone
+import json
 
 from django.test import SimpleTestCase
 
@@ -135,3 +137,32 @@ class DailyStatPalFixtureSourceTests(SimpleTestCase):
         market_diag = enriched["markets"][0]["insights"]["statpal_market_coverage"]
         self.assertIn("coverage_percent", market_diag)
         self.assertIn("statpal_market_family_coverage", enriched["insights"])
+
+    def test_fixture_defaults_json_safes_nested_datetimes(self):
+        service = AlgoRunnerService()
+        algo_run = type("Run", (), {"target_date": datetime(2026, 8, 11, tzinfo=timezone.utc).date()})()
+        fixture = {
+            "fixture": "Stratford vs Redditch",
+            "match_id": "statpal:2026081118708",
+            "fixture_context": {
+                "statpal": {
+                    "snapshots": {
+                        "team_stats": {
+                            "feed_updated": datetime(2026, 8, 11, 0, 49, tzinfo=timezone.utc),
+                        }
+                    }
+                }
+            },
+            "source_payload": {
+                "feed_updated": datetime(2026, 8, 11, 0, 49, tzinfo=timezone.utc),
+            },
+        }
+
+        defaults = service._fixture_defaults(algo_run, fixture)
+
+        json.dumps(defaults["fixture_context"])
+        json.dumps(defaults["source_payload"])
+        self.assertEqual(
+            defaults["fixture_context"]["statpal"]["snapshots"]["team_stats"]["feed_updated"],
+            "2026-08-11 00:49:00+00:00",
+        )
