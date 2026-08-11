@@ -4,7 +4,7 @@ from unittest import mock
 from django.test import TestCase
 
 from apps.algo.models import FixtureCache
-from apps.algo.services import AlgoRunnerService
+from apps.algo.services import AlgoRunnerService, FixtureSearchService
 
 
 class OnDemandFixtureScoringPayloadTests(TestCase):
@@ -80,6 +80,90 @@ class OnDemandFixtureScoringPayloadTests(TestCase):
         payload = AlgoRunnerService()._cached_fixture_runner_payload(cached)
 
         self.assertNotIn("aps_id", payload)
+
+    def test_cross_provider_enrichment_adds_api_football_to_statpal_fixture(self):
+        FixtureCache.objects.create(
+            match_date=date(2026, 8, 8),
+            fixture="Dundee vs Aberdeen",
+            home_team="Dundee",
+            away_team="Aberdeen",
+            home_team_normalized="dundee",
+            away_team_normalized="aberdeen",
+            fixture_normalized="dundee vs aberdeen",
+            match_id="1556634",
+            source="aps_provider_lookup",
+            api_payload={
+                "provider_competition_id": "179",
+                "provider_home_team_id": "246",
+                "provider_away_team_id": "250",
+            },
+        )
+        statpal = {
+            "fixture": "Dundee vs Aberdeen",
+            "hname": "Dundee",
+            "aname": "Aberdeen",
+            "match_id": "statpal:sp-991",
+            "source": "statpal_daily_cache",
+            "statpal_provider_match_id": "sp-991",
+            "statpal_provider_competition_id": "3203",
+            "statpal_home_team_id": "2341",
+            "statpal_away_team_id": "2342",
+            "hid": "2341",
+            "aid": "2342",
+            "code": "3203",
+        }
+
+        enriched = AlgoRunnerService()._enrich_fixture_for_cross_provider_scoring(statpal, date(2026, 8, 8))
+
+        self.assertEqual(enriched["match_id"], "statpal:sp-991")
+        self.assertEqual(enriched["hid"], "2341")
+        self.assertEqual(enriched["aid"], "2342")
+        self.assertEqual(enriched["api_football_fixture_id"], "1556634")
+        self.assertEqual(enriched["api_football_home_team_id"], "246")
+        self.assertEqual(enriched["api_football_away_team_id"], "250")
+        self.assertTrue(enriched["provider_merge"]["api_football"]["matched"])
+
+    def test_cross_provider_enrichment_adds_statpal_to_api_football_fixture(self):
+        FixtureCache.objects.create(
+            match_date=date(2026, 8, 8),
+            fixture="Dundee vs Aberdeen",
+            home_team="Dundee",
+            away_team="Aberdeen",
+            home_team_normalized="dundee",
+            away_team_normalized="aberdeen",
+            fixture_normalized="dundee vs aberdeen",
+            match_id="statpal:sp-991",
+            source="statpal",
+            api_payload={
+                "provider_match_id": "sp-991",
+                "provider_competition_id": "3203",
+                "provider_home_team_id": "2341",
+                "provider_away_team_id": "2342",
+            },
+        )
+        api_fixture = {
+            "fixture": "Dundee vs Aberdeen",
+            "hname": "Dundee",
+            "aname": "Aberdeen",
+            "match_id": "1556634",
+            "aps_id": "1556634",
+            "source": "aps_provider_lookup",
+            "hid": "246",
+            "aid": "250",
+            "code": "179",
+        }
+
+        with mock.patch.object(FixtureSearchService, "sync_statpal_daily", return_value={"synced": 0, "errors": []}):
+            enriched = AlgoRunnerService()._enrich_fixture_for_cross_provider_scoring(api_fixture, date(2026, 8, 8))
+
+        self.assertEqual(enriched["match_id"], "1556634")
+        self.assertEqual(enriched["aps_id"], "1556634")
+        self.assertEqual(enriched["statpal_match_id"], "statpal:sp-991")
+        self.assertEqual(enriched["statpal_provider_match_id"], "sp-991")
+        self.assertEqual(enriched["statpal_provider_competition_id"], "3203")
+        self.assertEqual(enriched["statpal_home_team_id"], "2341")
+        self.assertEqual(enriched["statpal_away_team_id"], "2342")
+        self.assertTrue(enriched["provider_merge"]["statpal"]["matched"])
 
     def test_algo_runner_service_hydrates_statpal_context(self):
         refresh = {"errors": [], "refreshed": ["form"]}

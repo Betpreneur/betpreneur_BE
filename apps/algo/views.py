@@ -828,6 +828,11 @@ def _game_summary_from_fixture(item, picks_by_match, request=None, include_marke
         "team_news": item.get("team_news", {}),
         "corner_profile": item.get("corner_profile", {}),
         "insights": item.get("insights", {}),
+        "provider_merge": (
+            item.get("provider_merge")
+            or ((item.get("source_payload") or {}).get("provider_merge") if isinstance(item.get("source_payload"), dict) else {})
+            or {}
+        ),
     }
     if include_markets:
         payload["markets"] = markets
@@ -2387,6 +2392,12 @@ def _manual_fixture_game(match_id, match_date, request=None):
         .select_related("selected_pick")
         .order_by("-confidence", "-ev", "market")
     )
+    source_payload = (
+        AlgoFixture.objects.filter(run=algo_run, match_id=str(match_id))
+        .values_list("source_payload", flat=True)
+        .first()
+        or {}
+    )
     markets = [
         _market_prediction_payload(item)
         for item in predictions
@@ -2404,6 +2415,7 @@ def _manual_fixture_game(match_id, match_date, request=None):
         "fixture_context": prediction.fixture_context,
         "team_news": prediction.team_news,
         "markets": markets,
+        "source_payload": source_payload,
     }
     return _game_summary_from_fixture(
         fixture_summary,
@@ -2446,6 +2458,7 @@ def _minimal_game_from_candidate(candidate):
         "team_news": candidate.get("team_news") or {},
         "corner_profile": candidate.get("corner_profile") or {},
         "insights": candidate.get("insights") or {},
+        "provider_merge": candidate.get("provider_merge") or {},
     }
 
 
@@ -2469,6 +2482,7 @@ def _matched_fixture_with_statpal(candidate, game=None, statpal_candidate=None, 
         "statpal_away_team_id": away_team_id or statpal_candidate.get("away_team_id") or "",
         "statpal_home_team": statpal_candidate.get("home_team") or "",
         "statpal_away_team": statpal_candidate.get("away_team") or "",
+        "provider_merge": game.get("provider_merge") or candidate.get("provider_merge") or {},
     }
 
 
@@ -3368,6 +3382,7 @@ def _public_selection_card(item):
         "statpal_missing_snapshot_types": statpal_coverage.get("missing") or statpal_plan.get("missing_snapshot_types") or [],
         "statpal_stale_snapshot_types": statpal_plan.get("stale_snapshot_types") or [],
         "statpal_snapshot_coverage_percent": statpal_coverage.get("coverage_percent") if statpal_coverage else statpal_plan.get("coverage_percent"),
+        "provider_merge": (item.get("matched_fixture") or {}).get("provider_merge") or item.get("provider_merge") or {},
         "has_technical_details": True,
     }
     leg_assessment = assess_leg(item)
@@ -4643,6 +4658,7 @@ def _log_slip_review_debug(review, summary):
                 "confidence_gain=%s ticket_lift=%s value=%s market_gap=%s disagreement=%s "
                 "price_status=%s statpal_source=%s statpal_cache=%s statpal_coverage=%s "
                 "statpal_required=%s statpal_missing=%s statpal_stale=%s statpal_snapshots=%s "
+                "provider_merge=%s "
                 "warnings=%s tracking_reasons=%s bettor_verdict=%s recommendation=%s "
                 "evidence_count=%s reason_codes=%s"
             ),
@@ -4677,6 +4693,7 @@ def _log_slip_review_debug(review, summary):
             technical.get("statpal_missing_snapshot_types") or [],
             technical.get("statpal_stale_snapshot_types") or [],
             technical.get("statpal_snapshot_types") or [],
+            technical.get("provider_merge") or {},
             technical.get("market_capability_warnings") or [],
             untracked_by_id.get(selection_id, []),
             user_pick.get("verdict"),
@@ -5238,6 +5255,7 @@ def _analyse_manual_selection(
         "statpal_provider_competition_id": statpal_provider_competition_id,
         "statpal_home_team_id": statpal_home_team_id,
         "statpal_away_team_id": statpal_away_team_id,
+        "provider_merge": game.get("provider_merge") or {},
     }
     matched_fixture_payload = _matched_fixture_with_statpal(
         candidate,
@@ -5313,6 +5331,7 @@ def _analyse_manual_selection(
             "status": resolution_status,
             **verdict,
             "matched_fixture": matched_fixture_payload,
+            "provider_merge": matched_fixture_payload.get("provider_merge") or {},
             "available_markets": [market.get("market") for market in markets],
             "selected_market": submitted_market,
             "best_market": game.get("best_market"),
@@ -5356,6 +5375,7 @@ def _analyse_manual_selection(
         "status": "analysed",
         **verdict,
         "matched_fixture": matched_fixture_payload,
+        "provider_merge": matched_fixture_payload.get("provider_merge") or {},
         "selected_market": selected_market,
         "best_market": best_market,
         "recommended_market": recommended_market,

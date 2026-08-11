@@ -1925,6 +1925,85 @@ class AlgoRunnerService:
         )
         return enriched
 
+    def _enrich_fixture_for_cross_provider_scoring(self, fixture, target_date):
+        item = dict(fixture or {})
+        if not item:
+            return item
+
+        search_service = FixtureSearchService(runner_service=self)
+        is_statpal_fixture = str(item.get("source") or "").startswith("statpal") or str(item.get("match_id") or "").startswith("statpal:")
+        if is_statpal_fixture:
+            api_rows = self._api_enrichment_rows(target_date)
+            if not api_rows:
+                self._sync_api_football_enrichment_cache(target_date)
+                api_rows = self._api_enrichment_rows(target_date)
+            match = self._api_enrichment_match(item, api_rows)
+            if match:
+                score, orientation, row = match
+                item = self._merge_api_football_enrichment(item, row, score=score, orientation=orientation)
+            else:
+                item = self._merge_api_football_enrichment(item, None)
+            return item
+
+        candidate = {
+            **item,
+            "match_date": target_date,
+            "home_team": item.get("home_team") or item.get("hname") or "",
+            "away_team": item.get("away_team") or item.get("aname") or "",
+        }
+        statpal = search_service.find_statpal_fixture_context(candidate)
+        if not statpal:
+            attached = search_service._attach_statpal_fixture_context([item], target_date)
+            item = dict((attached or [item])[0] or item)
+            if not item.get("statpal_provider_match_id"):
+                return item
+            statpal = item
+
+        item["statpal_match_id"] = statpal.get("statpal_match_id") or statpal.get("match_id") or item.get("statpal_match_id") or ""
+        item["statpal_provider_match_id"] = (
+            statpal.get("statpal_provider_match_id")
+            or statpal.get("provider_match_id")
+            or str(statpal.get("match_id") or "").replace("statpal:", "", 1)
+            or item.get("statpal_provider_match_id")
+            or ""
+        )
+        item["statpal_provider_competition_id"] = (
+            statpal.get("statpal_provider_competition_id")
+            or statpal.get("provider_competition_id")
+            or statpal.get("code")
+            or item.get("statpal_provider_competition_id")
+            or ""
+        )
+        item["statpal_home_team_id"] = str(
+            statpal.get("statpal_home_team_id")
+            or statpal.get("home_team_id")
+            or statpal.get("hid")
+            or item.get("statpal_home_team_id")
+            or ""
+        )
+        item["statpal_away_team_id"] = str(
+            statpal.get("statpal_away_team_id")
+            or statpal.get("away_team_id")
+            or statpal.get("aid")
+            or item.get("statpal_away_team_id")
+            or ""
+        )
+        provider_merge = dict(item.get("provider_merge") or {})
+        provider_merge["primary"] = item.get("source") or "api_football"
+        provider_merge["statpal"] = {
+            "matched": True,
+            "match_id": str(item.get("statpal_match_id") or ""),
+            "provider_match_id": str(item.get("statpal_provider_match_id") or ""),
+            "league_id": str(item.get("statpal_provider_competition_id") or ""),
+            "home_team_id": str(item.get("statpal_home_team_id") or ""),
+            "away_team_id": str(item.get("statpal_away_team_id") or ""),
+            "score": statpal.get("match_score"),
+            "orientation": statpal.get("match_orientation") or "direct",
+            "used_for": ["snapshots", "market_context", "team_news", "odds_context"],
+        }
+        item["provider_merge"] = provider_merge
+        return item
+
     def _sync_api_football_enrichment_cache(self, target_date):
         from .grindalgo import algo_runner
 
@@ -3346,6 +3425,14 @@ class AlgoRunnerService:
             },
         )
         source_payload = self._cached_fixture_runner_payload(cached)
+        source_payload = self._enrich_fixture_for_cross_provider_scoring(source_payload, target_date)
+        log.info(
+            "On-demand provider merge match_id=%s target_date=%s reason=%s provider_merge=%s",
+            match_id,
+            target_date,
+            reason,
+            source_payload.get("provider_merge") or {},
+        )
         fixture = AlgoFixture.objects.create(
             run=algo_run,
             match_date=target_date,
