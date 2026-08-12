@@ -164,6 +164,8 @@ SPORTYBET_MARKETS: dict[str, MarketSpec] = {
     "95": MarketSpec("btts", _2H, _MATCH, YES_NO, Settlement.WIN_LOSE),
     "31": MarketSpec("team_clean_sheet", _FULL, _HOME, YES_NO, Settlement.WIN_LOSE),
     "32": MarketSpec("team_clean_sheet", _FULL, _AWAY, YES_NO, Settlement.WIN_LOSE),
+    "33": MarketSpec("team_win_to_nil", _FULL, _HOME, YES_NO, Settlement.WIN_LOSE),
+    "34": MarketSpec("team_win_to_nil", _FULL, _AWAY, YES_NO, Settlement.WIN_LOSE),
     "35": MarketSpec("result_btts", _FULL, _MATCH, RESULT_BTTS, Settlement.WIN_LOSE),
     "36": MarketSpec("total_btts", _FULL, _MATCH, TOTAL_BTTS, Settlement.WIN_LOSE),
     "546": MarketSpec("double_chance_btts", _FULL, _MATCH, DOUBLE_CHANCE_BTTS, Settlement.WIN_LOSE),

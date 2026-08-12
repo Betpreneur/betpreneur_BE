@@ -170,6 +170,10 @@ def canonical_text(market: CanonicalMarket) -> str:
         subject_word = {Subject.HOME: "Home Team", Subject.AWAY: "Away Team"}.get(market.subject, "Team")
         outcome = "Yes" if side == "yes" else "No" if side == "no" else side.title()
         return f"{prefix}{subject_word} Clean Sheet - {outcome}".strip()
+    if family == "team_win_to_nil":
+        result_word = {Subject.HOME: "Home Win", Subject.AWAY: "Away Win"}.get(market.subject, "Team Win")
+        outcome = "Yes" if side == "yes" else "No" if side == "no" else side.title()
+        return f"{prefix}{result_word} To Nil - {outcome}".strip()
     if family == "corners_result":
         return f"{prefix}Corners 1X2 - {_RESULT_TEXT.get(side, side.title())}".strip()
     if family == "nth_corner":
@@ -276,6 +280,7 @@ def canonical_text(market: CanonicalMarket) -> str:
         "cards_result": "Cards Result",
         "highest_scoring_half": "Highest Scoring Half",
         "team_goals_odd_even": "Team Goals Odd/Even",
+        "team_win_to_nil": "Win To Nil",
     }.get(family, family.replace("_", " ").title())
 
     parts = [prefix.strip(), subject_word, label, _SIDE_TITLE.get(side, side.replace("_", " ").title()), _line_text(line)]

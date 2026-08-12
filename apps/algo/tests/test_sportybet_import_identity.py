@@ -522,6 +522,25 @@ class MarketIdentityThroughImportTests(SimpleTestCase):
                 self.assertEqual(leg["canonical_market"]["side"], expected_side)
                 self.assertEqual(leg["market_taxonomy"]["family"], "result_or_clean_sheet")
 
+    def test_win_to_nil_import_keeps_yes_no_market_identity(self):
+        cases = [
+            ("33", "Home Team to Win to Nil", "74", "Home Win To Nil - Yes", "home", "yes"),
+            ("33", "Home Team to Win to Nil", "76", "Home Win To Nil - No", "home", "no"),
+            ("34", "Away Team to Win to Nil", "74", "Away Win To Nil - Yes", "away", "yes"),
+            ("34", "Away Team to Win to Nil", "76", "Away Win To Nil - No", "away", "no"),
+        ]
+
+        for market_id, market_desc, outcome_id, expected_market, expected_team, expected_side in cases:
+            outcome_desc = "Yes" if outcome_id == "74" else "No"
+            with self.subTest(market_id=market_id, outcome_id=outcome_id):
+                leg = self._single(market_id, outcome_id, market_desc, outcome_desc)
+
+                self.assertEqual(leg["market"], expected_market)
+                self.assertEqual(leg["canonical_market"]["family"], "team_win_to_nil")
+                self.assertEqual(leg["canonical_market"]["side"], expected_side)
+                self.assertEqual(leg["market_taxonomy"]["family"], "team_win_to_nil")
+                self.assertEqual(leg["market_taxonomy"]["team"], expected_team)
+
     def test_bookings_1x2_is_not_read_as_the_match_result(self):
         leg = self._single("136", "2", "Bookings 1X2", "Draw")
 
