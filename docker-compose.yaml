@@ -21,6 +21,23 @@ services:
       WEB_CONCURRENCY: ${WEB_CONCURRENCY:-2}
       WEB_THREADS: ${WEB_THREADS:-2}
       GUNICORN_TIMEOUT: ${GUNICORN_TIMEOUT:-120}
+      ENABLE_WEBSOCKETS: ${ENABLE_WEBSOCKETS:-true}
+      SLIP_REVIEW_PARALLEL_LEG_THRESHOLD: ${SLIP_REVIEW_PARALLEL_LEG_THRESHOLD:-4}
+      SLIP_REVIEW_ANALYSIS_WORKERS: ${SLIP_REVIEW_ANALYSIS_WORKERS:-4}
+      SLIP_REVIEW_LEG_CACHE_TTL_SECONDS: ${SLIP_REVIEW_LEG_CACHE_TTL_SECONDS:-900}
+      SLIP_REVIEW_LEG_CACHE_LOCK_SECONDS: ${SLIP_REVIEW_LEG_CACHE_LOCK_SECONDS:-300}
+      SLIP_REVIEW_LEG_CACHE_WAIT_SECONDS: ${SLIP_REVIEW_LEG_CACHE_WAIT_SECONDS:-45}
+      SLIP_REVIEW_STALE_AFTER_SECONDS: ${SLIP_REVIEW_STALE_AFTER_SECONDS:-1200}
+      SLIP_REVIEW_RECOVERY_MINUTES: ${SLIP_REVIEW_RECOVERY_MINUTES:-*/5}
+      SLIP_REVIEW_RECOVERY_LIMIT: ${SLIP_REVIEW_RECOVERY_LIMIT:-25}
+      SLIP_REVIEW_DEEPSEEK_MAX_GAMES: ${SLIP_REVIEW_DEEPSEEK_MAX_GAMES:-5}
+    command: >
+      sh -c "echo '[startup] running migrations' &&
+      python manage.py migrate --noinput &&
+      echo '[startup] collecting static files' &&
+      python manage.py collectstatic --noinput &&
+      echo '[startup] starting uvicorn ASGI on 0.0.0.0:8000' &&
+      exec uvicorn config.asgi:application --host 0.0.0.0 --port 8000 --workers ${WEB_CONCURRENCY:-2} --proxy-headers --forwarded-allow-ips='*'"
     volumes:
       - media:/home/appuser/media
     healthcheck:
@@ -41,6 +58,14 @@ services:
     environment:
       DJANGO_SETTINGS_MODULE: config.settings
       TZ: Africa/Lagos
+      ENABLE_WEBSOCKETS: ${ENABLE_WEBSOCKETS:-true}
+      SLIP_REVIEW_PARALLEL_LEG_THRESHOLD: ${SLIP_REVIEW_PARALLEL_LEG_THRESHOLD:-4}
+      SLIP_REVIEW_ANALYSIS_WORKERS: ${SLIP_REVIEW_ANALYSIS_WORKERS:-4}
+      SLIP_REVIEW_LEG_CACHE_TTL_SECONDS: ${SLIP_REVIEW_LEG_CACHE_TTL_SECONDS:-900}
+      SLIP_REVIEW_LEG_CACHE_LOCK_SECONDS: ${SLIP_REVIEW_LEG_CACHE_LOCK_SECONDS:-300}
+      SLIP_REVIEW_LEG_CACHE_WAIT_SECONDS: ${SLIP_REVIEW_LEG_CACHE_WAIT_SECONDS:-45}
+      SLIP_REVIEW_STALE_AFTER_SECONDS: ${SLIP_REVIEW_STALE_AFTER_SECONDS:-1200}
+      SLIP_REVIEW_DEEPSEEK_MAX_GAMES: ${SLIP_REVIEW_DEEPSEEK_MAX_GAMES:-5}
     command: celery -A config worker --loglevel=info --concurrency=1 --max-tasks-per-child=1 --prefetch-multiplier=1
     volumes:
       - media:/home/appuser/media
@@ -56,6 +81,10 @@ services:
     environment:
       DJANGO_SETTINGS_MODULE: config.settings
       TZ: Africa/Lagos
+      ENABLE_WEBSOCKETS: ${ENABLE_WEBSOCKETS:-true}
+      SLIP_REVIEW_STALE_AFTER_SECONDS: ${SLIP_REVIEW_STALE_AFTER_SECONDS:-1200}
+      SLIP_REVIEW_RECOVERY_MINUTES: ${SLIP_REVIEW_RECOVERY_MINUTES:-*/5}
+      SLIP_REVIEW_RECOVERY_LIMIT: ${SLIP_REVIEW_RECOVERY_LIMIT:-25}
     command: celery -A config beat --loglevel=info --schedule=/tmp/celerybeat-schedule
 
 volumes:

@@ -5758,13 +5758,19 @@ def _slip_leg_analysis_cache_key(selection):
     provider_payload = selection.get("provider_payload") or {}
     provider_metadata = _provider_metadata(selection)
     descriptor = _selection_market_descriptor(selection, selection.get("market", ""))
+    market_key = (
+        getattr(descriptor, "code", "")
+        or getattr(descriptor, "canonical", "")
+        or selection.get("market")
+        or ""
+    )
     raw_key = {
         "provider": str(selection.get("provider") or provider_metadata.get("provider") or "").lower(),
         "provider_event_id": provider_metadata.get("provider_event_id") or "",
         "provider_competition_id": provider_metadata.get("provider_competition_id") or "",
         "provider_date": _provider_match_date(selection).isoformat() if _provider_match_date(selection) else "",
         "match": normalize_market_text(selection.get("match") or ""),
-        "market": descriptor.normalized or normalize_market_text(selection.get("market") or ""),
+        "market": normalize_market_text(market_key),
         "odds": str(provider_payload.get("odds") or provider_payload.get("displayOdds") or ""),
         "market_id": str(provider_payload.get("marketId") or provider_payload.get("market_id") or ""),
         "outcome_id": str(provider_payload.get("outcomeId") or provider_payload.get("outcome_id") or ""),

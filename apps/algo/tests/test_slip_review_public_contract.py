@@ -22,6 +22,7 @@ from apps.algo.views import (
     recover_stale_slip_reviews,
     _should_skip_core_on_demand,
     _slip_review_payload,
+    _slip_leg_analysis_cache_key,
     _streamed_slip_review_game_payload,
     _ticket_killers_message,
     _without_blocked_replacement_recommendation,
@@ -965,6 +966,23 @@ class SlipReviewPayloadDbTests(TestCase):
         self.assertIn("positive_evidence", payload["game"]["analysis"])
         self.assertIn("recommendation", payload["game"])
         self.assertEqual(payload["recommended_pick"]["match"], "Norway vs England")
+
+    def test_slip_leg_cache_key_uses_market_descriptor_code(self):
+        cache_key, raw_key = _slip_leg_analysis_cache_key(
+            {
+                "provider": "sportybet",
+                "match": "Sporting vs Vitoria SC Guimaraes",
+                "market": "Draw 2UP",
+                "provider_payload": {
+                    "odds": "4.20",
+                    "marketId": "12",
+                    "outcomeId": "34",
+                },
+            }
+        )
+
+        self.assertEqual(len(cache_key), 64)
+        self.assertTrue(raw_key["market"])
 
     def test_stale_recovery_finalizes_from_persisted_completed_legs(self):
         user = get_user_model().objects.create_user(username="stale-finalize")
