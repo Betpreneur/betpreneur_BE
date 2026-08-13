@@ -1,8 +1,12 @@
 from urllib.parse import parse_qs
+import logging
 
 from channels.db import database_sync_to_async
 from django.contrib.auth.models import AnonymousUser
 from rest_framework_simplejwt.authentication import JWTAuthentication
+
+
+log = logging.getLogger(__name__)
 
 
 @database_sync_to_async
@@ -11,7 +15,8 @@ def _user_for_token(token):
         auth = JWTAuthentication()
         validated_token = auth.get_validated_token(token)
         return auth.get_user(validated_token)
-    except Exception:
+    except Exception as exc:
+        log.warning("Websocket JWT authentication failed: %s", exc)
         return AnonymousUser()
 
 

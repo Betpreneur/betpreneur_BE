@@ -10,7 +10,6 @@ django_asgi_app = get_asgi_application()
 
 if getattr(settings, "ENABLE_WEBSOCKETS", False):
     from channels.routing import ProtocolTypeRouter, URLRouter
-    from channels.security.websocket import AllowedHostsOriginValidator
 
     from apps.algo.routing import websocket_urlpatterns
     from apps.algo.websocket_auth import JwtAuthMiddlewareStack
@@ -18,9 +17,7 @@ if getattr(settings, "ENABLE_WEBSOCKETS", False):
     application = ProtocolTypeRouter(
         {
             "http": django_asgi_app,
-            "websocket": AllowedHostsOriginValidator(
-                JwtAuthMiddlewareStack(URLRouter(websocket_urlpatterns))
-            ),
+            "websocket": JwtAuthMiddlewareStack(URLRouter(websocket_urlpatterns)),
         }
     )
 else:

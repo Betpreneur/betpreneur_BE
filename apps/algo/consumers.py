@@ -1,9 +1,13 @@
 from urllib.parse import parse_qs
+import logging
 
 from channels.db import database_sync_to_async
 from channels.generic.websocket import AsyncJsonWebsocketConsumer
 
 from .models import SlipReview, SlipReviewEvent
+
+
+log = logging.getLogger(__name__)
 
 
 class SlipReviewConsumer(AsyncJsonWebsocketConsumer):
@@ -13,15 +17,32 @@ class SlipReviewConsumer(AsyncJsonWebsocketConsumer):
         user = self.scope.get("user")
 
         if not user or not user.is_authenticated:
+            log.warning(
+                "Slip review websocket rejected unauthenticated review=%s client=%s",
+                self.review_id,
+                self.scope.get("client"),
+            )
             await self.close(code=4401)
             return
 
         if not await self._can_access_review(self.review_id, user.id):
+            log.warning(
+                "Slip review websocket rejected unauthorized review=%s user=%s client=%s",
+                self.review_id,
+                user.id,
+                self.scope.get("client"),
+            )
             await self.close(code=4404)
             return
 
         await self.channel_layer.group_add(self.group_name, self.channel_name)
         await self.accept()
+        log.info(
+            "Slip review websocket accepted review=%s user=%s client=%s",
+            self.review_id,
+            user.id,
+            self.scope.get("client"),
+        )
         await self.send_json(await self._snapshot_payload(self.review_id))
 
         last_event_id = self._last_event_id()
