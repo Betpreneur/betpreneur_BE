@@ -99,6 +99,27 @@ class HydratorTests(SimpleTestCase):
         self.assertEqual(self.service.prepare_fixture_context_for_market.call_count, 2)
         self.assertEqual(len(self.hydrator.stats.fixtures_hydrated), 2)
 
+    def test_cache_limit_evicts_old_distinct_fixtures(self):
+        hydrator = FixtureHydrator(snapshot_service=self.service, cache_limit=2)
+        descriptor = describe_market("Cards Over 3.5")
+
+        hydrator.bundle_for(descriptor, match_id="statpal:1")
+        hydrator.bundle_for(descriptor, match_id="statpal:2")
+        hydrator.bundle_for(descriptor, match_id="statpal:3")
+
+        self.assertEqual(len(hydrator._cache), 2)
+        self.assertFalse(any(key[0] == "statpal:1" for key in hydrator._cache))
+
+    def test_cache_limit_zero_disables_retaining_large_bundles(self):
+        hydrator = FixtureHydrator(snapshot_service=self.service, cache_limit=0)
+        descriptor = describe_market("Cards Over 3.5")
+
+        hydrator.bundle_for(descriptor, match_id="statpal:1")
+        hydrator.bundle_for(descriptor, match_id="statpal:1")
+
+        self.assertEqual(len(hydrator._cache), 0)
+        self.assertEqual(self.service.prepare_fixture_context_for_market.call_count, 2)
+
     def test_budget_stops_further_calls_and_is_reported(self):
         hydrator = FixtureHydrator(call_budget=1, snapshot_service=self.service)
         descriptor = describe_market("Cards Over 3.5")

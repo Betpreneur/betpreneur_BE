@@ -5531,12 +5531,13 @@ def process_slip_review_import(review_id):
         hydrator = FixtureHydrator()
         plan = plan_slip_hydration(selections)
         log.info(
-            "Slip hydration plan review=%s legs=%s fixtures=%s needing_snapshots=%s served_by_model=%s",
+            "Slip hydration plan review=%s legs=%s fixtures=%s needing_snapshots=%s served_by_model=%s estimated_snapshot_calls=%s",
             review.id,
             plan["legs"],
             plan["distinct_fixtures"],
             plan["fixtures_needing_snapshots"],
             plan["fixtures_served_by_model"],
+            plan.get("estimated_snapshot_calls"),
         )
 
         results = []

@@ -23,6 +23,7 @@ from ..evaluators.registry import SCORE_MATRIX_ENGINE, evaluator_for, required_c
 from .capability import snapshots_for_capabilities
 
 DEFAULT_CALL_BUDGET = 120
+DEFAULT_CACHE_LIMIT = 4
 
 # Ceilings for a model-backed assessment. These are deliberately below perfect
 # certainty because fitted rates and fixture snapshots can still be thin or live-state
@@ -190,9 +191,10 @@ class FixtureHydrator:
     Not thread-safe by design — one instance belongs to one review being analysed.
     """
 
-    def __init__(self, *, call_budget: int = DEFAULT_CALL_BUDGET, snapshot_service=None):
+    def __init__(self, *, call_budget: int = DEFAULT_CALL_BUDGET, snapshot_service=None, cache_limit: int = DEFAULT_CACHE_LIMIT):
         self._cache: dict[tuple, dict] = {}
         self._budget = max(0, int(call_budget))
+        self._cache_limit = max(0, int(cache_limit))
         self.stats = HydrationStats()
         self._snapshot_service = snapshot_service
 
@@ -271,7 +273,7 @@ class FixtureHydrator:
             }
             self.stats.served_from_snapshot_cache += 1
             self.stats.fixtures_hydrated.add(key[0])
-            self._cache[key] = bundle
+            self._remember(key, bundle)
             return bundle
 
         if not self._has_statpal_fixture_identity(match_id=match_id, provider_match_id=provider_match_id):
@@ -310,7 +312,7 @@ class FixtureHydrator:
                 "plan_before_refresh": cache_plan,
                 "hydration_source": "statpal_identity_missing",
             }
-            self._cache[key] = bundle
+            self._remember(key, bundle)
             return bundle
 
         if self.stats.calls_used >= self._budget:
@@ -341,8 +343,15 @@ class FixtureHydrator:
             bundle["context"] = self.service.fixture_context(match_id=match_id, provider_match_id=provider_match_id)
             self.stats.calls_used += int((team_refresh.get("api_usage") or {}).get("attempted_calls") or 0)
         self.stats.fixtures_hydrated.add(key[0])
-        self._cache[key] = bundle
+        self._remember(key, bundle)
         return bundle
+
+    def _remember(self, key: tuple, bundle: dict) -> None:
+        if self._cache_limit <= 0:
+            return
+        self._cache[key] = bundle
+        while len(self._cache) > self._cache_limit:
+            self._cache.pop(next(iter(self._cache)))
 
     def _snapshot_cache_plan(
         self,
