@@ -131,6 +131,60 @@ def import_slip_review(self, review_id):
         raise
 
 
+@shared_task(
+    bind=True,
+    ignore_result=False,
+    max_retries=1,
+    default_retry_delay=60,
+    soft_time_limit=900,
+    time_limit=1200,
+)
+def analyse_slip_review_leg(self, review_id, index, selection, days=3):
+    try:
+        from .views import _json_safe, process_slip_review_leg_analysis
+
+        return _json_safe(process_slip_review_leg_analysis(review_id, index, selection, days=days))
+    except SoftTimeLimitExceeded as exc:
+        from .views import _json_safe, process_slip_review_leg_failure
+
+        return _json_safe(
+            process_slip_review_leg_failure(
+                review_id,
+                index,
+                selection,
+                "Slip leg analysis timed out.",
+                error_code="soft_time_limit_exceeded",
+            )
+        )
+    except Exception as exc:
+        if self.request.retries < self.max_retries:
+            raise self.retry(exc=exc, countdown=60 * (self.request.retries + 1))
+        from .views import _json_safe, process_slip_review_leg_failure
+
+        return _json_safe(process_slip_review_leg_failure(review_id, index, selection, str(exc)))
+
+
+@shared_task(bind=True, ignore_result=False, max_retries=1, default_retry_delay=60)
+def finalize_slip_review_import(self, leg_results, review_id):
+    try:
+        from .views import _json_safe, finalize_slip_review_import_results
+
+        return _json_safe(finalize_slip_review_import_results(review_id, leg_results))
+    except Exception as exc:
+        if self.request.retries < self.max_retries:
+            raise self.retry(exc=exc, countdown=60)
+        from .views import fail_slip_review_import
+
+        return fail_slip_review_import(review_id, f"Slip review finalization failed: {exc}", error_code="finalize_failed")
+
+
+@shared_task(bind=True, ignore_result=False)
+def recover_stale_slip_reviews(self, stale_after_seconds=None, limit=25):
+    from .views import _json_safe, recover_stale_slip_reviews as recover_stale
+
+    return _json_safe(recover_stale(stale_after_seconds=stale_after_seconds, limit=limit))
+
+
 @shared_task(bind=True, ignore_result=False)
 def recover_daily_run(self, run_id, rescore_failed=False):
     return algo_runner_service.recover_fanout_run(run_id, rescore_failed=rescore_failed)

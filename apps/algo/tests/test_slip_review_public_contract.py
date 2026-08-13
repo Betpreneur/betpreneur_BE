@@ -3,8 +3,10 @@ from types import SimpleNamespace
 
 from django.contrib.auth import get_user_model
 from django.test import SimpleTestCase, TestCase
+from django.utils import timezone
+from rest_framework.test import APIClient
 
-from apps.algo.models import SlipReview
+from apps.algo.models import SlipReview, SlipReviewEvent, SlipSelection
 from apps.algo.ticket_risk import SCORE_BANDS, Calibration
 from apps.algo.views import (
     _build_bettor_public_payload,
@@ -17,8 +19,10 @@ from apps.algo.views import (
     _public_price_check_from_card,
     _public_verdict_object,
     _replacement_market_for_slip,
+    recover_stale_slip_reviews,
     _should_skip_core_on_demand,
     _slip_review_payload,
+    _streamed_slip_review_game_payload,
     _ticket_killers_message,
     _without_blocked_replacement_recommendation,
 )
@@ -710,6 +714,7 @@ class SlipReviewPublicContractTests(SimpleTestCase):
         payload = _slip_review_payload(review, public_only=True)
 
         self.assertEqual(payload["status"], "analysing")
+        self.assertEqual(payload["progress"]["phase"], "analysing")
         self.assertIn("created_at", payload)
         self.assertIn("updated_at", payload)
         self.assertNotIn("ticket", payload)
@@ -840,6 +845,7 @@ class SlipReviewPayloadDbTests(TestCase):
         self.assertEqual(payload["id"], review.id)
         self.assertEqual(payload["source"], "sportybet")
         self.assertEqual(payload["status"], "analysing")
+        self.assertEqual(payload["progress"]["phase"], "analysing")
         self.assertIn("created_at", payload)
         self.assertIn("updated_at", payload)
         self.assertNotIn("ticket", payload)
@@ -897,3 +903,113 @@ class SlipReviewPayloadDbTests(TestCase):
         self.assertNotIn("api_usage", payload["summary"])
         self.assertNotIn("api_usage", payload["intelligence"])
         self.assertNotIn("api_usage", payload["public"])
+
+    def test_events_endpoint_returns_events_after_cursor(self):
+        user = get_user_model().objects.create_user(username="event-user")
+        review = SlipReview.objects.create(
+            user=user,
+            source=SlipReview.Source.SPORTYBET,
+            status=SlipReview.Status.ANALYSING,
+            title="SportyBet review",
+            summary={
+                "progress": {
+                    "phase": "analysing_legs",
+                    "total": 2,
+                    "completed": 1,
+                    "percent": 50.0,
+                    "message": "Analysed 1 of 2 selections.",
+                }
+            },
+        )
+        first = SlipReviewEvent.objects.create(
+            review=review,
+            event_type="review.progress",
+            payload={"completed": 0},
+        )
+        second = SlipReviewEvent.objects.create(
+            review=review,
+            event_type="leg.completed",
+            payload={"completed": 1},
+        )
+        client = APIClient()
+        client.force_authenticate(user=user)
+
+        response = client.get(f"/api/algo/slip-reviews/{review.id}/events/", {"after_id": first.id})
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["review_id"], review.id)
+        self.assertEqual(payload["status"], SlipReview.Status.ANALYSING)
+        self.assertEqual(payload["latest_event_id"], second.id)
+        self.assertEqual(payload["progress"]["completed"], 1)
+        self.assertEqual([event["id"] for event in payload["events"]], [second.id])
+        self.assertEqual(payload["events"][0]["event_type"], "leg.completed")
+
+    def test_streamed_leg_payload_contains_public_game_card(self):
+        user = get_user_model().objects.create_user(username="stream-card")
+        review = SlipReview.objects.create(
+            user=user,
+            source=SlipReview.Source.SPORTYBET,
+            status=SlipReview.Status.ANALYSING,
+            title="SportyBet review",
+            summary={},
+        )
+
+        payload = _streamed_slip_review_game_payload(review, 0, _sample_replace_result())
+
+        self.assertEqual(payload["index"], 0)
+        self.assertEqual(payload["order"], 1)
+        self.assertEqual(payload["game"]["match"], "Norway vs England")
+        self.assertEqual(payload["game"]["user_pick"]["market"], "Away Win")
+        self.assertIn("analysis", payload["game"])
+        self.assertIn("positive_evidence", payload["game"]["analysis"])
+        self.assertIn("recommendation", payload["game"])
+        self.assertEqual(payload["recommended_pick"]["match"], "Norway vs England")
+
+    def test_stale_recovery_finalizes_from_persisted_completed_legs(self):
+        user = get_user_model().objects.create_user(username="stale-finalize")
+        review = SlipReview.objects.create(
+            user=user,
+            source=SlipReview.Source.SPORTYBET,
+            status=SlipReview.Status.ANALYSING,
+            title="SportyBet review",
+            summary={"progress": {"phase": "analysing_legs", "total": 1, "completed": 1}},
+        )
+        stale_time = timezone.now() - timezone.timedelta(minutes=45)
+        SlipReview.objects.filter(id=review.id).update(updated_at=stale_time)
+        SlipSelection.objects.create(
+            review=review,
+            order=1,
+            submitted_match="Norway vs England",
+            submitted_market="Away Win",
+            status="analysed",
+            verdict="replace",
+            analysis_payload=_sample_replace_result(),
+        )
+
+        result = recover_stale_slip_reviews(stale_after_seconds=60, limit=5)
+        review.refresh_from_db()
+
+        self.assertEqual(result["recovered"], 1)
+        self.assertIn(review.status, {SlipReview.Status.COMPLETED, SlipReview.Status.PARTIAL})
+        self.assertTrue(SlipReviewEvent.objects.filter(review=review, event_type="review.completed").exists())
+
+    def test_stale_recovery_fails_review_without_completed_legs(self):
+        user = get_user_model().objects.create_user(username="stale-fail")
+        review = SlipReview.objects.create(
+            user=user,
+            source=SlipReview.Source.SPORTYBET,
+            status=SlipReview.Status.ANALYSING,
+            title="SportyBet review",
+            summary={"progress": {"phase": "analysing_legs", "total": 1, "completed": 0}},
+        )
+        stale_time = timezone.now() - timezone.timedelta(minutes=45)
+        SlipReview.objects.filter(id=review.id).update(updated_at=stale_time)
+
+        result = recover_stale_slip_reviews(stale_after_seconds=60, limit=5)
+        review.refresh_from_db()
+
+        self.assertEqual(result["failed"], 1)
+        self.assertEqual(review.status, SlipReview.Status.FAILED)
+        self.assertEqual(review.summary["error_code"], "stale_review_timeout")
+        self.assertTrue(SlipReviewEvent.objects.filter(review=review, event_type="review.failed").exists())

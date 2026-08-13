@@ -60,6 +60,15 @@ app.conf.beat_schedule = {
         "schedule": crontab(minute=os.environ.get("ALGO_LINEUP_MINUTES", "*/15")),
         "options": {"expires": timedelta(minutes=14).total_seconds()},
     },
+    "recover-stale-slip-reviews": {
+        "task": "apps.algo.tasks.recover_stale_slip_reviews",
+        "schedule": crontab(minute=os.environ.get("SLIP_REVIEW_RECOVERY_MINUTES", "*/5")),
+        "kwargs": {
+            "stale_after_seconds": int(os.environ.get("SLIP_REVIEW_STALE_AFTER_SECONDS", "1200")),
+            "limit": int(os.environ.get("SLIP_REVIEW_RECOVERY_LIMIT", "25")),
+        },
+        "options": {"expires": timedelta(minutes=4).total_seconds()},
+    },
     # Hourly: a late fitness call is what turns a priced player prop into a dead bet.
     "refresh-player-availability": {
         "task": "apps.algo.tasks.refresh_player_availability",

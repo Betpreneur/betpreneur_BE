@@ -61,6 +61,7 @@ TEMPLATES = [
 ]
 
 WSGI_APPLICATION = "config.wsgi.application"
+ENABLE_WEBSOCKETS = config("ENABLE_WEBSOCKETS", default=False, cast=bool)
 
 DATABASES = {
     "default": {
@@ -102,6 +103,19 @@ CELERY_RESULT_BACKEND = config("CELERY_RESULT_BACKEND", default=CELERY_BROKER_UR
 CELERY_TIMEZONE = TIME_ZONE
 CELERY_ENABLE_UTC = True
 CELERY_TASK_TRACK_STARTED = True
+
+if ENABLE_WEBSOCKETS:
+    INSTALLED_APPS.append("channels")
+    ASGI_APPLICATION = "config.asgi.application"
+    CHANNEL_LAYERS = {
+        "default": {
+            "BACKEND": "channels_redis.core.RedisChannelLayer",
+            "CONFIG": {
+                "hosts": [CELERY_BROKER_URL],
+            },
+        },
+    }
+
 CELERY_TASK_TIME_LIMIT = config("CELERY_TASK_TIME_LIMIT", default=60 * 60 * 3, cast=int)
 CELERY_TASK_SOFT_TIME_LIMIT = config("CELERY_TASK_SOFT_TIME_LIMIT", default=60 * 60 * 2, cast=int)
 CELERY_TASK_ANNOTATIONS = {

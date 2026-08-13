@@ -563,6 +563,55 @@ class SlipSelection(models.Model):
         return self.settlement_market
 
 
+class SlipLegAnalysisCache(models.Model):
+    class Status(models.TextChoices):
+        PROCESSING = "processing", "Processing"
+        READY = "ready", "Ready"
+        FAILED = "failed", "Failed"
+
+    cache_key = models.CharField(max_length=64, unique=True)
+    status = models.CharField(max_length=20, choices=Status.choices, default=Status.READY)
+    source = models.CharField(max_length=30, blank=True)
+    provider_event_id = models.CharField(max_length=120, blank=True)
+    match_text = models.CharField(max_length=255, blank=True)
+    market_text = models.CharField(max_length=160, blank=True)
+    match_id = models.CharField(max_length=100, blank=True)
+    payload = models.JSONField(default=dict, blank=True)
+    expires_at = models.DateTimeField()
+    lock_expires_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        indexes = [
+            models.Index(fields=["cache_key"]),
+            models.Index(fields=["source", "provider_event_id"]),
+            models.Index(fields=["match_id"]),
+            models.Index(fields=["status", "lock_expires_at"]),
+            models.Index(fields=["expires_at"]),
+        ]
+
+    def __str__(self):
+        return f"{self.match_text} - {self.market_text}"
+
+
+class SlipReviewEvent(models.Model):
+    review = models.ForeignKey(SlipReview, on_delete=models.CASCADE, related_name="events")
+    event_type = models.CharField(max_length=80)
+    payload = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["created_at", "id"]
+        indexes = [
+            models.Index(fields=["review", "created_at"]),
+            models.Index(fields=["review", "event_type"]),
+        ]
+
+    def __str__(self):
+        return f"{self.review_id} {self.event_type}"
+
+
 class SlipRepair(models.Model):
     """
     A revised version of a ticket, persisted so the user can return to it and so the

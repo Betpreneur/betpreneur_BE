@@ -618,7 +618,8 @@ class MaintenanceRunRequestSerializer(serializers.Serializer):
         required=False,
         help_text=(
             "Jobs to queue. Omit to run every job. Valid names: statpal_daily_cache, "
-            "fixture_horizon, score_models, player_availability, lineups, settle_slips."
+            "fixture_horizon, score_models, player_availability, lineups, settle_slips, "
+            "recover_slip_reviews."
         ),
     )
     days = serializers.IntegerField(
@@ -727,6 +728,19 @@ class SlipReviewDetailResponseSerializer(serializers.Serializer):
     created_at = serializers.DateTimeField()
     updated_at = serializers.DateTimeField()
     selections = serializers.JSONField()
+
+
+class SlipReviewEventsQuerySerializer(serializers.Serializer):
+    after_id = serializers.IntegerField(required=False, min_value=0, default=0)
+    limit = serializers.IntegerField(required=False, min_value=1, max_value=200, default=100)
+
+
+class SlipReviewEventsResponseSerializer(serializers.Serializer):
+    review_id = serializers.IntegerField()
+    status = serializers.CharField()
+    progress = serializers.JSONField()
+    latest_event_id = serializers.IntegerField(required=False, allow_null=True)
+    events = serializers.JSONField()
 
 
 class SlipReviewOptionsResponseSerializer(serializers.Serializer):

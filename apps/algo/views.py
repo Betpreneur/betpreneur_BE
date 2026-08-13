@@ -6,10 +6,12 @@ import dataclasses
 import logging
 import math
 import os
+import time
 from decimal import Decimal, InvalidOperation
 
 from celery.result import AsyncResult
 from django.conf import settings
+from django.db import IntegrityError
 from django.http import HttpResponse, HttpResponseNotModified
 from django.shortcuts import get_object_or_404
 from django.db.models import Count, Q, Sum
@@ -28,7 +30,9 @@ from .models import (
     GameBack,
     MarketPrediction,
     Pick,
+    SlipLegAnalysisCache,
     SlipRepair,
+    SlipReviewEvent,
     SlipReview,
     SlipSelection,
 )
@@ -95,6 +99,8 @@ from .serializers import (
     ResultsUpdateSerializer,
     SingleGameBackRequestSerializer,
     SlipReviewDetailResponseSerializer,
+    SlipReviewEventsQuerySerializer,
+    SlipReviewEventsResponseSerializer,
     SlipReviewListResponseSerializer,
     SlipReviewOptionsResponseSerializer,
     MaintenanceRunRequestSerializer,
@@ -117,6 +123,22 @@ from .tasks import generate_daily_picks, import_slip_review, run_monthly_auditor
 
 
 log = logging.getLogger(__name__)
+
+
+def _env_int(name, default):
+    try:
+        return int(os.environ.get(name, default))
+    except (TypeError, ValueError):
+        return int(default)
+
+
+SLIP_REVIEW_PARALLEL_LEG_THRESHOLD = _env_int("SLIP_REVIEW_PARALLEL_LEG_THRESHOLD", 4)
+SLIP_REVIEW_ANALYSIS_WORKERS = max(1, _env_int("SLIP_REVIEW_ANALYSIS_WORKERS", 4))
+SLIP_REVIEW_DEEPSEEK_MAX_GAMES = _env_int("SLIP_REVIEW_DEEPSEEK_MAX_GAMES", 5)
+SLIP_REVIEW_LEG_CACHE_TTL_SECONDS = _env_int("SLIP_REVIEW_LEG_CACHE_TTL_SECONDS", 15 * 60)
+SLIP_REVIEW_LEG_CACHE_LOCK_SECONDS = _env_int("SLIP_REVIEW_LEG_CACHE_LOCK_SECONDS", 5 * 60)
+SLIP_REVIEW_LEG_CACHE_WAIT_SECONDS = _env_int("SLIP_REVIEW_LEG_CACHE_WAIT_SECONDS", 45)
+SLIP_REVIEW_STALE_AFTER_SECONDS = _env_int("SLIP_REVIEW_STALE_AFTER_SECONDS", 20 * 60)
 SETTLED_PICK_STATUSES = [Pick.Status.WIN, Pick.Status.LOSS, Pick.Status.VOID]
 PICK_DETAIL_HISTORY_DAYS = 90
 PICK_TIER_RANK = {
@@ -4154,8 +4176,49 @@ def _build_bettor_public_payload(review, technical_public, *, enhance=False):
         ),
     }
     if enhance and review.source == SlipReview.Source.SPORTYBET:
-        payload = _enhance_bettor_public_with_deepseek(payload)
+        game_count = len(games)
+        if game_count <= SLIP_REVIEW_DEEPSEEK_MAX_GAMES:
+            payload = _enhance_bettor_public_with_deepseek(payload)
+        else:
+            log.info(
+                "DeepSeek SportyBet public analysis skipped review=%s games=%s max_games=%s reason=large_slip_llm_limit",
+                review.id,
+                game_count,
+                SLIP_REVIEW_DEEPSEEK_MAX_GAMES,
+            )
     return payload
+
+
+def _streamed_slip_review_game_payload(review, index, result):
+    try:
+        summary = _manual_review_summary([result or {}])
+        public_payload = _build_bettor_public_payload(
+            review,
+            summary.get("public") or {},
+            enhance=False,
+        )
+        game = (public_payload.get("games") or [None])[0]
+        recommended_pick = (public_payload.get("recommended_ticket") or {}).get("picks") or []
+        return _json_safe(
+            {
+                "index": index,
+                "order": index + 1,
+                "game": game,
+                "recommended_pick": recommended_pick[0] if recommended_pick else None,
+            }
+        )
+    except Exception:
+        log.exception(
+            "Slip review streamed game payload failed review=%s leg=%s",
+            getattr(review, "id", None),
+            index + 1,
+        )
+        return {
+            "index": index,
+            "order": index + 1,
+            "game": None,
+            "recommended_pick": None,
+        }
 
 
 def _enhance_bettor_public_with_deepseek(payload):
@@ -4838,6 +4901,70 @@ def _populate_slip_review(review, results):
     return summary, safe_results
 
 
+def _slip_selection_defaults_from_analysis(item):
+    item = _json_safe(item or {})
+    matched = item.get("matched_fixture") or {}
+    return {
+        "submitted_match": item.get("match", ""),
+        "submitted_market": item.get("submitted_market") or item.get("market", ""),
+        "status": item.get("status", ""),
+        "verdict": item.get("verdict", ""),
+        "message": item.get("message", ""),
+        "match_id": matched.get("match_id") or "",
+        "match_date": matched.get("match_date") or None,
+        "fixture": matched.get("fixture") or "",
+        "home_team": matched.get("home_team") or "",
+        "away_team": matched.get("away_team") or "",
+        "league": matched.get("league") or "",
+        "country": matched.get("country") or "",
+        "kickoff": matched.get("kickoff") or "",
+        "selected_market": item.get("selected_market") or {},
+        "best_market": item.get("best_market") or {},
+        "recommended_market": item.get("recommended_market") or {},
+        "possible_matches": item.get("possible_matches") or [],
+        "analysis_payload": item,
+        "settlement_market": _settlement_market_for(item),
+        "odds": _decimal_or_none(_selection_original_odds(item)),
+        "flagged_risky": _selection_flagged_risky(item),
+        "advisory_score": _float_or_none(
+            item.get("advisory_score") or (item.get("selected_market") or {}).get("advisory_score")
+        ),
+    }
+
+
+def _initial_slip_selection_payload(selection):
+    provider_payload = _json_safe(selection.get("provider_payload") or {})
+    market = selection.get("market", "")
+    return {
+        "match": selection.get("match", ""),
+        "market": market,
+        "submitted_market": market,
+        "status": "queued",
+        "verdict": "",
+        "message": "Waiting for analysis.",
+        "provider": selection.get("provider", ""),
+        "provider_payload": provider_payload,
+    }
+
+
+def _initialize_slip_selection_progress_rows(review, selections):
+    review.selections.all().delete()
+    rows = []
+    for index, selection in enumerate(selections, start=1):
+        payload = _initial_slip_selection_payload(selection)
+        defaults = _slip_selection_defaults_from_analysis(payload)
+        rows.append(SlipSelection(review=review, order=index, **defaults))
+    if rows:
+        SlipSelection.objects.bulk_create(rows, batch_size=100)
+
+
+def _persist_slip_selection_progress_result(review, index, result):
+    defaults = _slip_selection_defaults_from_analysis(result)
+    updated = SlipSelection.objects.filter(review=review, order=index + 1).update(**defaults)
+    if not updated:
+        SlipSelection.objects.create(review=review, order=index + 1, **defaults)
+
+
 def _create_slip_review(user, *, source, submitted_payload, results):
     review = SlipReview.objects.create(
         user=user,
@@ -4887,6 +5014,101 @@ def _empty_slip_summary(verdict, *, task_id="", error=""):
     return summary
 
 
+def _slip_review_progress(*, phase, total=0, completed=0, message="", **extra):
+    total = max(0, int(total or 0))
+    completed = max(0, min(int(completed or 0), total)) if total else max(0, int(completed or 0))
+    percent = round((completed / total) * 100, 1) if total else (100.0 if phase in {"completed", "failed"} else 0.0)
+    progress = {
+        "phase": str(phase or ""),
+        "total": total,
+        "completed": completed,
+        "percent": percent,
+        "message": str(message or ""),
+        "updated_at": timezone.now().isoformat(),
+    }
+    for key, value in extra.items():
+        if value not in (None, "", [], {}):
+            progress[key] = _json_safe(value)
+    return progress
+
+
+def _publish_slip_review_event(review, event_type, payload=None):
+    payload = _json_safe(payload or {})
+    try:
+        event = SlipReviewEvent.objects.create(
+            review=review,
+            event_type=str(event_type or ""),
+            payload=payload,
+        )
+        log.info(
+            "Slip review event review=%s event=%s event_id=%s payload=%s",
+            review.id,
+            event_type,
+            event.id,
+            payload,
+        )
+        if getattr(settings, "ENABLE_WEBSOCKETS", False):
+            try:
+                from asgiref.sync import async_to_sync
+                from channels.layers import get_channel_layer
+
+                channel_layer = get_channel_layer()
+                if channel_layer:
+                    async_to_sync(channel_layer.group_send)(
+                        f"slip_review_{review.id}",
+                        {
+                            "type": "slip_review.event",
+                            "payload": {
+                                "type": "slip_review.event",
+                                "id": event.id,
+                                "review_id": review.id,
+                                "event_type": event.event_type,
+                                "payload": event.payload or {},
+                                "created_at": event.created_at.isoformat() if event.created_at else "",
+                            },
+                        },
+                    )
+            except Exception:
+                log.exception(
+                    "Slip review websocket publish failed review=%s event=%s event_id=%s",
+                    review.id,
+                    event_type,
+                    event.id,
+                )
+        return event
+    except Exception:
+        log.exception("Slip review event publish failed review=%s event=%s", getattr(review, "id", None), event_type)
+        return None
+
+
+def _set_slip_review_progress(review, *, phase, total=0, completed=0, message="", status=None, save=True, **extra):
+    summary = dict(review.summary or {})
+    summary["progress"] = _slip_review_progress(
+        phase=phase,
+        total=total,
+        completed=completed,
+        message=message,
+        **extra,
+    )
+    review.summary = summary
+    if status:
+        review.status = status
+    if save:
+        fields = ["summary", "updated_at"]
+        if status:
+            fields.insert(0, "status")
+        review.save(update_fields=fields)
+        _publish_slip_review_event(
+            review,
+            "review.progress",
+            {
+                "status": review.status,
+                "progress": summary["progress"],
+            },
+        )
+    return summary["progress"]
+
+
 def _create_queued_slip_review(user, *, source, submitted_payload):
     return SlipReview.objects.create(
         user=user,
@@ -4894,7 +5116,13 @@ def _create_queued_slip_review(user, *, source, submitted_payload):
         status=SlipReview.Status.QUEUED,
         title=f"{source.title()} review",
         submitted_payload=_json_safe(submitted_payload),
-        summary=_empty_slip_summary("Slip import queued."),
+        summary={
+            **_empty_slip_summary("Slip import queued."),
+            "progress": _slip_review_progress(
+                phase="queued",
+                message="Slip import queued.",
+            ),
+        },
     )
 
 
@@ -4923,12 +5151,21 @@ def _slip_selection_payload(selection):
 def _slip_review_payload(review, *, include_selections=True, public_only=False):
     summary = review.summary or {}
     public_payload = summary.get("public") or (summary.get("intelligence") or {}).get("public", {})
+    latest_event_id = (
+        review.events.order_by("-id").values_list("id", flat=True).first()
+        if hasattr(review, "events")
+        else None
+    )
     if public_only:
         if review.status in {
             SlipReview.Status.QUEUED,
             SlipReview.Status.IMPORTING,
             SlipReview.Status.ANALYSING,
         }:
+            progress = (summary or {}).get("progress") or _slip_review_progress(
+                phase=review.status,
+                message=f"Slip review is {review.status}.",
+            )
             return _api_response_payload(
                 {
                     "id": review.id,
@@ -4936,6 +5173,8 @@ def _slip_review_payload(review, *, include_selections=True, public_only=False):
                     "status": review.status,
                     "created_at": review.created_at,
                     "updated_at": review.updated_at,
+                    "progress": progress,
+                    "latest_event_id": latest_event_id,
                 }
             )
         bettor_payload = summary.get("bettor_public") or _build_bettor_public_payload(
@@ -4960,6 +5199,7 @@ def _slip_review_payload(review, *, include_selections=True, public_only=False):
         "intelligence": summary.get("intelligence", {}),
         "created_at": review.created_at,
         "updated_at": review.updated_at,
+        "latest_event_id": latest_event_id,
     }
     if include_selections:
         payload["selections"] = [
@@ -5102,6 +5342,7 @@ def _analyse_manual_selection(
     force_fresh=False,
     hydration_cache=None,
     review_scoring_context=None,
+    allow_on_demand_scoring=True,
 ):
     match_text = selection.get("match", "")
     requested_market = selection.get("market", "")
@@ -5298,7 +5539,7 @@ def _analyse_manual_selection(
         game = _manual_fixture_game(candidate["match_id"], candidate["match_date"], request=request)
     else:
         game = _manual_fixture_game(candidate["match_id"], candidate["match_date"], request=request)
-        if not game:
+        if not game and allow_on_demand_scoring:
             on_demand = algo_runner_service.score_cached_fixture_on_demand(
                 candidate["match_id"],
                 match_date=candidate.get("match_date"),
@@ -5483,15 +5724,525 @@ def _analyse_manual_selection(
     }
 
 
+def _slip_review_completed_leg_count(review):
+    return review.selections.exclude(status__in=["queued", "analysing", ""]).count()
+
+
+def _slip_review_leg_failure_result(index, selection, message, *, error_code="analysis_failed"):
+    provider_payload = _json_safe((selection or {}).get("provider_payload") or {})
+    return {
+        "match": (selection or {}).get("match", ""),
+        "submitted_market": (selection or {}).get("market", ""),
+        "market_taxonomy": _selection_market_descriptor(selection or {}, (selection or {}).get("market", "")).to_dict(),
+        "status": "analysis_failed",
+        "verdict": "not_assessed",
+        "message": str(message or "Slip leg analysis failed."),
+        "provider": (selection or {}).get("provider", ""),
+        "provider_payload": provider_payload,
+        "fixture_resolution": {
+            "status": "analysis_failed",
+            "attempts": [
+                {
+                    "strategy": "celery_leg_task",
+                    "error_code": error_code,
+                    "index": index,
+                }
+            ],
+        },
+        "possible_matches": [],
+    }
+
+
+def _slip_leg_analysis_cache_key(selection):
+    selection = selection or {}
+    provider_payload = selection.get("provider_payload") or {}
+    provider_metadata = _provider_metadata(selection)
+    descriptor = _selection_market_descriptor(selection, selection.get("market", ""))
+    raw_key = {
+        "provider": str(selection.get("provider") or provider_metadata.get("provider") or "").lower(),
+        "provider_event_id": provider_metadata.get("provider_event_id") or "",
+        "provider_competition_id": provider_metadata.get("provider_competition_id") or "",
+        "provider_date": _provider_match_date(selection).isoformat() if _provider_match_date(selection) else "",
+        "match": normalize_market_text(selection.get("match") or ""),
+        "market": descriptor.normalized or normalize_market_text(selection.get("market") or ""),
+        "odds": str(provider_payload.get("odds") or provider_payload.get("displayOdds") or ""),
+        "market_id": str(provider_payload.get("marketId") or provider_payload.get("market_id") or ""),
+        "outcome_id": str(provider_payload.get("outcomeId") or provider_payload.get("outcome_id") or ""),
+        "specifier": str(provider_payload.get("specifier") or ""),
+    }
+    encoded = json.dumps(raw_key, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest(), raw_key
+
+
+def _cached_slip_leg_payload(cached, cache_key, *, status="hit"):
+    payload = dict(cached.payload or {})
+    payload["analysis_cache"] = {
+        "status": status,
+        "cache_key": cache_key,
+        "updated_at": cached.updated_at.isoformat() if cached.updated_at else "",
+        "expires_at": cached.expires_at.isoformat() if cached.expires_at else "",
+    }
+    return payload
+
+
+def _get_or_lock_slip_leg_analysis_cache(selection):
+    cache_key, raw_key = _slip_leg_analysis_cache_key(selection)
+    now = timezone.now()
+    cached = SlipLegAnalysisCache.objects.filter(cache_key=cache_key).first()
+    if (
+        cached
+        and cached.status == SlipLegAnalysisCache.Status.READY
+        and cached.expires_at > now
+        and cached.payload
+    ):
+        return _cached_slip_leg_payload(cached, cache_key), cache_key, raw_key, False
+
+    lock_until = now + timedelta(seconds=max(30, SLIP_REVIEW_LEG_CACHE_LOCK_SECONDS))
+    expires_at = now + timedelta(seconds=max(60, SLIP_REVIEW_LEG_CACHE_TTL_SECONDS))
+    if not cached:
+        try:
+            SlipLegAnalysisCache.objects.create(
+                cache_key=cache_key,
+                status=SlipLegAnalysisCache.Status.PROCESSING,
+                source=raw_key.get("provider") or "",
+                provider_event_id=raw_key.get("provider_event_id") or "",
+                match_text=(selection or {}).get("match") or "",
+                market_text=(selection or {}).get("market") or "",
+                payload={},
+                expires_at=expires_at,
+                lock_expires_at=lock_until,
+            )
+            return None, cache_key, raw_key, True
+        except IntegrityError:
+            cached = SlipLegAnalysisCache.objects.filter(cache_key=cache_key).first()
+
+    now = timezone.now()
+    if cached and cached.status == SlipLegAnalysisCache.Status.PROCESSING and cached.lock_expires_at and cached.lock_expires_at > now:
+        deadline = time.monotonic() + max(0, SLIP_REVIEW_LEG_CACHE_WAIT_SECONDS)
+        while time.monotonic() < deadline:
+            time.sleep(1)
+            cached.refresh_from_db()
+            if cached.status == SlipLegAnalysisCache.Status.READY and cached.expires_at > timezone.now() and cached.payload:
+                return _cached_slip_leg_payload(cached, cache_key, status="wait_hit"), cache_key, raw_key, False
+
+    updated = SlipLegAnalysisCache.objects.filter(
+        cache_key=cache_key,
+    ).filter(
+        Q(lock_expires_at__lte=timezone.now()) | Q(lock_expires_at__isnull=True) | Q(status__in=[
+            SlipLegAnalysisCache.Status.READY,
+            SlipLegAnalysisCache.Status.FAILED,
+        ])
+    ).update(
+        status=SlipLegAnalysisCache.Status.PROCESSING,
+        lock_expires_at=lock_until,
+        expires_at=expires_at,
+    )
+    if updated:
+        return None, cache_key, raw_key, True
+
+    cached = SlipLegAnalysisCache.objects.filter(cache_key=cache_key).first()
+    if cached and cached.status == SlipLegAnalysisCache.Status.READY and cached.expires_at > timezone.now() and cached.payload:
+        return _cached_slip_leg_payload(cached, cache_key, status="late_hit"), cache_key, raw_key, False
+    return None, cache_key, raw_key, True
+
+
+def _store_slip_leg_analysis_cache(selection, result, *, cache_key=None, raw_key=None):
+    result = _json_safe(result or {})
+    if result.get("status") not in {"analysed", "market_not_found", "insufficient_data"}:
+        return
+    cache_key = cache_key or _slip_leg_analysis_cache_key(selection)[0]
+    raw_key = raw_key or _slip_leg_analysis_cache_key(selection)[1]
+    matched = result.get("matched_fixture") or {}
+    expires_at = timezone.now() + timedelta(seconds=max(60, SLIP_REVIEW_LEG_CACHE_TTL_SECONDS))
+    SlipLegAnalysisCache.objects.update_or_create(
+        cache_key=cache_key,
+        defaults={
+            "status": SlipLegAnalysisCache.Status.READY,
+            "source": raw_key.get("provider") or "",
+            "provider_event_id": raw_key.get("provider_event_id") or "",
+            "match_text": result.get("match") or (selection or {}).get("match") or "",
+            "market_text": result.get("submitted_market") or (selection or {}).get("market") or "",
+            "match_id": matched.get("match_id") or "",
+            "payload": result,
+            "expires_at": expires_at,
+            "lock_expires_at": None,
+        },
+    )
+
+
+def _mark_slip_leg_analysis_cache_failed(selection, *, cache_key=None):
+    cache_key = cache_key or _slip_leg_analysis_cache_key(selection)[0]
+    SlipLegAnalysisCache.objects.filter(cache_key=cache_key).update(
+        status=SlipLegAnalysisCache.Status.FAILED,
+        lock_expires_at=None,
+        expires_at=timezone.now() + timedelta(seconds=60),
+    )
+
+
+def process_slip_review_leg_failure(review_id, index, selection, message, *, error_code="analysis_failed"):
+    review = SlipReview.objects.get(id=review_id)
+    _mark_slip_leg_analysis_cache_failed(selection)
+    result = _slip_review_leg_failure_result(index, selection, message, error_code=error_code)
+    _persist_slip_selection_progress_result(review, index, result)
+    total = review.selections.count()
+    completed = _slip_review_completed_leg_count(review)
+    _set_slip_review_progress(
+        review,
+        phase="analysing_legs",
+        total=total,
+        completed=completed,
+        message=f"Analysed {completed} of {total} selections.",
+        last_completed_match=result.get("match") or (selection or {}).get("match"),
+        last_error=str(message or ""),
+    )
+    _publish_slip_review_event(
+        review,
+        "leg.failed",
+        {
+            "index": index,
+            "order": index + 1,
+            "match": result.get("match") or (selection or {}).get("match"),
+            "market": result.get("submitted_market") or (selection or {}).get("market"),
+            "game": _streamed_slip_review_game_payload(review, index, result).get("game"),
+            "error": str(message or ""),
+            "error_code": error_code,
+            "completed": completed,
+            "total": total,
+        },
+    )
+    log.warning(
+        "Slip review leg failed review=%s leg=%s match=%r market=%r error_code=%s error=%s",
+        review_id,
+        index + 1,
+        (selection or {}).get("match"),
+        (selection or {}).get("market"),
+        error_code,
+        message,
+    )
+    return {"review_id": review_id, "index": index, "status": "failed", "result": result, "error": str(message or "")}
+
+
+def process_slip_review_leg_analysis(review_id, index, selection, *, days=3):
+    review = SlipReview.objects.get(id=review_id)
+    SlipSelection.objects.filter(review=review, order=index + 1).update(
+        status="analysing",
+        message="Analysing this selection.",
+        analysis_payload={
+            **_initial_slip_selection_payload(selection or {}),
+            "status": "analysing",
+            "message": "Analysing this selection.",
+        },
+    )
+    total = review.selections.count()
+    _publish_slip_review_event(
+        review,
+        "leg.started",
+        {
+            "index": index,
+            "order": index + 1,
+            "match": (selection or {}).get("match"),
+            "market": (selection or {}).get("market"),
+            "completed": _slip_review_completed_leg_count(review),
+            "total": total,
+        },
+    )
+    cached, cache_key, raw_key, owns_cache_lock = _get_or_lock_slip_leg_analysis_cache(selection)
+    if cached:
+        cached["provider"] = review.source
+        cached["provider_payload"] = _json_safe((selection or {}).get("provider_payload") or {})
+        _persist_slip_selection_progress_result(review, index, cached)
+        total = review.selections.count()
+        completed = _slip_review_completed_leg_count(review)
+        _set_slip_review_progress(
+            review,
+            phase="analysing_legs",
+            total=total,
+            completed=completed,
+            message=f"Analysed {completed} of {total} selections.",
+            last_completed_match=cached.get("match") or (selection or {}).get("match"),
+            cache_status="hit",
+        )
+        _publish_slip_review_event(
+            review,
+            "leg.completed",
+            {
+                "index": index,
+                "order": index + 1,
+                "match": cached.get("match") or (selection or {}).get("match"),
+                "market": cached.get("submitted_market") or (selection or {}).get("market"),
+                "status": cached.get("status"),
+                "verdict": cached.get("verdict"),
+                "cache_status": (cached.get("analysis_cache") or {}).get("status") or "hit",
+                **_streamed_slip_review_game_payload(review, index, cached),
+                "completed": completed,
+                "total": total,
+            },
+        )
+        log.info(
+            "Slip review leg cache hit review=%s leg=%s match=%r market=%r cache_key=%s",
+            review_id,
+            index + 1,
+            (selection or {}).get("match"),
+            (selection or {}).get("market"),
+            cache_key,
+        )
+        return {
+            "review_id": review_id,
+            "index": index,
+            "status": "cache_hit",
+            "result": cached,
+            "hydration": {
+                "calls_used": 0,
+                "served_from_cache": 1,
+                "served_from_snapshot_cache": 0,
+                "snapshot_cache_misses": 0,
+                "served_by_model": 0,
+                "fixtures_hydrated": 0,
+                "budget_exhausted": False,
+            },
+        }
+    hydrator = FixtureHydrator()
+    try:
+        result = _analyse_manual_selection(
+            selection or {},
+            days=days,
+            request=None,
+            force_fresh=True,
+            hydration_cache=hydrator,
+            review_scoring_context={"fixture_universe_synced": index > 0},
+            allow_on_demand_scoring=True,
+        )
+    except Exception:
+        if owns_cache_lock:
+            _mark_slip_leg_analysis_cache_failed(selection, cache_key=cache_key)
+        raise
+    result["provider"] = review.source
+    result["provider_payload"] = _json_safe((selection or {}).get("provider_payload") or {})
+    result["analysis_cache"] = {"status": "miss", "cache_key": cache_key}
+    if owns_cache_lock:
+        _store_slip_leg_analysis_cache(selection, result, cache_key=cache_key, raw_key=raw_key)
+    _persist_slip_selection_progress_result(review, index, result)
+    total = review.selections.count()
+    completed = _slip_review_completed_leg_count(review)
+    _set_slip_review_progress(
+        review,
+        phase="analysing_legs",
+        total=total,
+        completed=completed,
+        message=f"Analysed {completed} of {total} selections.",
+        last_completed_match=result.get("match") or (selection or {}).get("match"),
+    )
+    _publish_slip_review_event(
+        review,
+        "leg.completed",
+        {
+            "index": index,
+            "order": index + 1,
+            "match": result.get("match") or (selection or {}).get("match"),
+            "market": result.get("submitted_market") or (selection or {}).get("market"),
+            "status": result.get("status"),
+            "verdict": result.get("verdict"),
+            "cache_status": "miss",
+            **_streamed_slip_review_game_payload(review, index, result),
+            "completed": completed,
+            "total": total,
+        },
+    )
+    log.info(
+        "Slip review leg analysed review=%s leg=%s match=%r status=%s hydration=%s",
+        review_id,
+        index + 1,
+        result.get("match") or (selection or {}).get("match"),
+        result.get("status"),
+        hydrator.stats.to_dict(),
+    )
+    return {
+        "review_id": review_id,
+        "index": index,
+        "status": "analysed",
+        "result": result,
+        "hydration": hydrator.stats.to_dict(),
+    }
+
+
+def finalize_slip_review_import_results(review_id, leg_results):
+    review = SlipReview.objects.get(id=review_id)
+    payload = review.submitted_payload or {}
+    ordered = sorted(
+        [item for item in leg_results or [] if isinstance(item, dict)],
+        key=lambda item: int(item.get("index") or 0),
+    )
+    results = [item.get("result") for item in ordered if isinstance(item.get("result"), dict)]
+    hydration_totals = {
+        "calls_used": 0,
+        "served_from_cache": 0,
+        "served_from_snapshot_cache": 0,
+        "snapshot_cache_misses": 0,
+        "served_by_model": 0,
+        "fixtures_hydrated": 0,
+        "budget_exhausted": False,
+    }
+    for item in ordered:
+        stats = item.get("hydration") or {}
+        for key in (
+            "calls_used",
+            "served_from_cache",
+            "served_from_snapshot_cache",
+            "snapshot_cache_misses",
+            "served_by_model",
+            "fixtures_hydrated",
+        ):
+            hydration_totals[key] += int(stats.get(key) or 0)
+        hydration_totals["budget_exhausted"] = bool(hydration_totals["budget_exhausted"] or stats.get("budget_exhausted"))
+
+    log.info("Slip hydration done review=%s %s", review.id, hydration_totals)
+    if not results:
+        raise ValueError("No supported football selections were found in this slip.")
+
+    summary, safe_results = _populate_slip_review(review, results)
+    summary["progress"] = _slip_review_progress(
+        phase="completed",
+        total=len(results),
+        completed=len(results),
+        message="Slip review completed.",
+        final_status=review.status,
+    )
+    review.summary = summary
+    final_payload = _json_safe({**payload, "fanout_analysis": True})
+    review.submitted_payload = final_payload
+    final_updated_at = timezone.now()
+    SlipReview.objects.filter(id=review.id).update(
+        status=review.status,
+        summary=review.summary,
+        submitted_payload=final_payload,
+        updated_at=final_updated_at,
+    )
+    review.updated_at = final_updated_at
+    log.info(
+        "Slip review final persisted review=%s status=%s fanout=True selections=%s",
+        review.id,
+        review.status,
+        len(results),
+    )
+    _publish_slip_review_event(
+        review,
+        "review.completed",
+        {
+            "status": review.status,
+            "total": len(results),
+            "completed": len(results),
+            "progress": summary.get("progress") or {},
+        },
+    )
+    return _api_response_payload({"review_id": review.id, "status": review.status, **summary})
+
+
+def _leg_results_from_persisted_slip_selections(review):
+    leg_results = []
+    for selection in review.selections.order_by("order"):
+        payload = selection.analysis_payload or {}
+        if payload.get("status") in {"queued", "analysing", ""}:
+            continue
+        leg_results.append(
+            {
+                "review_id": review.id,
+                "index": max(0, int(selection.order or 1) - 1),
+                "status": payload.get("status") or selection.status or "",
+                "result": payload,
+                "hydration": {},
+            }
+        )
+    return leg_results
+
+
+def recover_stale_slip_reviews(*, stale_after_seconds=None, limit=25):
+    stale_after_seconds = int(stale_after_seconds or SLIP_REVIEW_STALE_AFTER_SECONDS)
+    cutoff = timezone.now() - timedelta(seconds=max(60, stale_after_seconds))
+    candidates = list(
+        SlipReview.objects.filter(
+            status__in=[
+                SlipReview.Status.QUEUED,
+                SlipReview.Status.IMPORTING,
+                SlipReview.Status.ANALYSING,
+            ],
+            updated_at__lt=cutoff,
+        )
+        .prefetch_related("selections")
+        .order_by("updated_at")[: max(1, int(limit or 25))]
+    )
+    recovered = failed = skipped = 0
+    results = []
+    for review in candidates:
+        progress = (review.summary or {}).get("progress") or {}
+        total = review.selections.count() or int(progress.get("total") or 0)
+        persisted_leg_results = _leg_results_from_persisted_slip_selections(review)
+        completed = len(persisted_leg_results)
+        try:
+            if persisted_leg_results:
+                finalize_slip_review_import_results(review.id, persisted_leg_results)
+                recovered += 1
+                outcome = "finalized_from_persisted_legs"
+            else:
+                fail_slip_review_import(
+                    review.id,
+                    "Slip review did not finish in time. Please retry the slip review.",
+                    error_code="stale_review_timeout",
+                )
+                failed += 1
+                outcome = "failed_stale_without_completed_legs"
+            results.append(
+                {
+                    "review_id": review.id,
+                    "previous_status": review.status,
+                    "outcome": outcome,
+                    "completed": completed,
+                    "total": total,
+                }
+            )
+            log.warning(
+                "Slip review stale recovery review=%s outcome=%s completed=%s total=%s stale_after_seconds=%s",
+                review.id,
+                outcome,
+                completed,
+                total,
+                stale_after_seconds,
+            )
+        except Exception as exc:
+            skipped += 1
+            results.append(
+                {
+                    "review_id": review.id,
+                    "previous_status": review.status,
+                    "outcome": "recovery_failed",
+                    "error": str(exc)[:300],
+                    "completed": completed,
+                    "total": total,
+                }
+            )
+            log.exception("Slip review stale recovery failed review=%s", review.id)
+    return {
+        "considered": len(candidates),
+        "recovered": recovered,
+        "failed": failed,
+        "skipped": skipped,
+        "stale_after_seconds": stale_after_seconds,
+        "results": results,
+    }
+
+
 def process_slip_review_import(review_id):
     review = SlipReview.objects.get(id=review_id)
     payload = review.submitted_payload or {}
-    review.status = SlipReview.Status.IMPORTING
     review.summary = {
         **(review.summary or {}),
         **_empty_slip_summary("Importing slip selections.", task_id=(review.summary or {}).get("task_id", "")),
     }
-    review.save(update_fields=["status", "summary", "updated_at"])
+    _set_slip_review_progress(
+        review,
+        phase="importing",
+        message="Importing slip selections.",
+        status=SlipReview.Status.IMPORTING,
+    )
 
     try:
         if review.source == SlipReview.Source.SPORTYBET:
@@ -5509,12 +6260,10 @@ def process_slip_review_import(review_id):
         else:
             raise ValueError(f"Unsupported async slip source: {review.source}")
 
-        review.status = SlipReview.Status.ANALYSING
         review.summary = {
             **(review.summary or {}),
             **_empty_slip_summary("Analysing imported selections.", task_id=(review.summary or {}).get("task_id", "")),
         }
-        review.save(update_fields=["status", "summary", "updated_at"])
 
         selections = [
             {
@@ -5526,12 +6275,18 @@ def process_slip_review_import(review_id):
             for item in imported.get("selections") or []
             if item.get("match") and item.get("market")
         ]
-        # One hydrator for the whole review: snapshots are fetched once per fixture
-        # rather than once per leg, and matrix-served legs skip the provider entirely.
-        hydrator = FixtureHydrator()
+        _initialize_slip_selection_progress_rows(review, selections)
+        _set_slip_review_progress(
+            review,
+            phase="analysing_legs",
+            total=len(selections),
+            completed=0,
+            message=f"Imported {len(selections)} selections. Analysing each leg.",
+            status=SlipReview.Status.ANALYSING,
+        )
         plan = plan_slip_hydration(selections)
         log.info(
-            "Slip hydration plan review=%s legs=%s fixtures=%s needing_snapshots=%s served_by_model=%s estimated_snapshot_calls=%s",
+            "Slip hydration plan review=%s legs=%s fixtures=%s needing_snapshots=%s served_by_model=%s estimated_snapshot_calls=%s fanout=True",
             review.id,
             plan["legs"],
             plan["distinct_fixtures"],
@@ -5539,45 +6294,68 @@ def process_slip_review_import(review_id):
             plan["fixtures_served_by_model"],
             plan.get("estimated_snapshot_calls"),
         )
-
-        results = []
-        review_scoring_context = {"fixture_universe_synced": False}
-        for selection in selections:
-            result = _analyse_manual_selection(
-                selection,
-                days=payload.get("days", 3),
-                request=None,
-                force_fresh=True,
-                hydration_cache=hydrator,
-                review_scoring_context=review_scoring_context,
-            )
-            result["provider"] = review.source
-            result["provider_payload"] = _json_safe(selection.get("provider_payload") or {})
-            results.append(result)
-
-        log.info(
-            "Slip hydration done review=%s %s",
-            review.id,
-            hydrator.stats.to_dict(),
-        )
-
-        if not results:
+        if not selections:
             raise ValueError("No supported football selections were found in this slip.")
-
-        summary, safe_results = _populate_slip_review(review, results)
-        review.submitted_payload = _json_safe(
+        final_payload = _json_safe(
             {
                 **payload,
                 "provider_code": imported.get("share_code") or imported.get("booking_code") or "",
                 "selection_count": imported.get("selection_count", 0),
+                "fanout_analysis": True,
             }
         )
+        review.submitted_payload = final_payload
         review.save(update_fields=["submitted_payload", "updated_at"])
-        return _api_response_payload({"review_id": review.id, "status": review.status, **summary})
+
+        from celery import chord as celery_chord
+        from .tasks import analyse_slip_review_leg, finalize_slip_review_import
+
+        workflow = celery_chord(
+            [
+                analyse_slip_review_leg.s(review.id, index, _json_safe(selection), payload.get("days", 3))
+                for index, selection in enumerate(selections)
+            ]
+        )(finalize_slip_review_import.s(review.id))
+        _publish_slip_review_event(
+            review,
+            "review.fanout_queued",
+            {
+                "total": len(selections),
+                "fanout_task_id": getattr(workflow, "id", ""),
+            },
+        )
+        log.info(
+            "Slip review fanout queued review=%s legs=%s chord_task_id=%s",
+            review.id,
+            len(selections),
+            getattr(workflow, "id", ""),
+        )
+        return _api_response_payload(
+            {
+                "review_id": review.id,
+                "status": review.status,
+                "fanout_task_id": getattr(workflow, "id", ""),
+                **(review.summary or {}),
+            }
+        )
     except Exception as exc:
         review.status = SlipReview.Status.FAILED
         review.summary = _empty_slip_summary("Slip import failed.", task_id=(review.summary or {}).get("task_id", ""), error=exc)
+        review.summary["progress"] = _slip_review_progress(
+            phase="failed",
+            message="Slip review failed.",
+            error=str(exc),
+        )
         review.save(update_fields=["status", "summary", "updated_at"])
+        _publish_slip_review_event(
+            review,
+            "review.failed",
+            {
+                "status": review.status,
+                "error": str(exc),
+                "progress": review.summary.get("progress") or {},
+            },
+        )
         raise
 
 
@@ -5590,7 +6368,22 @@ def fail_slip_review_import(review_id, message, *, error_code="failed"):
         error=message,
     )
     review.summary["error_code"] = error_code
+    review.summary["progress"] = _slip_review_progress(
+        phase="failed",
+        message=message,
+        error_code=error_code,
+    )
     review.save(update_fields=["status", "summary", "updated_at"])
+    _publish_slip_review_event(
+        review,
+        "review.failed",
+        {
+            "status": review.status,
+            "error": message,
+            "error_code": error_code,
+            "progress": review.summary.get("progress") or {},
+        },
+    )
     return _api_response_payload(
         {
             "review_id": review.id,
@@ -5676,8 +6469,23 @@ class SportyBetSlipImportView(APIView):
             submitted_payload=data,
         )
         task = import_slip_review.delay(review.id)
-        review.summary = _empty_slip_summary("Slip import queued.", task_id=task.id)
+        review.summary = {
+            **_empty_slip_summary("Slip import queued.", task_id=task.id),
+            "progress": _slip_review_progress(
+                phase="queued",
+                message="Slip import queued.",
+            ),
+        }
         review.save(update_fields=["summary", "updated_at"])
+        _publish_slip_review_event(
+            review,
+            "review.queued",
+            {
+                "status": review.status,
+                "task_id": task.id,
+                "progress": review.summary.get("progress") or {},
+            },
+        )
         return Response(_slip_review_payload(review, include_selections=True), status=status.HTTP_202_ACCEPTED)
 
 
@@ -5708,8 +6516,23 @@ class BetanoSlipImportView(APIView):
             submitted_payload=data,
         )
         task = import_slip_review.delay(review.id)
-        review.summary = _empty_slip_summary("Slip import queued.", task_id=task.id)
+        review.summary = {
+            **_empty_slip_summary("Slip import queued.", task_id=task.id),
+            "progress": _slip_review_progress(
+                phase="queued",
+                message="Slip import queued.",
+            ),
+        }
         review.save(update_fields=["summary", "updated_at"])
+        _publish_slip_review_event(
+            review,
+            "review.queued",
+            {
+                "status": review.status,
+                "task_id": task.id,
+                "progress": review.summary.get("progress") or {},
+            },
+        )
         return Response(_slip_review_payload(review, include_selections=True), status=status.HTTP_202_ACCEPTED)
 
 
@@ -6084,6 +6907,60 @@ class SlipReviewDetailView(APIView):
         )
         public_only = str(request.query_params.get("view", "")).lower() == "public"
         return Response(_slip_review_payload(review, include_selections=True, public_only=public_only))
+
+
+def _slip_review_event_payload(event):
+    return {
+        "id": event.id,
+        "review_id": event.review_id,
+        "event_type": event.event_type,
+        "payload": event.payload or {},
+        "created_at": event.created_at.isoformat() if event.created_at else "",
+    }
+
+
+class SlipReviewEventsView(APIView):
+    permission_classes = [IsAuthenticated]
+    serializer_class = SlipReviewEventsResponseSerializer
+
+    @extend_schema(
+        summary="Slip review realtime events",
+        description=(
+            "Authenticated user endpoint. Returns only slip-review events newer than `after_id`, plus the current "
+            "progress snapshot. This is the HTTP fallback/reconnect path for the websocket stream."
+        ),
+        tags=["Slip Reviews"],
+        parameters=[SlipReviewEventsQuerySerializer],
+        responses={200: SlipReviewEventsResponseSerializer},
+    )
+    def get(self, request, review_id):
+        query = SlipReviewEventsQuerySerializer(data=request.query_params)
+        query.is_valid(raise_exception=True)
+        after_id = query.validated_data.get("after_id") or 0
+        limit = query.validated_data.get("limit") or 100
+        review = get_object_or_404(
+            SlipReview.objects.only("id", "status", "summary", "updated_at"),
+            id=review_id,
+            user=request.user,
+        )
+        events = list(
+            SlipReviewEvent.objects.filter(review=review, id__gt=after_id)
+            .order_by("id")[:limit]
+        )
+        latest_event_id = (
+            SlipReviewEvent.objects.filter(review=review).order_by("-id").values_list("id", flat=True).first()
+        )
+        payload = {
+            "review_id": review.id,
+            "status": review.status,
+            "progress": (review.summary or {}).get("progress") or {},
+            "latest_event_id": latest_event_id,
+            "events": [_slip_review_event_payload(event) for event in events],
+        }
+        response = Response(_api_response_payload(payload))
+        response["Cache-Control"] = "private, no-store"
+        response["Vary"] = "Authorization, Cookie"
+        return response
 
 
 class GameDetailView(APIView):
@@ -6847,6 +7724,7 @@ def _maintenance_jobs():
         fit_score_models,
         refresh_imminent_lineups,
         refresh_player_availability,
+        recover_stale_slip_reviews,
         settle_slip_selections,
         sync_fixture_horizon,
     )
@@ -6859,6 +7737,7 @@ def _maintenance_jobs():
         "player_availability": (refresh_player_availability, "Reload injuries and suspensions"),
         "lineups": (refresh_imminent_lineups, "Pull team sheets for imminent fixtures"),
         "settle_slips": (settle_slip_selections, "Settle yesterday's slip selections"),
+        "recover_slip_reviews": (recover_stale_slip_reviews, "Finalize or fail stale slip reviews"),
     }
 
 
