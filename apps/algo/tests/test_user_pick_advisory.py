@@ -6,6 +6,8 @@ from django.test import SimpleTestCase, TestCase
 from apps.algo.views import (
     _consume_review_force_fresh,
     _generated_match_checker_markets,
+    _generated_market_names_for_family,
+    _blocked_slip_recommendation_market,
     _market_can_skip_core_on_demand,
     _manual_verdict,
     _replacement_market_for_slip,
@@ -155,6 +157,99 @@ class UserPickAdvisoryTests(SimpleTestCase):
 
         self.assertEqual(replacement["market"], "Over 1.5")
         self.assertEqual(replacement["replacement_scope"], "comparable_market")
+
+    def test_replacement_never_recommends_easy_over_half_goal_market(self):
+        selected = {
+            "market": "Over 2.5",
+            "advisory_score": 48,
+            "advisory_status": "avoid",
+            "market_taxonomy": {"family": "total_goals"},
+        }
+        generated = [
+            {
+                "market": "Over 0.5",
+                "advisory_score": 96,
+                "advisory_status": "strong",
+                "market_taxonomy": {"family": "total_goals"},
+            },
+            {
+                "market": "Under 3.5",
+                "advisory_score": 70,
+                "advisory_status": "playable",
+                "market_taxonomy": {"family": "total_goals"},
+            },
+        ]
+        blocked = []
+
+        replacement = _replacement_market_for_slip(
+            {"markets": []},
+            selected_market=selected,
+            generated_markets=generated,
+            allow_safer_fallback=True,
+            blocked_markets_out=blocked,
+        )
+
+        self.assertEqual(replacement["market"], "Under 3.5")
+        self.assertEqual(blocked, ["Over 0.5"])
+
+    def test_generated_goal_alternatives_exclude_easy_over_half_goal_markets(self):
+        total_names = set(_generated_market_names_for_family(describe_market("Over 2.5")))
+        team_names = set(_generated_market_names_for_family(describe_market("Home Team Over 2.5")))
+        combo_descriptor = replace(
+            describe_market("Home/Draw & Over 2.5"),
+            family="double_chance_total_goals",
+            canonical="Home/Draw & Over 2.5",
+        )
+        combo_names = set(_generated_market_names_for_family(combo_descriptor))
+
+        self.assertNotIn("Over 0.5", total_names)
+        self.assertNotIn("Home Team Over 0.5", team_names)
+        self.assertNotIn("Over 0.5", combo_names)
+        self.assertIn("Over 1.5", total_names)
+        self.assertIn("Home Team Over 1.5", team_names)
+        self.assertIn("Over 1.5", combo_names)
+
+    def test_replacement_returns_none_when_only_easy_over_half_goal_is_available(self):
+        selected = {
+            "market": "Over 2.5",
+            "advisory_score": 48,
+            "advisory_status": "avoid",
+            "market_taxonomy": {"family": "total_goals"},
+        }
+        generated = [
+            {
+                "market": "Over 0.5",
+                "advisory_score": 96,
+                "advisory_status": "strong",
+                "market_taxonomy": {"family": "total_goals"},
+            },
+            {
+                "market": "1H Over 0.5",
+                "advisory_score": 88,
+                "advisory_status": "strong",
+                "market_taxonomy": {"family": "total_goals"},
+            },
+            {
+                "market": "Home Team Over 0.5",
+                "advisory_score": 86,
+                "advisory_status": "strong",
+                "market_taxonomy": {"family": "team_total_goals"},
+            },
+        ]
+
+        replacement = _replacement_market_for_slip(
+            {"markets": []},
+            selected_market=selected,
+            generated_markets=generated,
+            allow_safer_fallback=True,
+        )
+
+        self.assertIsNone(replacement)
+
+    def test_recommendation_policy_does_not_block_handicap_plus_half(self):
+        self.assertTrue(_blocked_slip_recommendation_market({"market": "Over 0.5"}))
+        self.assertTrue(_blocked_slip_recommendation_market({"market": "1H Over 0.5"}))
+        self.assertFalse(_blocked_slip_recommendation_market({"market": "AH Home +0.5"}))
 
     def test_replacement_does_not_broad_replace_decent_specialist_pick(self):
         selected = {
@@ -335,7 +430,8 @@ class UserPickAdvisoryTests(SimpleTestCase):
 
         generated_names = {market["market"] for market in generated}
         self.assertIn("Test Forward Shots Over 1.5", generated_names)
-        self.assertIn("Test Forward Shots On Target Over 0.5", generated_names)
+        self.assertIn("Test Forward Shots On Target Over 1.5", generated_names)
+        self.assertNotIn("Test Forward Shots On Target Over 0.5", generated_names)
 
 
 class GeneratedCardsAlternativeTests(TestCase):

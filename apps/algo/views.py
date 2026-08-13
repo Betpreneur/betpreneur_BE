@@ -2123,8 +2123,8 @@ def _generated_market_names_for_family(descriptor):
     if family in {"total_goals", "team_total_goals"}:
         if family == "team_total_goals" and descriptor.team in {"home", "away"}:
             prefix = "Home Team" if descriptor.team == "home" else "Away Team"
-            return [f"{prefix} {side.title()} {line}" for line in ("0.5", "1.5", "2.5") for side in ("over", "under")]
-        return [f"{side.title()} {line}" for line in ("0.5", "1.5", "2.5", "3.5", "4.5") for side in ("over", "under")]
+            return [f"{prefix} {side.title()} {line}" for line in ("1.5", "2.5") for side in ("over", "under")]
+        return [f"{side.title()} {line}" for line in ("1.5", "2.5", "3.5", "4.5") for side in ("over", "under")]
     if family in {"result_total_goals", "double_chance_total_goals"}:
         return [
             "Home Win",
@@ -2133,7 +2133,6 @@ def _generated_market_names_for_family(descriptor):
             "DC: 1X",
             "DC: X2",
             "DC: 12",
-            "Over 0.5",
             "Over 1.5",
             "Over 2.5",
             "Under 2.5",
@@ -2164,9 +2163,8 @@ def _generated_market_names_for_family(descriptor):
         if subject:
             return [
                 f"{subject} To Score",
-                f"{subject} Shots Over 0.5",
                 f"{subject} Shots Over 1.5",
-                f"{subject} Shots On Target Over 0.5",
+                f"{subject} Shots On Target Over 1.5",
                 f"{subject} To Be Booked",
                 f"{subject} Assist",
                 f"{subject} Saves Over 2.5",
@@ -2281,6 +2279,17 @@ def _rank_replacement_candidates(candidates):
     )
 
 
+def _blocked_slip_recommendation_market(market):
+    market_name = (market or {}).get("market") if isinstance(market, dict) else market
+    descriptor = describe_market(market_name)
+    if not descriptor.recognized:
+        return False
+    if descriptor.family in {"asian_handicap", "handicap"}:
+        return False
+    line = _float_or_none(descriptor.line)
+    return descriptor.side == "over" and line is not None and abs(line - 0.5) < 0.001
+
+
 def _replacement_is_meaningfully_better(selected_market, replacement_market):
     if not replacement_market or not selected_market:
         return bool(replacement_market)
@@ -2295,14 +2304,32 @@ def _replacement_is_meaningfully_better(selected_market, replacement_market):
     return replacement_score >= minimum_score and replacement_score >= selected_score + minimum_lift
 
 
-def _replacement_market_for_slip(game, selected_market=None, generated_markets=None, *, allow_safer_fallback=False):
+def _replacement_market_for_slip(
+    game,
+    selected_market=None,
+    generated_markets=None,
+    *,
+    allow_safer_fallback=False,
+    blocked_markets_out=None,
+):
     markets = [
         _with_match_checker_advisory(market)
         for market in (game.get("markets") or [])
         if market.get("market") not in EXCLUDED_MARKETS
     ]
     markets.extend(generated_markets or [])
-    markets = [market for market in markets if market]
+    allowed_markets = []
+    blocked_markets = []
+    for market in markets:
+        if not market:
+            continue
+        if _blocked_slip_recommendation_market(market):
+            blocked_markets.append(market.get("market"))
+            continue
+        allowed_markets.append(market)
+    if blocked_markets_out is not None:
+        blocked_markets_out.extend(name for name in dict.fromkeys(blocked_markets) if name)
+    markets = allowed_markets
     if selected_market:
         selected_name = selected_market.get("market")
         markets = [market for market in markets if not _market_matches(selected_name, market.get("market"))]
@@ -3323,10 +3350,31 @@ def _without_remove_recommendation(item):
     return copy
 
 
+def _without_blocked_replacement_recommendation(item):
+    replacement_market = (item or {}).get("replacement_market") or {}
+    if not replacement_market or not _blocked_slip_recommendation_market(replacement_market):
+        return item
+    copy = dict(item)
+    blocked = list(copy.get("blocked_recommendation_markets") or [])
+    if replacement_market.get("market"):
+        blocked.append(replacement_market.get("market"))
+    copy["blocked_recommendation_markets"] = list(dict.fromkeys(blocked))
+    copy["replacement_market"] = None
+    if copy.get("verdict") == "replace":
+        copy["verdict"] = "caution"
+        copy["better_market_available"] = False
+        copy["message"] = (
+            "This selection is risky, but no stronger backed replacement was found for this game."
+        )
+    return copy
+
+
 def _public_selection_card(item):
     card = _selection_card(item)
     selected_market = item.get("selected_market") or {}
     replacement_market = item.get("replacement_market") or {}
+    if replacement_market and _blocked_slip_recommendation_market(replacement_market):
+        replacement_market = {}
     verdict = item.get("verdict")
     ai_pick = None
     if verdict == "replace" and replacement_market:
@@ -3385,6 +3433,7 @@ def _public_selection_card(item):
         "statpal_stale_snapshot_types": statpal_plan.get("stale_snapshot_types") or [],
         "statpal_snapshot_coverage_percent": statpal_coverage.get("coverage_percent") if statpal_coverage else statpal_plan.get("coverage_percent"),
         "provider_merge": (item.get("matched_fixture") or {}).get("provider_merge") or item.get("provider_merge") or {},
+        "blocked_recommendation_markets": item.get("blocked_recommendation_markets") or [],
         "has_technical_details": True,
     }
     leg_assessment = assess_leg(item)
@@ -3868,6 +3917,35 @@ def _clean_bettor_evidence_items(items, *, limit=4):
     return list(dict.fromkeys(cleaned))[:limit]
 
 
+def _text_mentions_blocked_slip_recommendation_market(text):
+    lowered = normalize_market_text(text)
+    blocked_markets = (
+        "over 0.5",
+        "1h over 0.5",
+        "2h over 0.5",
+        "home team over 0.5",
+        "away team over 0.5",
+        "shots over 0.5",
+        "shots on target over 0.5",
+    )
+    return any(market in lowered for market in blocked_markets)
+
+
+def _clean_deepseek_recommendation_why(game, items):
+    user_market = ((game or {}).get("user_pick") or {}).get("market")
+    recommendation = (game or {}).get("recommendation") or {}
+    recommendation_market = (recommendation.get("pick") or {}).get("market")
+    user_submitted_blocked_market = _blocked_slip_recommendation_market({"market": user_market})
+    recommended_market_is_user_market = _market_matches(user_market, recommendation_market)
+    allow_blocked_text = user_submitted_blocked_market and recommended_market_is_user_market
+    cleaned = []
+    for item in _clean_bettor_evidence_items(items):
+        if not allow_blocked_text and _text_mentions_blocked_slip_recommendation_market(item):
+            continue
+        cleaned.append(item)
+    return cleaned
+
+
 def _split_bettor_evidence(selection):
     raw = _stats_backed_evidence(selection, market_payload=(selection or {}).get("your_pick") or {})
     verdict = _simple_pick_verdict(selection)
@@ -4111,6 +4189,8 @@ def _enhance_bettor_public_with_deepseek(payload):
                         "You write simple football betslip analysis for bettors. Use only the supplied facts. "
                         "Do not promise a win. Do not invent team form, injuries, odds, xG, lineups, or H2H. "
                         "Keep the user's markets, scores, verdicts, and recommendation actions unchanged. "
+                        "Do not introduce Over 0.5, 1H Over 0.5, 2H Over 0.5, team Over 0.5, "
+                        "or player shots/SOT Over 0.5 as replacement recommendations unless it is the user's submitted pick. "
                         "Do not use StatPal reference-price wording as evidence. Bettors need football stats, "
                         "such as expected goals, recent form, first-half/second-half profile, corners, cards, "
                         "shots, or the market-specific confidence already supplied. "
@@ -4153,7 +4233,7 @@ def _enhance_bettor_public_with_deepseek(payload):
             if update.get("conclusion"):
                 game["analysis"]["conclusion"] = str(update["conclusion"]).strip()[:360]
             if isinstance(update.get("recommendation_why"), list):
-                cleaned = _clean_bettor_evidence_items(update["recommendation_why"])
+                cleaned = _clean_deepseek_recommendation_why(game, update["recommendation_why"])
                 if cleaned:
                     game["recommendation"]["why"] = cleaned
         log.info("DeepSeek SportyBet public analysis enhanced %s/%s games", len(updates), len(games))
@@ -4184,6 +4264,7 @@ def _slip_intelligence(results):
     enriched = []
     for item in results:
         copy = _without_remove_recommendation(dict(item))
+        copy = _without_blocked_replacement_recommendation(copy)
         copy["selection_score"] = _selection_strength_score(copy)
         enriched.append(copy)
 
@@ -4661,7 +4742,7 @@ def _log_slip_review_debug(review, summary):
                 "price_status=%s statpal_source=%s statpal_cache=%s statpal_coverage=%s "
                 "statpal_required=%s statpal_missing=%s statpal_stale=%s statpal_snapshots=%s "
                 "provider_merge=%s "
-                "warnings=%s tracking_reasons=%s bettor_verdict=%s recommendation=%s "
+                "blocked_recommendations=%s warnings=%s tracking_reasons=%s bettor_verdict=%s recommendation=%s "
                 "evidence_count=%s reason_codes=%s"
             ),
             review.id,
@@ -4696,6 +4777,7 @@ def _log_slip_review_debug(review, summary):
             technical.get("statpal_stale_snapshot_types") or [],
             technical.get("statpal_snapshot_types") or [],
             technical.get("provider_merge") or {},
+            technical.get("blocked_recommendation_markets") or [],
             technical.get("market_capability_warnings") or [],
             untracked_by_id.get(selection_id, []),
             user_pick.get("verdict"),
@@ -5302,6 +5384,7 @@ def _analyse_manual_selection(
     canonical_requested_market = market_descriptor.canonical
     analysis_market = _market_for_fixture_orientation(canonical_requested_market, candidate)
     selected_market = next((market for market in markets if _market_matches(analysis_market, market.get("market"))), None)
+    blocked_recommendation_markets = []
     if not selected_market:
         submitted_market = _submitted_market_payload(
             requested_market=requested_market,
@@ -5314,6 +5397,7 @@ def _analyse_manual_selection(
             selected_market=submitted_market,
             generated_markets=generated_markets,
             allow_safer_fallback=True,
+            blocked_markets_out=blocked_recommendation_markets,
         )
         verdict = _manual_verdict(submitted_market, replacement_market)
         # A market priced by a fitted model is not "not found" merely because the core
@@ -5339,6 +5423,7 @@ def _analyse_manual_selection(
             "best_market": game.get("best_market"),
             "recommended_market": game.get("recommended_market"),
             "replacement_market": replacement_market,
+            "blocked_recommendation_markets": blocked_recommendation_markets,
             "generated_markets": generated_markets,
             "fixture_resolution": {
                 "status": resolution_status,
@@ -5364,6 +5449,7 @@ def _analyse_manual_selection(
         selected_market=selected_market,
         generated_markets=generated_markets,
         allow_safer_fallback=True,
+        blocked_markets_out=blocked_recommendation_markets,
     )
     verdict = _manual_verdict(selected_market, replacement_market)
     return {
@@ -5382,6 +5468,7 @@ def _analyse_manual_selection(
         "best_market": best_market,
         "recommended_market": recommended_market,
         "replacement_market": replacement_market,
+        "blocked_recommendation_markets": blocked_recommendation_markets,
         "generated_markets": generated_markets,
         "statpal_refresh": statpal_refresh,
         "statpal_context": statpal_context,

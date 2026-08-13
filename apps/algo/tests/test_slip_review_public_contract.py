@@ -9,6 +9,8 @@ from apps.algo.ticket_risk import SCORE_BANDS, Calibration
 from apps.algo.views import (
     _build_bettor_public_payload,
     _has_statpal_hydration_identity,
+    _clean_deepseek_recommendation_why,
+    _enhance_bettor_public_with_deepseek,
     _manual_review_summary,
     _matched_fixture_with_statpal,
     _public_confidence_label,
@@ -18,6 +20,7 @@ from apps.algo.views import (
     _should_skip_core_on_demand,
     _slip_review_payload,
     _ticket_killers_message,
+    _without_blocked_replacement_recommendation,
 )
 from apps.algo.market_taxonomy import describe_market
 
@@ -402,6 +405,162 @@ class SlipReviewPublicContractTests(SimpleTestCase):
         self.assertEqual(selection["technical_ref"]["statpal_missing_snapshot_types"], [])
         self.assertEqual(selection["technical_ref"]["statpal_snapshot_coverage_percent"], 100.0)
 
+    def test_public_review_does_not_expose_blocked_over_half_goal_replacement(self):
+        result = _sample_replace_result()
+        result["replacement_market"] = {
+            "market": "Over 0.5",
+            "meaning": "1 or more total goals",
+            "confidence": 96,
+            "final_confidence": 96,
+            "odds": None,
+            "odds_source": "estimated",
+            "advisory_score": 96,
+            "advisory_status": "strong",
+            "market_taxonomy": describe_market("Over 0.5").to_dict(),
+        }
+
+        summary = _manual_review_summary([result])
+        public = summary["public"]
+        selection = public["selections"][0]
+
+        self.assertEqual(summary["replace_count"], 0)
+        self.assertEqual(summary["caution_count"], 1)
+        self.assertEqual(public["recommended_change_ids"], [])
+        self.assertEqual(selection["verdict"]["code"], "caution")
+        self.assertFalse(selection["ai_pick"]["available"])
+        self.assertEqual(selection["technical_ref"]["blocked_recommendation_markets"], ["Over 0.5"])
+        self.assertNotEqual(selection["recommendation"]["action"], "replace")
+        bettor_payload = _build_bettor_public_payload(
+            SimpleNamespace(id=35, source="sportybet", status="completed"),
+            public,
+            enhance=False,
+        )
+        self.assertNotEqual(
+            (bettor_payload["recommended_ticket"]["picks"][0] or {}).get("market"),
+            "Over 0.5",
+        )
+        self.assertNotEqual(bettor_payload["games"][0]["recommendation"]["action"], "replace")
+
+    def test_user_submitted_over_half_goal_is_still_assessed_and_returned(self):
+        result = _sample_replace_result()
+        result["submitted_market"] = "Over 0.5"
+        result["verdict"] = "caution"
+        result["message"] = "Over 0.5 is supported, but it is not a replacement recommendation."
+        result["replacement_market"] = None
+        result["selected_market"] = {
+            "market": "Over 0.5",
+            "meaning": "1 or more total goals",
+            "confidence": 70,
+            "final_confidence": 68,
+            "advisory_score": 68,
+            "advisory_status": "playable",
+            "advisory_evidence": {},
+        }
+        result["market_taxonomy"] = describe_market("Over 0.5").to_dict()
+
+        summary = _manual_review_summary([result])
+        public = summary["public"]
+        selection = public["selections"][0]
+        bettor_payload = _build_bettor_public_payload(
+            SimpleNamespace(id=36, source="sportybet", status="completed"),
+            public,
+            enhance=False,
+        )
+
+        self.assertEqual(summary["replace_count"], 0)
+        self.assertEqual(summary["caution_count"], 1)
+        self.assertEqual(selection["your_pick"]["market"], "Over 0.5")
+        self.assertEqual(selection["ai_pick"]["market"], "Over 0.5")
+        self.assertTrue(selection["ai_pick"]["available"])
+        self.assertEqual(selection["technical_ref"]["blocked_recommendation_markets"], [])
+        self.assertEqual(bettor_payload["recommended_ticket"]["picks"][0]["market"], "Over 0.5")
+        self.assertFalse(bettor_payload["recommended_ticket"]["picks"][0]["changed"])
+
+    def test_deepseek_recommendation_text_cannot_reintroduce_blocked_over_half_goal(self):
+        game = {
+            "user_pick": {"market": "Over 2.5"},
+            "recommendation": {
+                "action": "replace",
+                "pick": {"market": "Under 3.5"},
+            },
+        }
+
+        cleaned = _clean_deepseek_recommendation_why(
+            game,
+            [
+                "Over 0.5 is safer for this game.",
+                "Under 3.5 has stronger support from the goal profile.",
+            ],
+        )
+
+        self.assertEqual(cleaned, ["Under 3.5 has stronger support from the goal profile."])
+
+    def test_deepseek_recommendation_text_allows_over_half_when_user_submitted_it(self):
+        game = {
+            "user_pick": {"market": "Over 0.5"},
+            "recommendation": {
+                "action": "caution",
+                "pick": {"market": "Over 0.5"},
+            },
+        }
+
+        cleaned = _clean_deepseek_recommendation_why(
+            game,
+            ["Over 0.5 is your submitted pick and only needs one goal."],
+        )
+
+        self.assertEqual(cleaned, ["Over 0.5 is your submitted pick and only needs one goal."])
+
+    def test_deepseek_enhancement_filters_blocked_over_half_recommendation_text(self):
+        payload = {
+            "id": 37,
+            "source": "sportybet",
+            "status": "completed",
+            "games": [
+                {
+                    "match": "Alpha vs Beta",
+                    "user_pick": {"market": "Over 2.5", "summary": "Original summary"},
+                    "analysis": {
+                        "positive_evidence": ["The goal model projects about 2.6 total goals."],
+                        "risk_evidence": ["Over 2.5 is close to the line."],
+                        "conclusion": "Original conclusion.",
+                    },
+                    "recommendation": {
+                        "action": "replace",
+                        "pick": {"market": "Under 3.5"},
+                        "why": ["Original recommendation."],
+                    },
+                }
+            ],
+        }
+        parsed = {
+            "games": [
+                {
+                    "index": 0,
+                    "user_pick_summary": "DeepSeek summary.",
+                    "positive_evidence": ["The goal model projects about 2.6 total goals."],
+                    "risk_evidence": ["Over 2.5 is close to the line."],
+                    "conclusion": "DeepSeek conclusion.",
+                    "recommendation_why": [
+                        "Over 0.5 is safer for this fixture.",
+                        "Under 3.5 has stronger support from the goal profile.",
+                    ],
+                }
+            ]
+        }
+
+        with patch("apps.algo.grindalgo.algo_runner.llm_reasoning_enabled", return_value=True), patch(
+            "apps.algo.grindalgo.algo_runner._deepseek_chat_completion",
+            return_value="{}",
+        ), patch("apps.algo.grindalgo.algo_runner._parse_llm_json", return_value=parsed):
+            enhanced = _enhance_bettor_public_with_deepseek(payload)
+
+        self.assertEqual(enhanced["games"][0]["user_pick"]["summary"], "DeepSeek summary.")
+        self.assertEqual(
+            enhanced["games"][0]["recommendation"]["why"],
+            ["Under 3.5 has stronger support from the goal profile."],
+        )
+
     def test_slip_review_debug_logging_exposes_decision_inputs(self):
         from apps.algo.views import _log_slip_review_debug
 
@@ -421,6 +580,7 @@ class SlipReviewPublicContractTests(SimpleTestCase):
         self.assertIn("data_conf=", text)
         self.assertIn("confidence_gain=", text)
         self.assertIn("statpal_coverage=", text)
+        self.assertIn("blocked_recommendations=", text)
         self.assertIn("reason_codes=", text)
 
     def test_bettor_public_payload_is_product_facing(self):
@@ -633,6 +793,20 @@ class SlipReviewPublicContractTests(SimpleTestCase):
         )
 
         self.assertEqual(replacement["market"], "Cards Under 3.5")
+
+    def test_blocked_replacement_sanitizer_downgrades_replace_to_caution(self):
+        item = _sample_replace_result()
+        item["replacement_market"] = {
+            "market": "Over 0.5",
+            "advisory_score": 96,
+            "advisory_status": "strong",
+        }
+
+        sanitized = _without_blocked_replacement_recommendation(item)
+
+        self.assertIsNone(sanitized["replacement_market"])
+        self.assertEqual(sanitized["verdict"], "caution")
+        self.assertFalse(sanitized["better_market_available"])
 
     def test_ticket_killers_recommend_changing_not_removing(self):
         message = _ticket_killers_message(
