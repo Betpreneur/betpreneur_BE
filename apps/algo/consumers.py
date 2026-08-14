@@ -15,6 +15,7 @@ class SlipReviewConsumer(AsyncJsonWebsocketConsumer):
         self.review_id = int(self.scope["url_route"]["kwargs"]["review_id"])
         self.group_name = f"slip_review_{self.review_id}"
         user = self.scope.get("user")
+        stream_review_id = self.scope.get("slip_review_stream_review_id")
 
         if not user or not user.is_authenticated:
             log.warning(
@@ -23,6 +24,17 @@ class SlipReviewConsumer(AsyncJsonWebsocketConsumer):
                 self.scope.get("client"),
             )
             await self.close(code=4401)
+            return
+
+        if int(stream_review_id or 0) != self.review_id:
+            log.warning(
+                "Slip review websocket rejected ticket review mismatch path_review=%s ticket_review=%s user=%s client=%s",
+                self.review_id,
+                stream_review_id,
+                user.id,
+                self.scope.get("client"),
+            )
+            await self.close(code=4403)
             return
 
         if not await self._can_access_review(self.review_id, user.id):

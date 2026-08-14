@@ -6,6 +6,7 @@ import dataclasses
 import logging
 import math
 import os
+import secrets
 import time
 from decimal import Decimal, InvalidOperation
 
@@ -33,6 +34,7 @@ from .models import (
     SlipLegAnalysisCache,
     SlipRepair,
     SlipReviewEvent,
+    SlipReviewStreamToken,
     SlipReview,
     SlipSelection,
 )
@@ -101,6 +103,7 @@ from .serializers import (
     SlipReviewDetailResponseSerializer,
     SlipReviewEventsQuerySerializer,
     SlipReviewEventsResponseSerializer,
+    SlipReviewStreamTokenResponseSerializer,
     SlipReviewListResponseSerializer,
     SlipReviewOptionsResponseSerializer,
     MaintenanceRunRequestSerializer,
@@ -139,6 +142,7 @@ SLIP_REVIEW_LEG_CACHE_TTL_SECONDS = _env_int("SLIP_REVIEW_LEG_CACHE_TTL_SECONDS"
 SLIP_REVIEW_LEG_CACHE_LOCK_SECONDS = _env_int("SLIP_REVIEW_LEG_CACHE_LOCK_SECONDS", 5 * 60)
 SLIP_REVIEW_LEG_CACHE_WAIT_SECONDS = _env_int("SLIP_REVIEW_LEG_CACHE_WAIT_SECONDS", 45)
 SLIP_REVIEW_STALE_AFTER_SECONDS = _env_int("SLIP_REVIEW_STALE_AFTER_SECONDS", 20 * 60)
+SLIP_REVIEW_STREAM_TICKET_SECONDS = _env_int("SLIP_REVIEW_STREAM_TICKET_SECONDS", 30 * 60)
 SETTLED_PICK_STATUSES = [Pick.Status.WIN, Pick.Status.LOSS, Pick.Status.VOID]
 PICK_DETAIL_HISTORY_DAYS = 90
 PICK_TIER_RANK = {
@@ -6967,6 +6971,55 @@ class SlipReviewEventsView(APIView):
         response["Cache-Control"] = "private, no-store"
         response["Vary"] = "Authorization, Cookie"
         return response
+
+
+def _stream_ticket_hash(ticket):
+    return hashlib.sha256(str(ticket or "").encode("utf-8")).hexdigest()
+
+
+class SlipReviewStreamTokenView(APIView):
+    permission_classes = [IsAuthenticated]
+    serializer_class = SlipReviewStreamTokenResponseSerializer
+
+    @extend_schema(
+        summary="Create slip review websocket ticket",
+        description=(
+            "Authenticated user endpoint. Mints a short-lived, review-scoped websocket ticket so the frontend "
+            "does not put the real JWT access token in the websocket URL."
+        ),
+        tags=["Slip Reviews"],
+        responses={200: SlipReviewStreamTokenResponseSerializer},
+    )
+    def post(self, request, review_id):
+        review = get_object_or_404(
+            SlipReview.objects.only("id", "user_id"),
+            id=review_id,
+            user=request.user,
+        )
+        now = timezone.now()
+        expires_at = now + timedelta(seconds=max(60, SLIP_REVIEW_STREAM_TICKET_SECONDS))
+        ticket = secrets.token_urlsafe(32)
+        SlipReviewStreamToken.objects.filter(expires_at__lt=now).delete()
+        SlipReviewStreamToken.objects.create(
+            review=review,
+            user=request.user,
+            token_hash=_stream_ticket_hash(ticket),
+            expires_at=expires_at,
+        )
+        ws_path = f"/ws/slip-reviews/{review.id}/?ticket={ticket}"
+        scheme = "wss" if request.is_secure() else "ws"
+        ws_url = f"{scheme}://{request.get_host()}{ws_path}"
+        return Response(
+            _api_response_payload(
+                {
+                    "ticket": ticket,
+                    "expires_in": max(60, SLIP_REVIEW_STREAM_TICKET_SECONDS),
+                    "expires_at": expires_at,
+                    "ws_path": ws_path,
+                    "ws_url": ws_url,
+                }
+            )
+        )
 
 
 class GameDetailView(APIView):

@@ -612,6 +612,29 @@ class SlipReviewEvent(models.Model):
         return f"{self.review_id} {self.event_type}"
 
 
+class SlipReviewStreamToken(models.Model):
+    review = models.ForeignKey(SlipReview, on_delete=models.CASCADE, related_name="stream_tokens")
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="slip_review_stream_tokens",
+    )
+    token_hash = models.CharField(max_length=64, unique=True)
+    expires_at = models.DateTimeField()
+    last_used_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        indexes = [
+            models.Index(fields=["token_hash"]),
+            models.Index(fields=["review", "user"]),
+            models.Index(fields=["expires_at"]),
+        ]
+
+    def __str__(self):
+        return f"Stream token for review #{self.review_id}"
+
+
 class SlipRepair(models.Model):
     """
     A revised version of a ticket, persisted so the user can return to it and so the

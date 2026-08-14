@@ -743,6 +743,14 @@ class SlipReviewEventsResponseSerializer(serializers.Serializer):
     events = serializers.JSONField()
 
 
+class SlipReviewStreamTokenResponseSerializer(serializers.Serializer):
+    ticket = serializers.CharField()
+    expires_in = serializers.IntegerField()
+    expires_at = serializers.DateTimeField()
+    ws_path = serializers.CharField()
+    ws_url = serializers.CharField()
+
+
 class SlipReviewOptionsResponseSerializer(serializers.Serializer):
     markets = serializers.JSONField()
     verdicts = serializers.JSONField()

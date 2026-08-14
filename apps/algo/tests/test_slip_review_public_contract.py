@@ -6,7 +6,7 @@ from django.test import SimpleTestCase, TestCase
 from django.utils import timezone
 from rest_framework.test import APIClient
 
-from apps.algo.models import SlipReview, SlipReviewEvent, SlipSelection
+from apps.algo.models import SlipReview, SlipReviewEvent, SlipReviewStreamToken, SlipSelection
 from apps.algo.ticket_risk import SCORE_BANDS, Calibration
 from apps.algo.views import (
     _build_bettor_public_payload,
@@ -24,6 +24,7 @@ from apps.algo.views import (
     _slip_review_payload,
     _slip_leg_analysis_cache_key,
     _streamed_slip_review_game_payload,
+    _stream_ticket_hash,
     _ticket_killers_message,
     _without_blocked_replacement_recommendation,
 )
@@ -983,6 +984,30 @@ class SlipReviewPayloadDbTests(TestCase):
 
         self.assertEqual(len(cache_key), 64)
         self.assertTrue(raw_key["market"])
+
+    def test_stream_token_endpoint_returns_scoped_short_lived_ticket(self):
+        user = get_user_model().objects.create_user(username="stream-token")
+        review = SlipReview.objects.create(
+            user=user,
+            source=SlipReview.Source.SPORTYBET,
+            status=SlipReview.Status.ANALYSING,
+            title="SportyBet review",
+            summary={},
+        )
+        client = APIClient()
+        client.force_authenticate(user=user)
+
+        response = client.post(f"/api/algo/slip-reviews/{review.id}/stream-token/")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["expires_in"], 1800)
+        self.assertIn(f"/ws/slip-reviews/{review.id}/?ticket=", payload["ws_path"])
+        self.assertNotIn("?token=", payload["ws_path"])
+        ticket = payload["ticket"]
+        self.assertFalse(SlipReviewStreamToken.objects.filter(token_hash=ticket).exists())
+        stored = SlipReviewStreamToken.objects.get(review=review, user=user)
+        self.assertEqual(stored.token_hash, _stream_ticket_hash(ticket))
 
     def test_stale_recovery_finalizes_from_persisted_completed_legs(self):
         user = get_user_model().objects.create_user(username="stale-finalize")
