@@ -22,6 +22,12 @@ services:
       WEB_THREADS: ${WEB_THREADS:-2}
       GUNICORN_TIMEOUT: ${GUNICORN_TIMEOUT:-120}
       ENABLE_WEBSOCKETS: ${ENABLE_WEBSOCKETS:-true}
+      ALGO_DAILY_QUEUE: ${ALGO_DAILY_QUEUE:-algo_daily}
+      ALGO_SCORING_QUEUE: ${ALGO_SCORING_QUEUE:-algo_scoring}
+      ALGO_LLM_QUEUE: ${ALGO_LLM_QUEUE:-algo_llm}
+      ALGO_STATPAL_QUEUE: ${ALGO_STATPAL_QUEUE:-algo_statpal}
+      ALGO_SETTLEMENT_QUEUE: ${ALGO_SETTLEMENT_QUEUE:-algo_settlement}
+      ALGO_MAINTENANCE_QUEUE: ${ALGO_MAINTENANCE_QUEUE:-algo_maintenance}
       SLIP_REVIEW_PARALLEL_LEG_THRESHOLD: ${SLIP_REVIEW_PARALLEL_LEG_THRESHOLD:-4}
       SLIP_REVIEW_ANALYSIS_WORKERS: ${SLIP_REVIEW_ANALYSIS_WORKERS:-4}
       SLIP_REVIEW_LEG_CACHE_TTL_SECONDS: ${SLIP_REVIEW_LEG_CACHE_TTL_SECONDS:-900}
@@ -61,6 +67,12 @@ services:
       DJANGO_SETTINGS_MODULE: config.settings
       TZ: Africa/Lagos
       ENABLE_WEBSOCKETS: ${ENABLE_WEBSOCKETS:-true}
+      ALGO_DAILY_QUEUE: ${ALGO_DAILY_QUEUE:-algo_daily}
+      ALGO_SCORING_QUEUE: ${ALGO_SCORING_QUEUE:-algo_scoring}
+      ALGO_LLM_QUEUE: ${ALGO_LLM_QUEUE:-algo_llm}
+      ALGO_STATPAL_QUEUE: ${ALGO_STATPAL_QUEUE:-algo_statpal}
+      ALGO_SETTLEMENT_QUEUE: ${ALGO_SETTLEMENT_QUEUE:-algo_settlement}
+      ALGO_MAINTENANCE_QUEUE: ${ALGO_MAINTENANCE_QUEUE:-algo_maintenance}
       SLIP_REVIEW_PARALLEL_LEG_THRESHOLD: ${SLIP_REVIEW_PARALLEL_LEG_THRESHOLD:-4}
       SLIP_REVIEW_ANALYSIS_WORKERS: ${SLIP_REVIEW_ANALYSIS_WORKERS:-4}
       SLIP_REVIEW_LEG_CACHE_TTL_SECONDS: ${SLIP_REVIEW_LEG_CACHE_TTL_SECONDS:-900}
@@ -71,6 +83,124 @@ services:
       SLIP_REVIEW_STREAM_TICKET_SECONDS: ${SLIP_REVIEW_STREAM_TICKET_SECONDS:-1800}
       SLIP_REVIEW_QUEUE: ${SLIP_REVIEW_QUEUE:-slip_review}
     command: celery -A config worker --loglevel=info -Q ${CELERY_WORKER_QUEUES:-celery} --concurrency=${CELERY_WORKER_CONCURRENCY:-1} --max-tasks-per-child=1 --prefetch-multiplier=1
+    volumes:
+      - media:/home/appuser/media
+
+  celery-daily-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: production
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      DJANGO_SETTINGS_MODULE: config.settings
+      TZ: Africa/Lagos
+      ENABLE_WEBSOCKETS: ${ENABLE_WEBSOCKETS:-true}
+      ALGO_DAILY_QUEUE: ${ALGO_DAILY_QUEUE:-algo_daily}
+      ALGO_SCORING_QUEUE: ${ALGO_SCORING_QUEUE:-algo_scoring}
+      ALGO_LLM_QUEUE: ${ALGO_LLM_QUEUE:-algo_llm}
+      ALGO_STATPAL_QUEUE: ${ALGO_STATPAL_QUEUE:-algo_statpal}
+      ALGO_SETTLEMENT_QUEUE: ${ALGO_SETTLEMENT_QUEUE:-algo_settlement}
+      ALGO_MAINTENANCE_QUEUE: ${ALGO_MAINTENANCE_QUEUE:-algo_maintenance}
+      SLIP_REVIEW_QUEUE: ${SLIP_REVIEW_QUEUE:-slip_review}
+    command: celery -A config worker --loglevel=info -Q ${ALGO_DAILY_QUEUE:-algo_daily} --concurrency=${ALGO_DAILY_WORKER_CONCURRENCY:-1} --max-tasks-per-child=${ALGO_DAILY_MAX_TASKS_PER_CHILD:-20} --prefetch-multiplier=1
+    volumes:
+      - media:/home/appuser/media
+
+  celery-scoring-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: production
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      DJANGO_SETTINGS_MODULE: config.settings
+      TZ: Africa/Lagos
+      ENABLE_WEBSOCKETS: ${ENABLE_WEBSOCKETS:-true}
+      ALGO_DAILY_QUEUE: ${ALGO_DAILY_QUEUE:-algo_daily}
+      ALGO_SCORING_QUEUE: ${ALGO_SCORING_QUEUE:-algo_scoring}
+      ALGO_LLM_QUEUE: ${ALGO_LLM_QUEUE:-algo_llm}
+      ALGO_STATPAL_QUEUE: ${ALGO_STATPAL_QUEUE:-algo_statpal}
+      ALGO_SETTLEMENT_QUEUE: ${ALGO_SETTLEMENT_QUEUE:-algo_settlement}
+      ALGO_MAINTENANCE_QUEUE: ${ALGO_MAINTENANCE_QUEUE:-algo_maintenance}
+      SLIP_REVIEW_QUEUE: ${SLIP_REVIEW_QUEUE:-slip_review}
+    command: celery -A config worker --loglevel=info -Q ${ALGO_SCORING_QUEUE:-algo_scoring} --concurrency=${ALGO_SCORING_WORKER_CONCURRENCY:-2} --max-tasks-per-child=${ALGO_SCORING_MAX_TASKS_PER_CHILD:-20} --prefetch-multiplier=1
+    volumes:
+      - media:/home/appuser/media
+
+  celery-llm-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: production
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      DJANGO_SETTINGS_MODULE: config.settings
+      TZ: Africa/Lagos
+      ENABLE_WEBSOCKETS: ${ENABLE_WEBSOCKETS:-true}
+      ALGO_LLM_QUEUE: ${ALGO_LLM_QUEUE:-algo_llm}
+      SLIP_REVIEW_QUEUE: ${SLIP_REVIEW_QUEUE:-slip_review}
+    command: celery -A config worker --loglevel=info -Q ${ALGO_LLM_QUEUE:-algo_llm} --concurrency=${ALGO_LLM_WORKER_CONCURRENCY:-1} --max-tasks-per-child=${ALGO_LLM_MAX_TASKS_PER_CHILD:-20} --prefetch-multiplier=1
+    volumes:
+      - media:/home/appuser/media
+
+  celery-statpal-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: production
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      DJANGO_SETTINGS_MODULE: config.settings
+      TZ: Africa/Lagos
+      ENABLE_WEBSOCKETS: ${ENABLE_WEBSOCKETS:-true}
+      ALGO_STATPAL_QUEUE: ${ALGO_STATPAL_QUEUE:-algo_statpal}
+      SLIP_REVIEW_QUEUE: ${SLIP_REVIEW_QUEUE:-slip_review}
+    command: celery -A config worker --loglevel=info -Q ${ALGO_STATPAL_QUEUE:-algo_statpal} --concurrency=${ALGO_STATPAL_WORKER_CONCURRENCY:-1} --max-tasks-per-child=${ALGO_STATPAL_MAX_TASKS_PER_CHILD:-10} --prefetch-multiplier=1
+    volumes:
+      - media:/home/appuser/media
+
+  celery-settlement-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: production
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      DJANGO_SETTINGS_MODULE: config.settings
+      TZ: Africa/Lagos
+      ENABLE_WEBSOCKETS: ${ENABLE_WEBSOCKETS:-true}
+      ALGO_SETTLEMENT_QUEUE: ${ALGO_SETTLEMENT_QUEUE:-algo_settlement}
+      SLIP_REVIEW_QUEUE: ${SLIP_REVIEW_QUEUE:-slip_review}
+    command: celery -A config worker --loglevel=info -Q ${ALGO_SETTLEMENT_QUEUE:-algo_settlement} --concurrency=${ALGO_SETTLEMENT_WORKER_CONCURRENCY:-1} --max-tasks-per-child=${ALGO_SETTLEMENT_MAX_TASKS_PER_CHILD:-20} --prefetch-multiplier=1
+    volumes:
+      - media:/home/appuser/media
+
+  celery-maintenance-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: production
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      DJANGO_SETTINGS_MODULE: config.settings
+      TZ: Africa/Lagos
+      ENABLE_WEBSOCKETS: ${ENABLE_WEBSOCKETS:-true}
+      ALGO_MAINTENANCE_QUEUE: ${ALGO_MAINTENANCE_QUEUE:-algo_maintenance}
+      SLIP_REVIEW_QUEUE: ${SLIP_REVIEW_QUEUE:-slip_review}
+    command: celery -A config worker --loglevel=info -Q ${ALGO_MAINTENANCE_QUEUE:-algo_maintenance} --concurrency=${ALGO_MAINTENANCE_WORKER_CONCURRENCY:-1} --max-tasks-per-child=${ALGO_MAINTENANCE_MAX_TASKS_PER_CHILD:-50} --prefetch-multiplier=1
     volumes:
       - media:/home/appuser/media
 
@@ -86,6 +216,12 @@ services:
       DJANGO_SETTINGS_MODULE: config.settings
       TZ: Africa/Lagos
       ENABLE_WEBSOCKETS: ${ENABLE_WEBSOCKETS:-true}
+      ALGO_DAILY_QUEUE: ${ALGO_DAILY_QUEUE:-algo_daily}
+      ALGO_SCORING_QUEUE: ${ALGO_SCORING_QUEUE:-algo_scoring}
+      ALGO_LLM_QUEUE: ${ALGO_LLM_QUEUE:-algo_llm}
+      ALGO_STATPAL_QUEUE: ${ALGO_STATPAL_QUEUE:-algo_statpal}
+      ALGO_SETTLEMENT_QUEUE: ${ALGO_SETTLEMENT_QUEUE:-algo_settlement}
+      ALGO_MAINTENANCE_QUEUE: ${ALGO_MAINTENANCE_QUEUE:-algo_maintenance}
       SLIP_REVIEW_PARALLEL_LEG_THRESHOLD: ${SLIP_REVIEW_PARALLEL_LEG_THRESHOLD:-4}
       SLIP_REVIEW_ANALYSIS_WORKERS: ${SLIP_REVIEW_ANALYSIS_WORKERS:-4}
       SLIP_REVIEW_LEG_CACHE_TTL_SECONDS: ${SLIP_REVIEW_LEG_CACHE_TTL_SECONDS:-900}
@@ -111,6 +247,12 @@ services:
       DJANGO_SETTINGS_MODULE: config.settings
       TZ: Africa/Lagos
       ENABLE_WEBSOCKETS: ${ENABLE_WEBSOCKETS:-true}
+      ALGO_DAILY_QUEUE: ${ALGO_DAILY_QUEUE:-algo_daily}
+      ALGO_SCORING_QUEUE: ${ALGO_SCORING_QUEUE:-algo_scoring}
+      ALGO_LLM_QUEUE: ${ALGO_LLM_QUEUE:-algo_llm}
+      ALGO_STATPAL_QUEUE: ${ALGO_STATPAL_QUEUE:-algo_statpal}
+      ALGO_SETTLEMENT_QUEUE: ${ALGO_SETTLEMENT_QUEUE:-algo_settlement}
+      ALGO_MAINTENANCE_QUEUE: ${ALGO_MAINTENANCE_QUEUE:-algo_maintenance}
       SLIP_REVIEW_STALE_AFTER_SECONDS: ${SLIP_REVIEW_STALE_AFTER_SECONDS:-1200}
       SLIP_REVIEW_RECOVERY_MINUTES: ${SLIP_REVIEW_RECOVERY_MINUTES:-*/5}
       SLIP_REVIEW_RECOVERY_LIMIT: ${SLIP_REVIEW_RECOVERY_LIMIT:-25}

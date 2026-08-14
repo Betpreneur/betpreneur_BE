@@ -4,6 +4,7 @@ from datetime import date
 from billiard.exceptions import SoftTimeLimitExceeded
 from celery import chord, shared_task
 from django.core.exceptions import ObjectDoesNotExist
+from django.conf import settings
 from django.utils import timezone
 
 from .services import algo_runner_service
@@ -20,8 +21,11 @@ def generate_daily_picks(self, target_date=None):
     fixture_ids = algo_runner_service.prepare_fanout_run(algo_run)
     if fixture_ids:
         workflow = chord(
-            [score_fixture_for_daily_run.s(fixture_id) for fixture_id in fixture_ids]
-        )(publish_daily_run.s(algo_run.id))
+            [
+                score_fixture_for_daily_run.s(fixture_id).set(queue=settings.ALGO_SCORING_QUEUE)
+                for fixture_id in fixture_ids
+            ]
+        )(publish_daily_run.s(algo_run.id).set(queue=settings.ALGO_DAILY_QUEUE))
         status_value = "scoring_queued"
         child_task_id = workflow.id
     else:
@@ -67,7 +71,7 @@ def score_fixture_for_daily_run(self, fixture_id):
 @shared_task(bind=True, ignore_result=False, max_retries=2, default_retry_delay=120)
 def publish_daily_run(self, score_results, run_id):
     algo_run = algo_runner_service.publish_fanout_run(run_id)
-    explain_picks_for_run.delay(algo_run.id)
+    explain_picks_for_run.apply_async(args=[algo_run.id], queue=settings.ALGO_LLM_QUEUE)
     return {
         "run_id": algo_run.id,
         "target_date": algo_run.target_date.isoformat(),

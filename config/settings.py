@@ -119,7 +119,27 @@ if ENABLE_WEBSOCKETS:
 CELERY_TASK_TIME_LIMIT = config("CELERY_TASK_TIME_LIMIT", default=60 * 60 * 3, cast=int)
 CELERY_TASK_SOFT_TIME_LIMIT = config("CELERY_TASK_SOFT_TIME_LIMIT", default=60 * 60 * 2, cast=int)
 SLIP_REVIEW_QUEUE = config("SLIP_REVIEW_QUEUE", default="slip_review")
+ALGO_DAILY_QUEUE = config("ALGO_DAILY_QUEUE", default="algo_daily")
+ALGO_SCORING_QUEUE = config("ALGO_SCORING_QUEUE", default="algo_scoring")
+ALGO_LLM_QUEUE = config("ALGO_LLM_QUEUE", default="algo_llm")
+ALGO_STATPAL_QUEUE = config("ALGO_STATPAL_QUEUE", default="algo_statpal")
+ALGO_SETTLEMENT_QUEUE = config("ALGO_SETTLEMENT_QUEUE", default="algo_settlement")
+ALGO_MAINTENANCE_QUEUE = config("ALGO_MAINTENANCE_QUEUE", default="algo_maintenance")
 CELERY_TASK_ROUTES = {
+    "apps.algo.tasks.generate_daily_picks": {"queue": ALGO_DAILY_QUEUE},
+    "apps.algo.tasks.publish_daily_run": {"queue": ALGO_DAILY_QUEUE},
+    "apps.algo.tasks.recover_daily_run": {"queue": ALGO_DAILY_QUEUE},
+    "apps.algo.tasks.score_fixture_for_daily_run": {"queue": ALGO_SCORING_QUEUE},
+    "apps.algo.tasks.explain_picks_for_run": {"queue": ALGO_LLM_QUEUE},
+    "apps.algo.tasks.build_statpal_daily_cache": {"queue": ALGO_STATPAL_QUEUE},
+    "apps.algo.tasks.sync_fixture_horizon": {"queue": ALGO_STATPAL_QUEUE},
+    "apps.algo.tasks.fit_score_models": {"queue": ALGO_STATPAL_QUEUE},
+    "apps.algo.tasks.settle_daily_results": {"queue": ALGO_SETTLEMENT_QUEUE},
+    "apps.algo.tasks.settle_slip_selections": {"queue": ALGO_SETTLEMENT_QUEUE},
+    "apps.algo.tasks.refresh_imminent_lineups": {"queue": ALGO_MAINTENANCE_QUEUE},
+    "apps.algo.tasks.refresh_player_availability": {"queue": ALGO_MAINTENANCE_QUEUE},
+    "apps.algo.tasks.recover_stale_slip_reviews": {"queue": ALGO_MAINTENANCE_QUEUE},
+    "apps.algo.tasks.run_monthly_auditor": {"queue": ALGO_MAINTENANCE_QUEUE},
     "apps.algo.tasks.import_slip_review": {"queue": SLIP_REVIEW_QUEUE},
     "apps.algo.tasks.analyse_slip_review_leg": {"queue": SLIP_REVIEW_QUEUE},
     "apps.algo.tasks.finalize_slip_review_import": {"queue": SLIP_REVIEW_QUEUE},
