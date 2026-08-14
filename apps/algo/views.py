@@ -6763,10 +6763,10 @@ def process_slip_review_import(review_id):
         workflow = celery_chord(
             [
                 analyse_slip_review_leg.s(review.id, index, _json_safe(selection), payload.get("days", 3))
-                .set(queue=settings.SLIP_REVIEW_QUEUE)
+                .set(queue=settings.SLIP_REVIEW_LEG_QUEUE)
                 for index, selection in enumerate(selections)
             ]
-        )(finalize_slip_review_import.s(review.id).set(queue=settings.SLIP_REVIEW_QUEUE))
+        )(finalize_slip_review_import.s(review.id).set(queue=settings.SLIP_REVIEW_FINALIZE_QUEUE))
         _publish_slip_review_event(
             review,
             "review.fanout_queued",
@@ -6919,7 +6919,7 @@ class SportyBetSlipImportView(APIView):
             source=SlipReview.Source.SPORTYBET,
             submitted_payload=data,
         )
-        task = import_slip_review.apply_async(args=[review.id], queue=settings.SLIP_REVIEW_QUEUE)
+        task = import_slip_review.apply_async(args=[review.id], queue=settings.SLIP_REVIEW_IMPORT_QUEUE)
         review.summary = {
             **_empty_slip_summary("Slip import queued.", task_id=task.id),
             "progress": _slip_review_progress(
@@ -6966,7 +6966,7 @@ class BetanoSlipImportView(APIView):
             source=SlipReview.Source.BETANO,
             submitted_payload=data,
         )
-        task = import_slip_review.apply_async(args=[review.id], queue=settings.SLIP_REVIEW_QUEUE)
+        task = import_slip_review.apply_async(args=[review.id], queue=settings.SLIP_REVIEW_IMPORT_QUEUE)
         review.summary = {
             **_empty_slip_summary("Slip import queued.", task_id=task.id),
             "progress": _slip_review_progress(

@@ -39,6 +39,9 @@ services:
       SLIP_REVIEW_DEEPSEEK_MAX_GAMES: ${SLIP_REVIEW_DEEPSEEK_MAX_GAMES:-5}
       SLIP_REVIEW_STREAM_TICKET_SECONDS: ${SLIP_REVIEW_STREAM_TICKET_SECONDS:-1800}
       SLIP_REVIEW_QUEUE: ${SLIP_REVIEW_QUEUE:-slip_review}
+      SLIP_REVIEW_IMPORT_QUEUE: ${SLIP_REVIEW_IMPORT_QUEUE:-slip_review_import}
+      SLIP_REVIEW_LEG_QUEUE: ${SLIP_REVIEW_LEG_QUEUE:-slip_review_leg}
+      SLIP_REVIEW_FINALIZE_QUEUE: ${SLIP_REVIEW_FINALIZE_QUEUE:-slip_review_finalize}
     command: >
       sh -c "echo '[startup] running migrations' &&
       python manage.py migrate --noinput &&
@@ -82,6 +85,9 @@ services:
       SLIP_REVIEW_DEEPSEEK_MAX_GAMES: ${SLIP_REVIEW_DEEPSEEK_MAX_GAMES:-5}
       SLIP_REVIEW_STREAM_TICKET_SECONDS: ${SLIP_REVIEW_STREAM_TICKET_SECONDS:-1800}
       SLIP_REVIEW_QUEUE: ${SLIP_REVIEW_QUEUE:-slip_review}
+      SLIP_REVIEW_IMPORT_QUEUE: ${SLIP_REVIEW_IMPORT_QUEUE:-slip_review_import}
+      SLIP_REVIEW_LEG_QUEUE: ${SLIP_REVIEW_LEG_QUEUE:-slip_review_leg}
+      SLIP_REVIEW_FINALIZE_QUEUE: ${SLIP_REVIEW_FINALIZE_QUEUE:-slip_review_finalize}
     command: celery -A config worker --loglevel=info -Q ${CELERY_WORKER_QUEUES:-celery} --concurrency=${CELERY_WORKER_CONCURRENCY:-1} --max-tasks-per-child=1 --prefetch-multiplier=1
     volumes:
       - media:/home/appuser/media
@@ -204,7 +210,7 @@ services:
     volumes:
       - media:/home/appuser/media
 
-  celery-slip-review-worker:
+  celery-slip-review-import-worker:
     build:
       context: .
       dockerfile: Dockerfile
@@ -231,7 +237,61 @@ services:
       SLIP_REVIEW_DEEPSEEK_MAX_GAMES: ${SLIP_REVIEW_DEEPSEEK_MAX_GAMES:-5}
       SLIP_REVIEW_STREAM_TICKET_SECONDS: ${SLIP_REVIEW_STREAM_TICKET_SECONDS:-1800}
       SLIP_REVIEW_QUEUE: ${SLIP_REVIEW_QUEUE:-slip_review}
-    command: celery -A config worker --loglevel=info -Q ${SLIP_REVIEW_QUEUE:-slip_review} --concurrency=${SLIP_REVIEW_WORKER_CONCURRENCY:-4} --max-tasks-per-child=${SLIP_REVIEW_MAX_TASKS_PER_CHILD:-20} --prefetch-multiplier=1
+      SLIP_REVIEW_IMPORT_QUEUE: ${SLIP_REVIEW_IMPORT_QUEUE:-slip_review_import}
+      SLIP_REVIEW_LEG_QUEUE: ${SLIP_REVIEW_LEG_QUEUE:-slip_review_leg}
+      SLIP_REVIEW_FINALIZE_QUEUE: ${SLIP_REVIEW_FINALIZE_QUEUE:-slip_review_finalize}
+    command: celery -A config worker --loglevel=info -Q ${SLIP_REVIEW_IMPORT_QUEUE:-slip_review_import} --concurrency=${SLIP_REVIEW_IMPORT_WORKER_CONCURRENCY:-2} --max-tasks-per-child=${SLIP_REVIEW_IMPORT_MAX_TASKS_PER_CHILD:-50} --prefetch-multiplier=1
+    volumes:
+      - media:/home/appuser/media
+
+  celery-slip-review-leg-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: production
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      DJANGO_SETTINGS_MODULE: config.settings
+      TZ: Africa/Lagos
+      ENABLE_WEBSOCKETS: ${ENABLE_WEBSOCKETS:-true}
+      SLIP_REVIEW_PARALLEL_LEG_THRESHOLD: ${SLIP_REVIEW_PARALLEL_LEG_THRESHOLD:-4}
+      SLIP_REVIEW_ANALYSIS_WORKERS: ${SLIP_REVIEW_ANALYSIS_WORKERS:-4}
+      SLIP_REVIEW_LEG_CACHE_TTL_SECONDS: ${SLIP_REVIEW_LEG_CACHE_TTL_SECONDS:-900}
+      SLIP_REVIEW_LEG_CACHE_LOCK_SECONDS: ${SLIP_REVIEW_LEG_CACHE_LOCK_SECONDS:-300}
+      SLIP_REVIEW_LEG_CACHE_WAIT_SECONDS: ${SLIP_REVIEW_LEG_CACHE_WAIT_SECONDS:-45}
+      SLIP_REVIEW_STALE_AFTER_SECONDS: ${SLIP_REVIEW_STALE_AFTER_SECONDS:-1200}
+      SLIP_REVIEW_DEEPSEEK_MAX_GAMES: ${SLIP_REVIEW_DEEPSEEK_MAX_GAMES:-5}
+      SLIP_REVIEW_STREAM_TICKET_SECONDS: ${SLIP_REVIEW_STREAM_TICKET_SECONDS:-1800}
+      SLIP_REVIEW_QUEUE: ${SLIP_REVIEW_QUEUE:-slip_review}
+      SLIP_REVIEW_IMPORT_QUEUE: ${SLIP_REVIEW_IMPORT_QUEUE:-slip_review_import}
+      SLIP_REVIEW_LEG_QUEUE: ${SLIP_REVIEW_LEG_QUEUE:-slip_review_leg}
+      SLIP_REVIEW_FINALIZE_QUEUE: ${SLIP_REVIEW_FINALIZE_QUEUE:-slip_review_finalize}
+    command: celery -A config worker --loglevel=info -Q ${SLIP_REVIEW_LEG_QUEUE:-slip_review_leg} --concurrency=${SLIP_REVIEW_LEG_WORKER_CONCURRENCY:-8} --max-tasks-per-child=${SLIP_REVIEW_LEG_MAX_TASKS_PER_CHILD:-20} --prefetch-multiplier=1
+    volumes:
+      - media:/home/appuser/media
+
+  celery-slip-review-finalize-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: production
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      DJANGO_SETTINGS_MODULE: config.settings
+      TZ: Africa/Lagos
+      ENABLE_WEBSOCKETS: ${ENABLE_WEBSOCKETS:-true}
+      SLIP_REVIEW_STALE_AFTER_SECONDS: ${SLIP_REVIEW_STALE_AFTER_SECONDS:-1200}
+      SLIP_REVIEW_DEEPSEEK_MAX_GAMES: ${SLIP_REVIEW_DEEPSEEK_MAX_GAMES:-5}
+      SLIP_REVIEW_STREAM_TICKET_SECONDS: ${SLIP_REVIEW_STREAM_TICKET_SECONDS:-1800}
+      SLIP_REVIEW_QUEUE: ${SLIP_REVIEW_QUEUE:-slip_review}
+      SLIP_REVIEW_IMPORT_QUEUE: ${SLIP_REVIEW_IMPORT_QUEUE:-slip_review_import}
+      SLIP_REVIEW_LEG_QUEUE: ${SLIP_REVIEW_LEG_QUEUE:-slip_review_leg}
+      SLIP_REVIEW_FINALIZE_QUEUE: ${SLIP_REVIEW_FINALIZE_QUEUE:-slip_review_finalize}
+    command: celery -A config worker --loglevel=info -Q ${SLIP_REVIEW_FINALIZE_QUEUE:-slip_review_finalize} --concurrency=${SLIP_REVIEW_FINALIZE_WORKER_CONCURRENCY:-2} --max-tasks-per-child=${SLIP_REVIEW_FINALIZE_MAX_TASKS_PER_CHILD:-50} --prefetch-multiplier=1
     volumes:
       - media:/home/appuser/media
 
@@ -257,6 +317,9 @@ services:
       SLIP_REVIEW_RECOVERY_MINUTES: ${SLIP_REVIEW_RECOVERY_MINUTES:-*/5}
       SLIP_REVIEW_RECOVERY_LIMIT: ${SLIP_REVIEW_RECOVERY_LIMIT:-25}
       SLIP_REVIEW_QUEUE: ${SLIP_REVIEW_QUEUE:-slip_review}
+      SLIP_REVIEW_IMPORT_QUEUE: ${SLIP_REVIEW_IMPORT_QUEUE:-slip_review_import}
+      SLIP_REVIEW_LEG_QUEUE: ${SLIP_REVIEW_LEG_QUEUE:-slip_review_leg}
+      SLIP_REVIEW_FINALIZE_QUEUE: ${SLIP_REVIEW_FINALIZE_QUEUE:-slip_review_finalize}
     command: celery -A config beat --loglevel=info --schedule=/tmp/celerybeat-schedule
 
 volumes:
