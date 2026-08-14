@@ -68,6 +68,9 @@ class PickSerializer(serializers.ModelSerializer):
         match_id = str(obj.match_id or "")
         if not match_id:
             return 0
+        backed_game_counts = self.context.get("backed_game_counts")
+        if backed_game_counts is not None:
+            return int(backed_game_counts.get(match_id, 0) or 0)
         return GameBack.objects.filter(match_id=match_id).count()
 
     def _recent_form_payload(self, form) -> dict:
@@ -93,6 +96,9 @@ class PickSerializer(serializers.ModelSerializer):
         match_id = str(obj.match_id or "")
         if not request or not request.user.is_authenticated or not match_id:
             return False
+        backed_game_ids = self.context.get("backed_game_ids")
+        if backed_game_ids is not None:
+            return match_id in backed_game_ids
         return GameBack.objects.filter(user=request.user, match_id=match_id).exists()
 
     def get_tier(self, obj) -> str:
@@ -249,6 +255,11 @@ class PublicSummarySerializer(serializers.Serializer):
 
 class DailyPicksQuerySerializer(serializers.Serializer):
     date = serializers.DateField(required=False)
+    view = serializers.ChoiceField(
+        choices=("full", "compact"),
+        required=False,
+        default="full",
+    )
 
 
 class BackedPicksQuerySerializer(serializers.Serializer):
@@ -257,6 +268,11 @@ class BackedPicksQuerySerializer(serializers.Serializer):
 
 class GameAnalysisQuerySerializer(serializers.Serializer):
     date = serializers.DateField(required=False)
+    view = serializers.ChoiceField(
+        choices=("full", "compact"),
+        required=False,
+        default="full",
+    )
 
 
 class RecordQuerySerializer(serializers.Serializer):

@@ -118,6 +118,12 @@ if ENABLE_WEBSOCKETS:
 
 CELERY_TASK_TIME_LIMIT = config("CELERY_TASK_TIME_LIMIT", default=60 * 60 * 3, cast=int)
 CELERY_TASK_SOFT_TIME_LIMIT = config("CELERY_TASK_SOFT_TIME_LIMIT", default=60 * 60 * 2, cast=int)
+SLIP_REVIEW_QUEUE = config("SLIP_REVIEW_QUEUE", default="slip_review")
+CELERY_TASK_ROUTES = {
+    "apps.algo.tasks.import_slip_review": {"queue": SLIP_REVIEW_QUEUE},
+    "apps.algo.tasks.analyse_slip_review_leg": {"queue": SLIP_REVIEW_QUEUE},
+    "apps.algo.tasks.finalize_slip_review_import": {"queue": SLIP_REVIEW_QUEUE},
+}
 CELERY_TASK_ANNOTATIONS = {
     "apps.algo.tasks.score_fixture_for_daily_run": {
         "rate_limit": config("ALGO_SCORING_RATE_LIMIT", default="6/m"),

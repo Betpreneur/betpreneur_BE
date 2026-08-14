@@ -325,13 +325,11 @@ def _public_record_pick_payload(pick):
     }
 
 
-def _latest_successful_run(target_date):
-    return (
-        AlgoRun.objects.filter(target_date=target_date, status=AlgoRun.Status.SUCCESS)
-        .prefetch_related("picks", "fixtures", "market_predictions")
-        .order_by("-created_at")
-        .first()
-    )
+def _latest_successful_run(target_date, *, prefetch=True):
+    queryset = AlgoRun.objects.filter(target_date=target_date, status=AlgoRun.Status.SUCCESS)
+    if prefetch:
+        queryset = queryset.prefetch_related("picks", "fixtures", "market_predictions")
+    return queryset.order_by("-created_at").first()
 
 
 def _top_pick_sort_key(pick):
@@ -739,18 +737,21 @@ def _market_verdict_for_game(market):
     return "Lower-confidence candidate; useful for analysis but not a headline pick."
 
 
-def _normalise_fixture_markets(item, picks_by_match, request=None):
+def _normalise_fixture_markets(item, picks_by_match, request=None, user_backed_markets=None):
     markets = []
     match_id = str(item.get("match_id") or "")
     match_picks = picks_by_match.get(str(item.get("match_id") or ""), [])
     pick_by_market = {pick.market: pick for pick in match_picks}
-    user_backed_markets = set()
-    if request and request.user.is_authenticated and match_id:
+    if user_backed_markets is not None:
+        user_backed_markets = set(user_backed_markets)
+    elif request and request.user.is_authenticated and match_id:
         user_backed_markets = set(
             GameBack.objects.filter(user=request.user, match_id=match_id)
             .exclude(market="")
             .values_list("market", flat=True)
         )
+    else:
+        user_backed_markets = set()
     for market in item.get("markets") or []:
         if market.get("market") in EXCLUDED_MARKETS:
             continue
@@ -784,19 +785,46 @@ def _normalise_fixture_markets(item, picks_by_match, request=None):
     return sorted(markets, key=_game_market_rank, reverse=True)
 
 
-def _game_summary_from_fixture(item, picks_by_match, request=None, include_markets=False):
+def _game_summary_from_fixture(
+    item,
+    picks_by_match,
+    request=None,
+    include_markets=False,
+    backed_game_counts=None,
+    user_backed_game_ids=None,
+    user_backed_markets_by_match=None,
+):
     match_id = str(item.get("match_id") or "")
-    markets = _normalise_fixture_markets(item, picks_by_match, request=request)
+    markets = _normalise_fixture_markets(
+        item,
+        picks_by_match,
+        request=request,
+        user_backed_markets=(user_backed_markets_by_match or {}).get(match_id),
+    )
     match_picks = sorted(picks_by_match.get(match_id, []), key=_top_pick_sort_key, reverse=True)
-    pick_data = PickSerializer(match_picks, many=True, context={"request": request}).data
+    pick_data = PickSerializer(
+        match_picks,
+        many=True,
+        context={
+            "request": request,
+            "backed_game_counts": backed_game_counts,
+            "backed_game_ids": user_backed_game_ids,
+        },
+    ).data
     top_market = next((market for market in markets if not market.get("publicly_paused")), None)
     if top_market is None:
         top_market = markets[0] if markets else None
     recommended_market = next((market for market in markets if market.get("recommended")), None)
     official_pick = pick_data[0] if pick_data else None
-    backed_count = GameBack.objects.filter(match_id=match_id).count() if match_id else 0
+    backed_count = (
+        int((backed_game_counts or {}).get(match_id, 0) or 0)
+        if backed_game_counts is not None
+        else (GameBack.objects.filter(match_id=match_id).count() if match_id else 0)
+    )
     backed_by_me = False
-    if request and request.user.is_authenticated and match_id:
+    if user_backed_game_ids is not None:
+        backed_by_me = match_id in user_backed_game_ids
+    elif request and request.user.is_authenticated and match_id:
         backed_by_me = GameBack.objects.filter(user=request.user, match_id=match_id).exists()
 
     payload = {
@@ -973,6 +1001,265 @@ def _fixture_summaries_for_run(algo_run):
     return summaries
 
 
+def _bulk_game_back_context(match_ids, request=None):
+    match_ids = [str(match_id or "") for match_id in match_ids if str(match_id or "")]
+    if not match_ids:
+        return {}, set(), {}
+
+    backed_game_counts = dict(
+        GameBack.objects.filter(match_id__in=match_ids)
+        .values("match_id")
+        .annotate(total=Count("id"))
+        .values_list("match_id", "total")
+    )
+    user_backed_game_ids = set()
+    user_backed_markets_by_match = {}
+    if request and request.user.is_authenticated:
+        rows = list(
+            GameBack.objects.filter(user=request.user, match_id__in=match_ids)
+            .values_list("match_id", "market")
+        )
+        user_backed_game_ids = {str(match_id or "") for match_id, _market in rows}
+        for match_id, market in rows:
+            if market:
+                user_backed_markets_by_match.setdefault(str(match_id or ""), set()).add(market)
+    return backed_game_counts, user_backed_game_ids, user_backed_markets_by_match
+
+
+def _compact_pick_payload(pick, *, backed_game_counts=None, backed_game_ids=None):
+    insights = pick.insights or {}
+    council_review = _normalise_council_review(
+        insights,
+        fallback_confidence=pick.confidence,
+        fallback_tier=pick.tier,
+    )
+    match_id = str(pick.match_id or "")
+    return {
+        "id": pick.id,
+        "match_date": pick.match_date,
+        "fixture": pick.fixture,
+        "home_team": pick.home_team,
+        "away_team": pick.away_team,
+        "league": pick.league,
+        "kickoff": pick.kickoff,
+        "match_id": match_id,
+        "tier": _effective_pick_tier(pick),
+        "market": pick.market,
+        "meaning": pick.meaning,
+        "confidence": pick.confidence,
+        "final_confidence": council_review.get("final_confidence"),
+        "odds": float(pick.odds),
+        "ev": float(pick.ev),
+        "status": pick.status,
+        "bettor_view": insights.get("bettor_view") or {},
+        "analysis_summary": insights.get("summary", ""),
+        "analysis_conclusion": insights.get("conclusion", ""),
+        "positive_evidence": insights.get("positive_evidence") or [],
+        "risk_evidence": insights.get("risk_evidence") or [],
+        "backed_count": int((backed_game_counts or {}).get(match_id, 0) or 0),
+        "backed_by_me": match_id in (backed_game_ids or set()),
+    }
+
+
+def _compact_market_payload(market):
+    if not market:
+        return None
+    insights = market.get("insights") or {}
+    bettor_view = insights.get("bettor_view") or market.get("bettor_view") or {}
+    return {
+        "market": market.get("market", ""),
+        "meaning": market.get("meaning", ""),
+        "confidence": market.get("confidence"),
+        "final_confidence": market.get("final_confidence"),
+        "odds": market.get("odds"),
+        "ev": market.get("ev"),
+        "odds_source": market.get("odds_source", ""),
+        "eligible": bool(market.get("eligible")),
+        "recommended": bool(market.get("recommended")),
+        "recommendation_status": market.get("recommendation_status", ""),
+        "risk_flags": market.get("risk_flags") or [],
+        "bettor_view": bettor_view,
+        "analysis_summary": market.get("analysis_summary") or bettor_view.get("summary", ""),
+        "analysis_conclusion": market.get("analysis_conclusion") or bettor_view.get("conclusion", ""),
+        "positive_evidence": market.get("positive_evidence") or bettor_view.get("positive_evidence") or [],
+        "risk_evidence": market.get("risk_evidence") or bettor_view.get("risk_evidence") or [],
+    }
+
+
+def _compact_fixture_card(
+    fixture,
+    *,
+    markets_by_match,
+    picks_by_match,
+    backed_game_counts=None,
+    backed_game_ids=None,
+):
+    match_id = str(fixture.match_id or "")
+    markets = sorted(markets_by_match.get(match_id, []), key=_game_market_rank, reverse=True)
+    top_market = next((market for market in markets if not market.get("publicly_paused")), None)
+    if top_market is None:
+        top_market = markets[0] if markets else None
+    recommended_market = next((market for market in markets if market.get("recommended")), None)
+    match_picks = sorted(picks_by_match.get(match_id, []), key=_top_pick_sort_key, reverse=True)
+    pick_data = [
+        _compact_pick_payload(
+            pick,
+            backed_game_counts=backed_game_counts,
+            backed_game_ids=backed_game_ids,
+        )
+        for pick in match_picks
+    ]
+    return {
+        "fixture": fixture.fixture,
+        "home_team": fixture.home_team,
+        "away_team": fixture.away_team,
+        "home_logo": fixture.home_logo,
+        "away_logo": fixture.away_logo,
+        "teams": {
+            "home": {"name": fixture.home_team, "logo": fixture.home_logo},
+            "away": {"name": fixture.away_team, "logo": fixture.away_logo},
+        },
+        "league": fixture.league,
+        "league_logo": fixture.league_logo,
+        "competition_logo": fixture.league_logo,
+        "country": fixture.country,
+        "country_flag": fixture.country_flag,
+        "competition": fixture.league,
+        "competition_info": {
+            "name": fixture.league,
+            "logo": fixture.league_logo,
+            "country": fixture.country,
+            "country_flag": fixture.country_flag,
+        },
+        "round": fixture.round,
+        "league_type": fixture.league_type,
+        "kickoff": fixture.kickoff,
+        "match_id": match_id,
+        "published": bool(match_picks),
+        "official_pick_count": len(match_picks),
+        "official_pick": pick_data[0] if pick_data else None,
+        "official_picks": pick_data,
+        "backed_count": int((backed_game_counts or {}).get(match_id, 0) or 0),
+        "backed_by_me": match_id in (backed_game_ids or set()),
+        "top_market": _compact_market_payload(top_market),
+        "best_market": _compact_market_payload(top_market),
+        "recommended_market": _compact_market_payload(recommended_market),
+        "recommendation_status": (
+            recommended_market.get("recommendation_status")
+            if recommended_market
+            else (top_market or {}).get("recommendation_status", "no_edge")
+        ),
+        "market_count": fixture.market_count,
+        "eligible_market_count": sum(1 for market in markets if market.get("eligible")),
+        "markets_70_plus": fixture.markets_70_plus,
+        "markets_65_plus": fixture.markets_65_plus,
+    }
+
+
+def _compact_games_payload(target_date, request=None):
+    algo_run = _latest_successful_run(target_date, prefetch=False)
+    if not algo_run:
+        return {
+            "date": target_date,
+            "published": False,
+            "run_id": None,
+            "posted_at": None,
+            "summary": {
+                "game_count": 0,
+                "published_game_count": 0,
+                "recommended_game_count": 0,
+                "market_count": 0,
+                "eligible_market_count": 0,
+                "top_pick_count": 0,
+            },
+            "games": [],
+        }
+
+    fixtures = list(
+        AlgoFixture.objects.filter(run=algo_run)
+        .only(
+            "id",
+            "run",
+            "fixture",
+            "home_team",
+            "away_team",
+            "home_logo",
+            "away_logo",
+            "league",
+            "league_logo",
+            "country",
+            "country_flag",
+            "round",
+            "league_type",
+            "kickoff",
+            "match_id",
+            "market_count",
+            "markets_70_plus",
+            "markets_65_plus",
+        )
+        .order_by("country", "league", "kickoff", "fixture")
+    )
+    match_ids = [str(fixture.match_id or "") for fixture in fixtures if str(fixture.match_id or "")]
+    backed_game_counts, backed_game_ids, _user_markets = _bulk_game_back_context(match_ids, request)
+    picks_by_match = _picks_by_match(algo_run)
+
+    markets_by_match = {}
+    predictions = (
+        MarketPrediction.objects.filter(run=algo_run)
+        .select_related("selected_pick")
+        .order_by("match_id", "-confidence", "-ev", "market")
+    )
+    for prediction in predictions:
+        if prediction.market in EXCLUDED_MARKETS:
+            continue
+        payload = _market_prediction_payload(prediction)
+        payload["publicly_paused"] = _market_publicly_paused(payload.get("market"))
+        payload.update(_apply_council_recommendation_gate(payload))
+        payload["display_score"] = round(_market_display_score(payload)[0], 3)
+        markets_by_match.setdefault(str(prediction.match_id or ""), []).append(payload)
+
+    games = [
+        _compact_fixture_card(
+            fixture,
+            markets_by_match=markets_by_match,
+            picks_by_match=picks_by_match,
+            backed_game_counts=backed_game_counts,
+            backed_game_ids=backed_game_ids,
+        )
+        for fixture in fixtures
+    ]
+    games.sort(
+        key=lambda game: (
+            (game.get("country") or "World").lower(),
+            (game.get("league") or "").lower(),
+            game.get("kickoff") or "",
+            0 if game.get("published") else 1,
+            -((game.get("top_market") or {}).get("final_confidence") or (game.get("top_market") or {}).get("confidence") or 0),
+            game.get("fixture") or "",
+        ),
+    )
+
+    return {
+        "date": target_date,
+        "published": bool(games),
+        "run_id": algo_run.id,
+        "posted_at": algo_run.created_at,
+        "summary": {
+            "game_count": len(games),
+            "published_game_count": sum(1 for game in games if game.get("published")),
+            "recommended_game_count": sum(1 for game in games if game.get("recommended_market")),
+            "market_count": (algo_run.result or {}).get("market_count", sum(game.get("market_count", 0) for game in games)),
+            "eligible_market_count": sum(game.get("eligible_market_count", 0) for game in games),
+            "top_pick_count": sum(len(items) for items in picks_by_match.values()),
+            "markets_70_plus": (algo_run.result or {}).get("markets_70_plus", 0),
+            "markets_65_plus": (algo_run.result or {}).get("markets_65_plus", 0),
+        },
+        "strategy": (algo_run.result or {}).get("strategy_profile", {}),
+        "games": games,
+        "grouped_games": _group_by_country_and_league(games, "games"),
+    }
+
+
 def _all_games_payload(target_date, request=None):
     algo_run = _latest_successful_run(target_date)
     if not algo_run:
@@ -994,8 +1281,20 @@ def _all_games_payload(target_date, request=None):
 
     picks_by_match = _picks_by_match(algo_run)
     fixture_summaries = _fixture_summaries_for_run(algo_run)
+    match_ids = [str(item.get("match_id") or "") for item in fixture_summaries if str(item.get("match_id") or "")]
+    backed_game_counts, backed_game_ids, backed_markets_by_match = _bulk_game_back_context(
+        match_ids,
+        request,
+    )
     games = [
-        _game_summary_from_fixture(item, picks_by_match, request=request)
+        _game_summary_from_fixture(
+            item,
+            picks_by_match,
+            request=request,
+            backed_game_counts=backed_game_counts,
+            user_backed_game_ids=backed_game_ids,
+            user_backed_markets_by_match=backed_markets_by_match,
+        )
         for item in fixture_summaries
     ]
 
@@ -1477,12 +1776,8 @@ def _daily_picks_payload(target_date, request=None):
                 },
                 "kickoff": pick.kickoff,
                 "match_id": pick.match_id,
-                "backed_count": GameBack.objects.filter(match_id=str(pick.match_id or "")).count() if pick.match_id else 0,
-                "backed_by_me": (
-                    GameBack.objects.filter(user=request.user, match_id=str(pick.match_id or "")).exists()
-                    if request and request.user.is_authenticated and pick.match_id
-                    else False
-                ),
+                "backed_count": backed_game_counts.get(str(pick.match_id or ""), 0),
+                "backed_by_me": str(pick.match_id or "") in backed_game_ids,
                 "market_count": 0,
                 "markets_70_plus": 0,
                 "markets_65_plus": 0,
@@ -1501,7 +1796,14 @@ def _daily_picks_payload(target_date, request=None):
         fixtures[key]["away_recent_form"] = _recent_form_payload(
             fixtures[key].get("away_recent_form") or pick.away_recent_form
         )
-        data = PickSerializer(pick, context={"request": request}).data
+        data = PickSerializer(
+            pick,
+            context={
+                "request": request,
+                "backed_game_counts": backed_game_counts,
+                "backed_game_ids": backed_game_ids,
+            },
+        ).data
         pick_match_id = str(pick.match_id or "")
         data["backed_by_me"] = pick_match_id in backed_game_ids
         data["backed_count"] = backed_game_counts.get(pick_match_id, 0)
@@ -1727,6 +2029,41 @@ class DailyPicksView(APIView):
         query = DailyPicksQuerySerializer(data=request.query_params)
         query.is_valid(raise_exception=True)
         target_date = query.validated_data.get("date") or timezone.localdate()
+        if query.validated_data.get("view") == "compact":
+            payload = _daily_picks_payload(target_date, request)
+            compact_fixtures = []
+            for fixture in payload.get("fixtures") or []:
+                picks = fixture.get("picks") or []
+                compact_fixtures.append({
+                    "fixture": fixture.get("fixture", ""),
+                    "home_team": fixture.get("home_team", ""),
+                    "away_team": fixture.get("away_team", ""),
+                    "league": fixture.get("league", ""),
+                    "country": fixture.get("country", ""),
+                    "kickoff": fixture.get("kickoff", ""),
+                    "match_id": fixture.get("match_id", ""),
+                    "backed_count": fixture.get("backed_count", 0),
+                    "backed_by_me": fixture.get("backed_by_me", False),
+                    "picks": [
+                        {
+                            "id": pick.get("id"),
+                            "tier": pick.get("tier", ""),
+                            "market": pick.get("market", ""),
+                            "meaning": pick.get("meaning", ""),
+                            "confidence": pick.get("confidence"),
+                            "final_confidence": pick.get("final_confidence"),
+                            "odds": pick.get("odds"),
+                            "ev": pick.get("ev"),
+                            "status": pick.get("status", ""),
+                            "analysis_summary": pick.get("analysis_summary", ""),
+                            "backed_count": pick.get("backed_count", 0),
+                            "backed_by_me": pick.get("backed_by_me", False),
+                        }
+                        for pick in picks
+                    ],
+                })
+            payload = {**payload, "fixtures": compact_fixtures, "grouped_fixtures": _group_by_country_and_league(compact_fixtures, "fixtures")}
+            return _private_cached_response(payload, request=request)
         return _private_cached_response(_daily_picks_payload(target_date, request), request=request)
 
 
@@ -1745,15 +2082,38 @@ class TopPickView(APIView):
         query = DailyPicksQuerySerializer(data=request.query_params)
         query.is_valid(raise_exception=True)
         target_date = query.validated_data.get("date") or timezone.localdate()
-        algo_run = _latest_successful_run(target_date)
+        algo_run = _latest_successful_run(target_date, prefetch=False)
         picks = []
         if algo_run:
             picks = sorted(
-                [pick for pick in algo_run.picks.all() if pick.market not in EXCLUDED_MARKETS],
+                [
+                    pick
+                    for pick in Pick.objects.filter(run=algo_run).exclude(market__in=EXCLUDED_MARKETS)
+                ],
                 key=_top_pick_sort_key,
                 reverse=True,
             )
-        picks_data = PickSerializer(picks, many=True, context={"request": request}).data
+        match_ids = [str(pick.match_id or "") for pick in picks if str(pick.match_id or "")]
+        backed_game_counts, backed_game_ids, _backed_markets = _bulk_game_back_context(match_ids, request)
+        if query.validated_data.get("view") == "compact":
+            picks_data = [
+                _compact_pick_payload(
+                    pick,
+                    backed_game_counts=backed_game_counts,
+                    backed_game_ids=backed_game_ids,
+                )
+                for pick in picks
+            ]
+        else:
+            picks_data = PickSerializer(
+                picks,
+                many=True,
+                context={
+                    "request": request,
+                    "backed_game_counts": backed_game_counts,
+                    "backed_game_ids": backed_game_ids,
+                },
+            ).data
         top_pick = picks_data[0] if picks_data else None
         return _private_cached_response(
             {
@@ -1783,6 +2143,8 @@ class GamesView(APIView):
         query = GameAnalysisQuerySerializer(data=request.query_params)
         query.is_valid(raise_exception=True)
         target_date = query.validated_data.get("date") or timezone.localdate()
+        if query.validated_data.get("view") == "compact":
+            return _private_cached_response(_compact_games_payload(target_date, request), request=request)
         return _private_cached_response(_all_games_payload(target_date, request), request=request)
 
 
@@ -6401,9 +6763,10 @@ def process_slip_review_import(review_id):
         workflow = celery_chord(
             [
                 analyse_slip_review_leg.s(review.id, index, _json_safe(selection), payload.get("days", 3))
+                .set(queue=settings.SLIP_REVIEW_QUEUE)
                 for index, selection in enumerate(selections)
             ]
-        )(finalize_slip_review_import.s(review.id))
+        )(finalize_slip_review_import.s(review.id).set(queue=settings.SLIP_REVIEW_QUEUE))
         _publish_slip_review_event(
             review,
             "review.fanout_queued",
@@ -6556,7 +6919,7 @@ class SportyBetSlipImportView(APIView):
             source=SlipReview.Source.SPORTYBET,
             submitted_payload=data,
         )
-        task = import_slip_review.delay(review.id)
+        task = import_slip_review.apply_async(args=[review.id], queue=settings.SLIP_REVIEW_QUEUE)
         review.summary = {
             **_empty_slip_summary("Slip import queued.", task_id=task.id),
             "progress": _slip_review_progress(
@@ -6603,7 +6966,7 @@ class BetanoSlipImportView(APIView):
             source=SlipReview.Source.BETANO,
             submitted_payload=data,
         )
-        task = import_slip_review.delay(review.id)
+        task = import_slip_review.apply_async(args=[review.id], queue=settings.SLIP_REVIEW_QUEUE)
         review.summary = {
             **_empty_slip_summary("Slip import queued.", task_id=task.id),
             "progress": _slip_review_progress(
