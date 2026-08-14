@@ -21,6 +21,7 @@ from apps.algo.views import (
     _replacement_market_for_slip,
     recover_stale_slip_reviews,
     _should_skip_core_on_demand,
+    _compact_slip_review_list_payload,
     _slip_review_payload,
     _slip_leg_analysis_cache_key,
     _streamed_slip_review_game_payload,
@@ -1008,6 +1009,41 @@ class SlipReviewPayloadDbTests(TestCase):
         self.assertFalse(SlipReviewStreamToken.objects.filter(token_hash=ticket).exists())
         stored = SlipReviewStreamToken.objects.get(review=review, user=user)
         self.assertEqual(stored.token_hash, _stream_ticket_hash(ticket))
+
+    def test_compact_slip_review_list_payload_contains_pick_summary_only(self):
+        user = get_user_model().objects.create_user(username="compact-list")
+        review = SlipReview.objects.create(
+            user=user,
+            source=SlipReview.Source.SPORTYBET,
+            status=SlipReview.Status.COMPLETED,
+            title="SportyBet review",
+            summary={},
+        )
+        SlipSelection.objects.create(
+            review=review,
+            order=1,
+            submitted_match="Wolves vs Blackburn",
+            submitted_market="Home Win",
+            status="analysed",
+            verdict="replace",
+            odds="1.80",
+            analysis_payload={
+                "replacement_market": {
+                    "market": "DC: X2",
+                    "confidence": 65,
+                }
+            },
+        )
+
+        payload = _compact_slip_review_list_payload(review)
+
+        self.assertEqual(payload["id"], review.id)
+        self.assertEqual(payload["number_of_games"], 1)
+        self.assertEqual(payload["status"], SlipReview.Status.COMPLETED)
+        self.assertEqual(payload["picks"][0]["your_pick"]["market"], "Home Win")
+        self.assertEqual(payload["picks"][0]["ai_pick"]["market"], "DC: X2")
+        self.assertNotIn("summary", payload)
+        self.assertNotIn("intelligence", payload)
 
     def test_stale_recovery_finalizes_from_persisted_completed_legs(self):
         user = get_user_model().objects.create_user(username="stale-finalize")

@@ -5152,6 +5152,84 @@ def _slip_selection_payload(selection):
     return payload
 
 
+def _compact_ai_pick_from_selection(selection):
+    payload = selection.analysis_payload or {}
+    replacement = payload.get("replacement_market") or {}
+    selected = payload.get("selected_market") or {}
+    recommended = payload.get("recommended_market") or {}
+    if replacement:
+        source = replacement
+        action = "replace"
+    elif recommended:
+        source = recommended
+        action = payload.get("verdict") or "recommend"
+    elif selected:
+        source = selected
+        action = payload.get("verdict") or "keep"
+    else:
+        source = {}
+        action = "review"
+    confidence = (
+        source.get("confidence_score")
+        or source.get("advisory_score")
+        or source.get("final_confidence")
+        or source.get("confidence")
+    )
+    return {
+        "market": source.get("market") or selection.submitted_market,
+        "confidence_score": _public_score(confidence),
+        "action": action,
+    }
+
+
+def _compact_slip_review_list_payload(review):
+    selections = list(review.selections.all().order_by("order", "id"))
+    public_payload = (review.summary or {}).get("bettor_public") or {}
+    if not public_payload and (review.summary or {}).get("public"):
+        public_payload = _build_bettor_public_payload(review, (review.summary or {}).get("public") or {})
+
+    games = public_payload.get("games") or []
+    if games:
+        picks = [
+            {
+                "match": game.get("match"),
+                "your_pick": {
+                    "market": (game.get("user_pick") or {}).get("market"),
+                    "odds": (game.get("user_pick") or {}).get("odds"),
+                    "confidence_score": (game.get("user_pick") or {}).get("confidence_score"),
+                    "verdict": (game.get("user_pick") or {}).get("verdict"),
+                },
+                "ai_pick": {
+                    "market": ((game.get("recommendation") or {}).get("pick") or {}).get("market"),
+                    "confidence_score": ((game.get("recommendation") or {}).get("pick") or {}).get("confidence_score"),
+                    "action": (game.get("recommendation") or {}).get("action"),
+                },
+            }
+            for game in games
+        ]
+    else:
+        picks = [
+            {
+                "match": selection.submitted_match,
+                "your_pick": {
+                    "market": selection.submitted_market,
+                    "odds": float(selection.odds) if selection.odds is not None else None,
+                    "confidence_score": _public_score(selection.advisory_score),
+                    "verdict": selection.verdict or selection.status or "review",
+                },
+                "ai_pick": _compact_ai_pick_from_selection(selection),
+            }
+            for selection in selections
+        ]
+
+    return {
+        "id": review.id,
+        "number_of_games": len(selections) or len(games),
+        "status": review.status,
+        "picks": picks,
+    }
+
+
 def _slip_review_payload(review, *, include_selections=True, public_only=False):
     summary = review.summary or {}
     public_payload = summary.get("public") or (summary.get("intelligence") or {}).get("public", {})
@@ -6711,7 +6789,10 @@ class SlipReviewListView(APIView):
 
     @extend_schema(
         summary="List slip reviews",
-        description="Authenticated user endpoint. Returns previous manual/bookmaker slip reviews for the current user.",
+        description=(
+            "Authenticated user endpoint. Returns compact previous manual/bookmaker slip reviews for the current user: "
+            "number of games, status, and each game's user pick vs AI pick."
+        ),
         tags=["Slip Reviews"],
         responses={200: SlipReviewListResponseSerializer},
     )
@@ -6730,7 +6811,7 @@ class SlipReviewListView(APIView):
             {
                 "count": len(reviews),
                 "reviews": [
-                    _slip_review_payload(review, include_selections=False)
+                    _compact_slip_review_list_payload(review)
                     for review in reviews
                 ],
             }
