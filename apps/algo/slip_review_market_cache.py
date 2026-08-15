@@ -69,8 +69,9 @@ class SlipReviewMarketCacheWriter:
         if not isinstance(source_payload, dict):
             source_payload = {}
         now = timezone.now()
-        rows = []
+        rows_by_key = {}
         skipped = 0
+        deduped = 0
 
         for market_payload in markets:
             if not isinstance(market_payload, dict):
@@ -83,58 +84,66 @@ class SlipReviewMarketCacheWriter:
 
             descriptor = describe_market(market_name)
             canonical_market = descriptor.canonical or market_name
-            rows.append(
-                SlipReviewMarketCache(
-                    cache_scope=cache_scope,
-                    source=source,
-                    match_date=match_date,
-                    fixture=fixture_name,
-                    home_team=self._team_name(fixture, "home"),
-                    away_team=self._team_name(fixture, "away"),
-                    home_logo=self._team_logo(fixture, "home"),
-                    away_logo=self._team_logo(fixture, "away"),
-                    league=self._league_name(fixture),
-                    league_id=self._string(
-                        fixture.get("league_id")
-                        or fixture.get("provider_competition_id")
-                        or source_payload.get("league_id")
-                    ),
-                    league_logo=self._string(fixture.get("league_logo") or fixture.get("competition_logo")),
-                    country=self._string(fixture.get("country") or source_payload.get("country")),
-                    country_flag=self._string(fixture.get("country_flag")),
-                    kickoff=self._string(fixture.get("kickoff")),
-                    match_id=match_id,
-                    provider_match_id=self._provider_match_id(fixture, source_payload, provider_merge),
-                    provider_competition_id=self._string(
-                        fixture.get("provider_competition_id")
-                        or fixture.get("league_id")
-                        or source_payload.get("provider_competition_id")
-                    ),
-                    home_team_id=self._team_id(fixture, "home", provider_merge),
-                    away_team_id=self._team_id(fixture, "away", provider_merge),
-                    market=canonical_market,
-                    market_family=self._market_family(market_payload, descriptor),
-                    meaning=self._string(market_payload.get("meaning")),
-                    raw_confidence=self._int(market_payload.get("raw_confidence")),
-                    confidence=self._int(market_payload.get("confidence")),
-                    final_confidence=self._final_confidence(market_payload),
-                    odds=self._decimal(market_payload.get("odds"), places=2),
-                    ev=self._decimal(market_payload.get("ev"), places=3),
-                    odds_source=self._string(market_payload.get("odds_source")),
-                    odds_meta=json_safe(market_payload.get("odds_meta") or {}),
-                    eligible=bool(market_payload.get("eligible")),
-                    risk_flags=json_safe(market_payload.get("risk_flags") or []),
-                    insights=json_safe(market_payload.get("insights") or {}),
-                    market_payload=json_safe(market_payload),
-                    fixture_payload=fixture_payload,
-                    provider_merge=provider_merge,
-                    data_quality=self._data_quality(market_payload),
-                    cache_version=self.cache_version,
-                    expires_at=expiry,
-                    created_at=now,
-                    updated_at=now,
-                )
+            row = SlipReviewMarketCache(
+                cache_scope=cache_scope,
+                source=source,
+                match_date=match_date,
+                fixture=fixture_name,
+                home_team=self._team_name(fixture, "home"),
+                away_team=self._team_name(fixture, "away"),
+                home_logo=self._team_logo(fixture, "home"),
+                away_logo=self._team_logo(fixture, "away"),
+                league=self._league_name(fixture),
+                league_id=self._string(
+                    fixture.get("league_id")
+                    or fixture.get("provider_competition_id")
+                    or source_payload.get("league_id")
+                ),
+                league_logo=self._string(fixture.get("league_logo") or fixture.get("competition_logo")),
+                country=self._string(fixture.get("country") or source_payload.get("country")),
+                country_flag=self._string(fixture.get("country_flag")),
+                kickoff=self._string(fixture.get("kickoff")),
+                match_id=match_id,
+                provider_match_id=self._provider_match_id(fixture, source_payload, provider_merge),
+                provider_competition_id=self._string(
+                    fixture.get("provider_competition_id")
+                    or fixture.get("league_id")
+                    or source_payload.get("provider_competition_id")
+                ),
+                home_team_id=self._team_id(fixture, "home", provider_merge),
+                away_team_id=self._team_id(fixture, "away", provider_merge),
+                market=canonical_market,
+                market_family=self._market_family(market_payload, descriptor),
+                meaning=self._string(market_payload.get("meaning")),
+                raw_confidence=self._int(market_payload.get("raw_confidence")),
+                confidence=self._int(market_payload.get("confidence")),
+                final_confidence=self._final_confidence(market_payload),
+                odds=self._decimal(market_payload.get("odds"), places=2),
+                ev=self._decimal(market_payload.get("ev"), places=3),
+                odds_source=self._string(market_payload.get("odds_source")),
+                odds_meta=json_safe(market_payload.get("odds_meta") or {}),
+                eligible=bool(market_payload.get("eligible")),
+                risk_flags=json_safe(market_payload.get("risk_flags") or []),
+                insights=json_safe(market_payload.get("insights") or {}),
+                market_payload=json_safe(market_payload),
+                fixture_payload=fixture_payload,
+                provider_merge=provider_merge,
+                data_quality=self._data_quality(market_payload),
+                cache_version=self.cache_version,
+                expires_at=expiry,
+                created_at=now,
+                updated_at=now,
             )
+            key = (row.cache_scope, row.match_id, row.market)
+            existing = rows_by_key.get(key)
+            if existing is None:
+                rows_by_key[key] = row
+                continue
+            deduped += 1
+            if self._row_rank(row) > self._row_rank(existing):
+                rows_by_key[key] = row
+
+        rows = list(rows_by_key.values())
 
         if rows:
             SlipReviewMarketCache.objects.bulk_create(
@@ -185,6 +194,7 @@ class SlipReviewMarketCacheWriter:
         summary = {
             "cached": len(rows),
             "skipped": skipped,
+            "deduped": deduped,
             "markets_seen": len(markets),
             "match_id": match_id,
             "provider_match_id": rows[0].provider_match_id if rows else "",
@@ -195,12 +205,13 @@ class SlipReviewMarketCacheWriter:
             "cache_version": self.cache_version,
         }
         logger.info(
-            "Slip review market cache write match_id=%s fixture=%r markets_seen=%s cached=%s skipped=%s source=%s",
+            "Slip review market cache write match_id=%s fixture=%r markets_seen=%s cached=%s skipped=%s deduped=%s source=%s",
             summary["match_id"],
             summary["fixture"],
             summary["markets_seen"],
             summary["cached"],
             summary["skipped"],
+            summary["deduped"],
             summary["source"],
         )
         return summary
@@ -291,6 +302,24 @@ class SlipReviewMarketCacheWriter:
         return self._string(
             (capability if isinstance(capability, dict) else {}).get("data_quality")
             or (coverage if isinstance(coverage, dict) else {}).get("data_quality")
+        )
+
+    def _row_rank(self, row: SlipReviewMarketCache):
+        confidence = row.final_confidence or row.confidence or row.raw_confidence or 0
+        data_quality_rank = {
+            "full": 4,
+            "good": 3,
+            "medium": 2,
+            "partial": 1,
+            "limited": 1,
+            "poor": 0,
+        }
+        real_odds = 1 if row.odds and row.odds_source and row.odds_source != "estimated" else 0
+        return (
+            1 if row.eligible else 0,
+            int(confidence),
+            real_odds,
+            data_quality_rank.get(row.data_quality, 0),
         )
 
     def _join_fixture(self, home, away):

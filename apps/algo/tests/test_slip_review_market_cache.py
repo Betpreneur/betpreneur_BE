@@ -73,6 +73,43 @@ class SlipReviewMarketCacheWriterTests(TestCase):
         row.refresh_from_db()
         self.assertEqual(row.confidence, 72)
 
+    def test_writer_dedupes_duplicate_canonical_markets_before_bulk_upsert(self):
+        fixture = {
+            "match_date": date(2026, 8, 15),
+            "fixture": "Chelsea vs Tottenham",
+            "home_team": "Chelsea",
+            "away_team": "Tottenham",
+            "match_id": "statpal:duplicate-canonical",
+            "markets": [
+                {
+                    "market": "Over 2.5 Goals",
+                    "market_family": "total_goals",
+                    "confidence": 55,
+                    "final_confidence": 55,
+                    "odds": 1.70,
+                    "odds_source": "estimated",
+                },
+                {
+                    "market": "Over 2.5",
+                    "market_family": "total_goals",
+                    "confidence": 68,
+                    "final_confidence": 68,
+                    "odds": 1.82,
+                    "odds_source": "statpal",
+                    "eligible": True,
+                },
+            ],
+        }
+
+        result = SlipReviewMarketCacheWriter().upsert_fixture_markets(fixture)
+
+        self.assertEqual(result["cached"], 1)
+        self.assertEqual(result["deduped"], 1)
+        self.assertEqual(SlipReviewMarketCache.objects.count(), 1)
+        row = SlipReviewMarketCache.objects.get(match_id="statpal:duplicate-canonical", market="Over 2.5")
+        self.assertEqual(row.confidence, 68)
+        self.assertEqual(row.odds_source, "statpal")
+
 
 class SlipReviewMarketCacheReadPathTests(TestCase):
     def test_manual_fixture_game_reads_private_cache_by_provider_match_id(self):
