@@ -251,6 +251,38 @@ def build_statpal_daily_cache(self, start_date=None, days=3, include_optional=Fa
         raise
 
 
+@shared_task(
+    bind=True,
+    ignore_result=False,
+    max_retries=1,
+    default_retry_delay=300,
+    soft_time_limit=3600,
+    time_limit=4200,
+)
+def build_slip_review_market_cache(self, start_date=None, days=None, sync_fixtures=True, force=False, max_fixtures=None):
+    parsed_start = date.fromisoformat(start_date) if start_date else None
+    try:
+        return algo_runner_service.build_slip_review_market_cache(
+            start_date=parsed_start,
+            days=days,
+            sync_fixtures=sync_fixtures,
+            force=force,
+            max_fixtures=max_fixtures,
+        )
+    except Exception as exc:
+        if self.request.retries < self.max_retries:
+            raise self.retry(exc=exc, countdown=300)
+        raise
+
+
+@shared_task(bind=True, ignore_result=False)
+def cleanup_slip_review_market_cache(self, grace_seconds=None, limit=None):
+    return algo_runner_service.cleanup_slip_review_market_cache(
+        grace_seconds=grace_seconds,
+        limit=limit,
+    )
+
+
 @shared_task(bind=True, ignore_result=False)
 def refresh_imminent_lineups(self, match_ids=None):
     """

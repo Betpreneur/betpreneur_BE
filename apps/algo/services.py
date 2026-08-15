@@ -26,6 +26,7 @@ from .models import (
     MarketPrediction,
     Pick,
     ProviderFixtureMap,
+    SlipReviewMarketCache,
     SlipSelection,
     StrategyReview,
     TeamAliasMap,
@@ -2344,6 +2345,30 @@ class AlgoRunnerService:
             MarketPrediction.objects.bulk_create(rows, ignore_conflicts=True, batch_size=500)
         return len(rows)
 
+    def _write_slip_review_market_cache(self, algo_run: AlgoRun, fixture, *, source="merged"):
+        if not getattr(settings, "SLIP_REVIEW_MARKET_CACHE_WRITE_ENABLED", True):
+            return {"enabled": False, "cached": 0}
+        try:
+            from .slip_review_market_cache import SlipReviewMarketCacheWriter
+
+            payload = dict(fixture or {})
+            payload.setdefault("match_date", algo_run.target_date)
+            summary = SlipReviewMarketCacheWriter().upsert_fixture_markets(payload, source=source)
+            summary["enabled"] = True
+            return summary
+        except Exception as exc:
+            log.warning(
+                "Slip review market cache write failed run=%s match_id=%s error=%s",
+                getattr(algo_run, "id", None),
+                (fixture or {}).get("match_id"),
+                exc,
+            )
+            return {
+                "enabled": True,
+                "cached": 0,
+                "error": str(exc)[:500],
+            }
+
     def _market_family_counts(self, markets):
         counts = defaultdict(int)
         for market in markets or []:
@@ -3362,13 +3387,20 @@ class AlgoRunnerService:
                 summary = self._enrich_fixture_statpal_diagnostics(summary)
                 self._persist_fixture_summary(algo_run, summary)
                 market_count = self._persist_fixture_market_predictions(algo_run, summary)
+                cache_source = (
+                    "on_demand"
+                    if (algo_run.result or {}).get("publish_policy") == "on_demand_fixture_analysis"
+                    else "merged"
+                )
+                slip_cache = self._write_slip_review_market_cache(algo_run, summary, source=cache_source)
                 family_counts = self._market_family_counts(summary.get("markets") or [])
                 statpal_family_coverage = (summary.get("insights") or {}).get("statpal_market_family_coverage") or {}
                 log.info(
-                    "Daily fixture scored run=%s match_id=%s markets=%s market_families=%s provider_merge=%s statpal_family_coverage=%s",
+                    "Daily fixture scored run=%s match_id=%s markets=%s slip_cache=%s market_families=%s provider_merge=%s statpal_family_coverage=%s",
                     algo_run.id,
                     summary.get("match_id"),
                     market_count,
+                    slip_cache,
                     family_counts,
                     (scored_fixture.get("provider_merge") or {}),
                     statpal_family_coverage,
@@ -3378,6 +3410,7 @@ class AlgoRunnerService:
                 "fixture_id": fixture.id,
                 "status": "scored",
                 "market_count": market_count,
+                "slip_review_market_cache": slip_cache,
                 "market_families": family_counts,
                 "statpal_market_family_coverage": statpal_family_coverage,
             }
@@ -3489,6 +3522,204 @@ class AlgoRunnerService:
             "match_id": match_id,
             "target_date": target_date.isoformat(),
         }
+
+    def _slip_review_cache_fresh(self, match_id):
+        return SlipReviewMarketCache.objects.filter(
+            cache_scope=SlipReviewMarketCache.Scope.SLIP_REVIEW,
+            match_id=str(match_id or ""),
+            expires_at__gt=timezone.now(),
+        ).exists()
+
+    def score_fixture_for_slip_review_market_cache(self, cached: FixtureCache, *, force=False):
+        match_id = str(cached.match_id or "").strip()
+        if not match_id:
+            return {"status": "failed", "error": "match_id_required"}
+        if not force and self._slip_review_cache_fresh(match_id):
+            return {
+                "status": "cached",
+                "match_id": match_id,
+                "fixture": cached.fixture,
+            }
+
+        target_date = cached.match_date
+        performance_profile, strategy_profile = self._pipeline_profiles(target_date)
+        try:
+            with temporary_env(self._runner_env({
+                "OVERRIDE_DATE": target_date.isoformat(),
+                "ALGO_PERFORMANCE_PROFILE": json.dumps(performance_profile),
+                "ALGO_STRATEGY_PROFILE": json.dumps(strategy_profile),
+            })):
+                from .grindalgo import algo_runner
+                from .slip_review_market_cache import SlipReviewMarketCacheWriter
+
+                algo_runner.clear_runtime_caches()
+                source_payload = self._cached_fixture_runner_payload(cached)
+                source_payload = self._enrich_fixture_for_cross_provider_scoring(source_payload, target_date)
+                source_payload = self._hydrate_statpal_scoring_context(source_payload)
+                scored_fixture, confs, real_odds = algo_runner.score_aps_fixture_for_pipeline(source_payload)
+                summary = algo_runner.serialize_fixture_summaries(
+                    [scored_fixture],
+                    [confs],
+                    [real_odds],
+                )[0]
+                summary["match_date"] = target_date
+                summary["source_payload"] = scored_fixture
+                summary = self._enrich_fixture_statpal_diagnostics(summary)
+                cache_summary = SlipReviewMarketCacheWriter().upsert_fixture_markets(
+                    summary,
+                    source=SlipReviewMarketCache.Source.MERGED,
+                )
+                algo_runner.clear_runtime_caches()
+        except Exception as exc:
+            log.warning(
+                "Slip review private fixture scoring failed match_id=%s fixture=%r error=%s",
+                match_id,
+                cached.fixture,
+                exc,
+            )
+            return {
+                "status": "failed",
+                "match_id": match_id,
+                "fixture": cached.fixture,
+                "error": str(exc)[:1000],
+            }
+
+        markets = summary.get("markets") or []
+        return {
+            "status": "scored",
+            "match_id": match_id,
+            "fixture": summary.get("fixture") or cached.fixture,
+            "market_count": len(markets),
+            "cache": cache_summary,
+            "market_families": self._market_family_counts(markets),
+            "provider_merge": scored_fixture.get("provider_merge") or {},
+        }
+
+    def build_slip_review_market_cache(
+        self,
+        *,
+        start_date=None,
+        days=None,
+        sync_fixtures=True,
+        force=False,
+        max_fixtures=None,
+    ):
+        start_date = start_date or timezone.localdate()
+        days = int(days if days is not None else getattr(settings, "SLIP_REVIEW_MARKET_CACHE_BUILD_DAYS", 3))
+        days = max(0, days)
+        configured_limit = getattr(settings, "SLIP_REVIEW_MARKET_CACHE_BUILD_MAX_FIXTURES", 0)
+        max_fixtures = int(max_fixtures if max_fixtures is not None else configured_limit or 0)
+        end_date = start_date + timedelta(days=days)
+
+        sync_result = {}
+        if sync_fixtures:
+            sync_result = FixtureSearchService(runner_service=self).sync_statpal_horizon(
+                start_date=start_date,
+                days=days,
+                league_ids=None,
+            )
+
+        queryset = (
+            FixtureCache.objects.filter(
+                match_date__range=(start_date, end_date),
+                source="statpal",
+            )
+            .order_by("match_date", "country", "league", "kickoff", "fixture")
+        )
+        total_available = queryset.count()
+        if max_fixtures > 0:
+            queryset = queryset[:max_fixtures]
+
+        scored = cached = failed = 0
+        market_count = 0
+        errors = []
+        family_counts = defaultdict(int)
+        started_at = timezone.now()
+        considered_limit = total_available if max_fixtures <= 0 else min(total_available, max_fixtures)
+        for index, fixture in enumerate(queryset, start=1):
+            result = self.score_fixture_for_slip_review_market_cache(fixture, force=force)
+            status_value = result.get("status")
+            if status_value == "scored":
+                scored += 1
+                market_count += int(result.get("market_count") or 0)
+                for family, count in (result.get("market_families") or {}).items():
+                    family_counts[family] += int(count or 0)
+            elif status_value == "cached":
+                cached += 1
+            else:
+                failed += 1
+                if len(errors) < 25:
+                    errors.append({
+                        "match_id": result.get("match_id"),
+                        "fixture": result.get("fixture"),
+                        "error": result.get("error", "unknown_error"),
+                    })
+            if index % 25 == 0:
+                log.info(
+                    "Slip review private cache build progress fixtures=%s/%s scored=%s cached=%s failed=%s markets=%s",
+                    index,
+                    considered_limit,
+                    scored,
+                    cached,
+                    failed,
+                    market_count,
+                )
+
+        result = {
+            "status": "completed",
+            "start_date": start_date.isoformat(),
+            "end_date": end_date.isoformat(),
+            "days": days,
+            "sync": sync_result,
+            "fixtures_available": total_available,
+            "fixtures_considered": scored + cached + failed,
+            "fixtures_scored": scored,
+            "fixtures_served_from_cache": cached,
+            "fixtures_failed": failed,
+            "market_count": market_count,
+            "market_family_counts": dict(sorted(family_counts.items())),
+            "force": bool(force),
+            "max_fixtures": max_fixtures,
+            "duration_seconds": round((timezone.now() - started_at).total_seconds(), 3),
+            "errors": errors,
+        }
+        log.info("Slip review private market cache build done %s", result)
+        return result
+
+    def cleanup_slip_review_market_cache(self, *, grace_seconds=None, limit=None):
+        grace_seconds = int(
+            grace_seconds
+            if grace_seconds is not None
+            else getattr(settings, "SLIP_REVIEW_MARKET_CACHE_CLEANUP_GRACE_SECONDS", 0)
+        )
+        limit = int(
+            limit
+            if limit is not None
+            else getattr(settings, "SLIP_REVIEW_MARKET_CACHE_CLEANUP_LIMIT", 0)
+        )
+        cutoff = timezone.now() - timedelta(seconds=max(0, grace_seconds))
+        queryset = SlipReviewMarketCache.objects.filter(
+            cache_scope=SlipReviewMarketCache.Scope.SLIP_REVIEW,
+            expires_at__lte=cutoff,
+        )
+        expired_count = queryset.count()
+        if limit > 0:
+            ids = list(queryset.order_by("expires_at").values_list("id", flat=True)[:limit])
+            deleted, _ = SlipReviewMarketCache.objects.filter(id__in=ids).delete()
+        else:
+            deleted, _ = queryset.delete()
+        remaining_expired = max(0, expired_count - deleted)
+        result = {
+            "status": "completed",
+            "cutoff": cutoff.isoformat(),
+            "grace_seconds": grace_seconds,
+            "limit": limit,
+            "expired_count": expired_count,
+            "deleted": deleted,
+            "remaining_expired": remaining_expired,
+        }
+        log.info("Slip review private market cache cleanup done %s", result)
+        return result
 
     def publish_fanout_run(self, algo_run: AlgoRun):
         if not isinstance(algo_run, AlgoRun):
@@ -3658,6 +3889,7 @@ class AlgoRunnerService:
                         )
                         self._persist_fixture_summary(algo_run, summary)
                         market_count += self._persist_fixture_market_predictions(algo_run, summary)
+                        self._write_slip_review_market_cache(algo_run, summary, source="merged")
                         markets_70_plus += summary.get("markets_70_plus", 0)
                         markets_65_plus += summary.get("markets_65_plus", 0)
                         scored_count += 1

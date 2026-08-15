@@ -1,7 +1,7 @@
 # Match Checker — System Architecture
 
 **Status:** Draft for review
-**Last updated:** 2026-08-08
+**Last updated:** 2026-08-15
 **Scope:** Bet-slip import → per-leg market assessment → ticket-level risk → repair suggestions
 
 ---
@@ -448,7 +448,8 @@ POST /slip-reviews ─► 202 {review_id, status: queued}
 - **Per-review StatPal call budget** with a hard ceiling. On exhaustion, degrade legs to
   `INSUFFICIENT_DATA` rather than breaching rate limits. Emit `api_usage` per review.
 - Because fitting is nightly, leg analysis is pure CPU. **Target: p95 < 15s for 20 legs.**
-- Progress via polling (`GET /slip-reviews/{id}`). WebSockets are a later nice-to-have.
+- Progress is Redis-backed and available through WebSockets, with HTTP polling kept as a
+  fallback (`GET /slip-reviews/{id}` and `GET /slip-reviews/{id}/events`).
 
 ### Cache TTLs
 
@@ -464,6 +465,155 @@ POST /slip-reviews ─► 202 {review_id, status: queued}
 | Projected lineup | 60m | |
 | Confirmed lineup | until FT | Immutable once confirmed |
 | Fitted league model | 24h | Nightly refit |
+| Private slip-review market cache | 72h default | Covers today/tomorrow/next tomorrow |
+
+### Private slip-review market cache
+
+The private cache exists for one product reason: a slip review should usually be a lookup, not a
+fresh provider crawl while the bettor is watching a loading screen.
+
+It is intentionally separate from the public all-games/top-picks storage:
+
+| Store | Purpose | League scope | User-visible feed |
+|---|---|---|---|
+| `MarketPrediction` | Public daily game details and top picks | Restricted tracked leagues | Yes |
+| `SlipReviewMarketCache` | Private pre-scored markets for Match Checker | Broad StatPal fixture universe | No, only used to answer slips |
+
+This lets Match Checker prepare broad coverage without accidentally publishing every StatPal
+fixture in the public feed.
+
+**Write path.**
+
+1. `build_slip_review_market_cache` syncs the broad StatPal fixture horizon.
+2. Each StatPal `FixtureCache` row is enriched with API-Football context when available.
+3. The scoring engine produces the normal market payloads.
+4. `SlipReviewMarketCacheWriter` bulk-upserts every market into `SlipReviewMarketCache`.
+
+Daily/on-demand fixture scoring also writes to this private cache as a side effect. That write is
+fail-open: a cache write failure is logged, but it must not fail fixture scoring.
+
+**Read path.**
+
+`_manual_fixture_game(...)` now checks sources in this order:
+
+1. `MarketPrediction` for an already-scored public/daily/on-demand fixture.
+2. `SlipReviewMarketCache` for non-expired private rows matching `match_id`, `provider_match_id`,
+   or `statpal:{provider_match_id}`.
+3. Existing heavy fallback scoring.
+
+Cache hits emit:
+
+```
+Slip review private market cache hit match_id=... provider_match_id=... markets=... cache_version=...
+```
+
+**Expiry and cleanup.**
+
+Rows expire by `expires_at`; the default TTL is 72 hours. Expired rows are ignored by the read
+path and deleted by `cleanup_slip_review_market_cache`, scheduled hourly by default.
+
+**Production env.**
+
+```env
+SLIP_REVIEW_MARKET_CACHE_WRITE_ENABLED=True
+SLIP_REVIEW_MARKET_CACHE_TTL_HOURS=72
+SLIP_REVIEW_MARKET_CACHE_VERSION=v1
+
+SLIP_REVIEW_MARKET_CACHE_BUILD_ENABLED=True
+SLIP_REVIEW_MARKET_CACHE_BUILD_HOURS=0,12
+SLIP_REVIEW_MARKET_CACHE_BUILD_MINUTE=40
+SLIP_REVIEW_MARKET_CACHE_BUILD_DAYS=3
+SLIP_REVIEW_MARKET_CACHE_BUILD_SYNC_FIXTURES=True
+SLIP_REVIEW_MARKET_CACHE_BUILD_FORCE=False
+SLIP_REVIEW_MARKET_CACHE_BUILD_MAX_FIXTURES=0
+
+SLIP_REVIEW_MARKET_CACHE_CLEANUP_ENABLED=True
+SLIP_REVIEW_MARKET_CACHE_CLEANUP_MINUTES=55
+SLIP_REVIEW_MARKET_CACHE_CLEANUP_GRACE_SECONDS=0
+SLIP_REVIEW_MARKET_CACHE_CLEANUP_LIMIT=0
+```
+
+**Manual commands.**
+
+Warm the private cache:
+
+```bash
+python manage.py slip_review_market_cache build --days 3
+```
+
+Force one date after a bad run or deploy:
+
+```bash
+python manage.py slip_review_market_cache build --start-date 2026-08-15 --days 0 --no-sync-fixtures --force
+```
+
+Clean expired rows:
+
+```bash
+python manage.py slip_review_market_cache cleanup
+```
+
+Run cleanup inline during maintenance:
+
+```bash
+python manage.py slip_review_market_cache cleanup --inline
+```
+
+Inspect cache status:
+
+```bash
+python manage.py slip_review_market_cache status
+```
+
+Check task state:
+
+```bash
+python manage.py shell -c "from celery.result import AsyncResult; r=AsyncResult('TASK_ID'); print(r.state, r.info)"
+```
+
+**Verification queries.**
+
+Cache volume by date:
+
+```bash
+python manage.py shell -c "from apps.algo.models import SlipReviewMarketCache; from django.db.models import Count; [print(r) for r in SlipReviewMarketCache.objects.values('match_date').annotate(rows=Count('id'), fixtures=Count('match_id', distinct=True)).order_by('-match_date')[:5]]"
+```
+
+Inspect a fixture:
+
+```bash
+python manage.py shell -c "from apps.algo.models import SlipReviewMarketCache; [print(r.match_id, r.provider_match_id, r.fixture, r.market, r.confidence, r.odds, r.expires_at) for r in SlipReviewMarketCache.objects.filter(match_id='statpal:2026081512345').order_by('-confidence')[:20]]"
+```
+
+Expired row count:
+
+```bash
+python manage.py shell -c "from apps.algo.models import SlipReviewMarketCache; from django.utils import timezone; print(SlipReviewMarketCache.objects.filter(expires_at__lte=timezone.now()).count())"
+```
+
+**Workers to monitor.**
+
+| Worker | Why |
+|---|---|
+| `celery-statpal-worker` / `ALGO_STATPAL_QUEUE` | private cache build, fixture horizon, StatPal daily cache |
+| `celery-maintenance-worker` / `ALGO_MAINTENANCE_QUEUE` | private cache cleanup, stale slip recovery, lineups/availability |
+| `celery-slip-review-leg-worker` / `SLIP_REVIEW_LEG_QUEUE` | should show fewer heavy fallback/on-demand scoring calls as cache warms |
+
+Healthy logs look like:
+
+```
+Slip review private market cache build progress fixtures=25/...
+Slip review private market cache build done {...}
+Slip review private market cache cleanup done {...}
+Slip review private market cache hit match_id=...
+```
+
+Warning logs to investigate:
+
+```
+Slip review private fixture scoring failed ...
+Slip review market cache write failed ...
+```
 
 ---
 

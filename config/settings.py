@@ -103,6 +103,21 @@ CELERY_RESULT_BACKEND = config("CELERY_RESULT_BACKEND", default=CELERY_BROKER_UR
 CELERY_TIMEZONE = TIME_ZONE
 CELERY_ENABLE_UTC = True
 CELERY_TASK_TRACK_STARTED = True
+SLIP_REVIEW_REDIS_URL = config("SLIP_REVIEW_REDIS_URL", default=CELERY_BROKER_URL)
+SLIP_REVIEW_REDIS_PROGRESS_ENABLED = config("SLIP_REVIEW_REDIS_PROGRESS_ENABLED", default=True, cast=bool)
+SLIP_REVIEW_REDIS_PROGRESS_TTL_SECONDS = config("SLIP_REVIEW_REDIS_PROGRESS_TTL_SECONDS", default=60 * 60, cast=int)
+SLIP_REVIEW_REDIS_MAX_EVENTS = config("SLIP_REVIEW_REDIS_MAX_EVENTS", default=300, cast=int)
+SLIP_REVIEW_MARKET_CACHE_WRITE_ENABLED = config("SLIP_REVIEW_MARKET_CACHE_WRITE_ENABLED", default=True, cast=bool)
+SLIP_REVIEW_MARKET_CACHE_TTL_HOURS = config("SLIP_REVIEW_MARKET_CACHE_TTL_HOURS", default=72, cast=int)
+SLIP_REVIEW_MARKET_CACHE_VERSION = config("SLIP_REVIEW_MARKET_CACHE_VERSION", default="v1")
+SLIP_REVIEW_MARKET_CACHE_BUILD_DAYS = config("SLIP_REVIEW_MARKET_CACHE_BUILD_DAYS", default=3, cast=int)
+SLIP_REVIEW_MARKET_CACHE_BUILD_MAX_FIXTURES = config("SLIP_REVIEW_MARKET_CACHE_BUILD_MAX_FIXTURES", default=0, cast=int)
+SLIP_REVIEW_MARKET_CACHE_CLEANUP_GRACE_SECONDS = config(
+    "SLIP_REVIEW_MARKET_CACHE_CLEANUP_GRACE_SECONDS",
+    default=0,
+    cast=int,
+)
+SLIP_REVIEW_MARKET_CACHE_CLEANUP_LIMIT = config("SLIP_REVIEW_MARKET_CACHE_CLEANUP_LIMIT", default=0, cast=int)
 
 if ENABLE_WEBSOCKETS:
     INSTALLED_APPS.append("channels")
@@ -135,6 +150,7 @@ CELERY_TASK_ROUTES = {
     "apps.algo.tasks.score_fixture_for_daily_run": {"queue": ALGO_SCORING_QUEUE},
     "apps.algo.tasks.explain_picks_for_run": {"queue": ALGO_LLM_QUEUE},
     "apps.algo.tasks.build_statpal_daily_cache": {"queue": ALGO_STATPAL_QUEUE},
+    "apps.algo.tasks.build_slip_review_market_cache": {"queue": ALGO_STATPAL_QUEUE},
     "apps.algo.tasks.sync_fixture_horizon": {"queue": ALGO_STATPAL_QUEUE},
     "apps.algo.tasks.fit_score_models": {"queue": ALGO_STATPAL_QUEUE},
     "apps.algo.tasks.settle_daily_results": {"queue": ALGO_SETTLEMENT_QUEUE},
@@ -142,6 +158,7 @@ CELERY_TASK_ROUTES = {
     "apps.algo.tasks.refresh_imminent_lineups": {"queue": ALGO_MAINTENANCE_QUEUE},
     "apps.algo.tasks.refresh_player_availability": {"queue": ALGO_MAINTENANCE_QUEUE},
     "apps.algo.tasks.recover_stale_slip_reviews": {"queue": ALGO_MAINTENANCE_QUEUE},
+    "apps.algo.tasks.cleanup_slip_review_market_cache": {"queue": ALGO_MAINTENANCE_QUEUE},
     "apps.algo.tasks.run_monthly_auditor": {"queue": ALGO_MAINTENANCE_QUEUE},
     "apps.algo.tasks.import_slip_review": {"queue": SLIP_REVIEW_IMPORT_QUEUE},
     "apps.algo.tasks.analyse_slip_review_leg": {"queue": SLIP_REVIEW_LEG_QUEUE},

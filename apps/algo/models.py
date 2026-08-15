@@ -584,11 +584,11 @@ class SlipLegAnalysisCache(models.Model):
 
     class Meta:
         indexes = [
-            models.Index(fields=["cache_key"]),
-            models.Index(fields=["source", "provider_event_id"]),
-            models.Index(fields=["match_id"]),
-            models.Index(fields=["status", "lock_expires_at"]),
-            models.Index(fields=["expires_at"]),
+            models.Index(fields=["cache_key"], name="algo_sliple_cache_k_b5c8db_idx"),
+            models.Index(fields=["source", "provider_event_id"], name="algo_sliple_source_4f3934_idx"),
+            models.Index(fields=["match_id"], name="algo_sliple_match_i_cbbd1c_idx"),
+            models.Index(fields=["status", "lock_expires_at"], name="algo_sliple_status_72ca48_idx"),
+            models.Index(fields=["expires_at"], name="algo_sliple_expires_1ef28c_idx"),
         ]
 
     def __str__(self):
@@ -604,8 +604,8 @@ class SlipReviewEvent(models.Model):
     class Meta:
         ordering = ["created_at", "id"]
         indexes = [
-            models.Index(fields=["review", "created_at"]),
-            models.Index(fields=["review", "event_type"]),
+            models.Index(fields=["review", "created_at"], name="algo_slipre_review__47a5be_idx"),
+            models.Index(fields=["review", "event_type"], name="algo_slipre_review__4f4768_idx"),
         ]
 
     def __str__(self):
@@ -626,9 +626,9 @@ class SlipReviewStreamToken(models.Model):
 
     class Meta:
         indexes = [
-            models.Index(fields=["token_hash"]),
-            models.Index(fields=["review", "user"]),
-            models.Index(fields=["expires_at"]),
+            models.Index(fields=["token_hash"], name="algo_slipre_token_h_1d9e88_idx"),
+            models.Index(fields=["review", "user"], name="algo_slipre_review__75fc80_idx"),
+            models.Index(fields=["expires_at"], name="algo_slipre_expires_57f904_idx"),
         ]
 
     def __str__(self):
@@ -772,6 +772,86 @@ class MarketPrediction(models.Model):
     def __str__(self):
         label = "published" if self.published else "internal"
         return f"{self.fixture} - {self.market} ({label})"
+
+
+class SlipReviewMarketCache(models.Model):
+    """
+    Private pre-scored market cache used by Match Checker slip reviews.
+
+    Unlike MarketPrediction, these rows are not public top-pick candidates. They can
+    cover broad provider fixture universes while all-games/top-picks remain restricted
+    to the curated public league list.
+    """
+
+    class Scope(models.TextChoices):
+        SLIP_REVIEW = "slip_review", "Slip Review"
+
+    class Source(models.TextChoices):
+        STATPAL = "statpal", "StatPal"
+        API_FOOTBALL = "api_football", "API-Football"
+        MERGED = "merged", "Merged"
+        ON_DEMAND = "on_demand", "On Demand"
+
+    cache_scope = models.CharField(max_length=30, choices=Scope.choices, default=Scope.SLIP_REVIEW)
+    source = models.CharField(max_length=30, choices=Source.choices, default=Source.MERGED)
+    match_date = models.DateField()
+    fixture = models.CharField(max_length=255)
+    home_team = models.CharField(max_length=255, blank=True)
+    away_team = models.CharField(max_length=255, blank=True)
+    home_logo = models.URLField(blank=True)
+    away_logo = models.URLField(blank=True)
+    league = models.CharField(max_length=255, blank=True)
+    league_id = models.CharField(max_length=100, blank=True)
+    league_logo = models.URLField(blank=True)
+    country = models.CharField(max_length=100, blank=True)
+    country_flag = models.URLField(blank=True)
+    kickoff = models.CharField(max_length=50, blank=True)
+    match_id = models.CharField(max_length=100)
+    provider_match_id = models.CharField(max_length=120, blank=True)
+    provider_competition_id = models.CharField(max_length=120, blank=True)
+    home_team_id = models.CharField(max_length=120, blank=True)
+    away_team_id = models.CharField(max_length=120, blank=True)
+    market = models.CharField(max_length=120)
+    market_family = models.CharField(max_length=80, blank=True)
+    meaning = models.CharField(max_length=255, blank=True)
+    raw_confidence = models.PositiveIntegerField(default=0)
+    confidence = models.PositiveIntegerField(default=0)
+    final_confidence = models.FloatField(null=True, blank=True)
+    odds = models.DecimalField(max_digits=8, decimal_places=2, null=True, blank=True)
+    ev = models.DecimalField(max_digits=8, decimal_places=3, null=True, blank=True)
+    odds_source = models.CharField(max_length=30, blank=True)
+    odds_meta = models.JSONField(default=dict, blank=True)
+    eligible = models.BooleanField(default=False)
+    risk_flags = models.JSONField(default=list, blank=True)
+    insights = models.JSONField(default=dict, blank=True)
+    market_payload = models.JSONField(default=dict, blank=True)
+    fixture_payload = models.JSONField(default=dict, blank=True)
+    provider_merge = models.JSONField(default=dict, blank=True)
+    data_quality = models.CharField(max_length=30, blank=True)
+    cache_version = models.CharField(max_length=40, blank=True)
+    expires_at = models.DateTimeField()
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["match_date", "fixture", "-confidence", "market"]
+        indexes = [
+            models.Index(fields=["cache_scope", "match_date"]),
+            models.Index(fields=["cache_scope", "match_id", "market"]),
+            models.Index(fields=["cache_scope", "provider_match_id", "market"]),
+            models.Index(fields=["cache_scope", "league_id", "match_date"]),
+            models.Index(fields=["cache_scope", "market_family", "confidence"]),
+            models.Index(fields=["expires_at"]),
+        ]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["cache_scope", "match_id", "market"],
+                name="unique_slip_review_market_cache_match_market",
+            )
+        ]
+
+    def __str__(self):
+        return f"{self.fixture} - {self.market} ({self.cache_scope})"
 
 
 class LeagueScoreModel(models.Model):

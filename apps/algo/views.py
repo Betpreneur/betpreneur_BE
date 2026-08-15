@@ -33,11 +33,13 @@ from .models import (
     Pick,
     SlipLegAnalysisCache,
     SlipRepair,
+    SlipReviewMarketCache,
     SlipReviewEvent,
     SlipReviewStreamToken,
     SlipReview,
     SlipSelection,
 )
+from . import slip_review_redis
 from .market_taxonomy import (
     MarketDescriptor,
     canonical_market_name,
@@ -946,6 +948,47 @@ def _market_prediction_payload(prediction):
         "selected_pick_id": prediction.selected_pick_id,
         "selected_tier": _effective_pick_tier(prediction.selected_pick) if prediction.selected_pick_id else "",
     }
+
+
+def _slip_review_market_cache_payload(row):
+    payload = dict(row.market_payload or {})
+    insights = row.insights or payload.get("insights") or {}
+    council_review = _normalise_council_review(
+        insights,
+        fallback_confidence=row.confidence,
+        fallback_tier="",
+    )
+    payload.update(
+        {
+            "market": row.market,
+            "meaning": row.meaning,
+            "raw_confidence": row.raw_confidence,
+            "confidence": row.confidence,
+            "final_confidence": row.final_confidence if row.final_confidence is not None else council_review.get("final_confidence"),
+            "council_review": payload.get("council_review") or council_review,
+            "odds": float(row.odds) if row.odds is not None else payload.get("odds"),
+            "odds_meta": row.odds_meta or payload.get("odds_meta") or {},
+            "ev": float(row.ev) if row.ev is not None else payload.get("ev"),
+            "odds_source": row.odds_source or payload.get("odds_source", ""),
+            "proven": payload.get("proven", False),
+            "eligible": row.eligible,
+            "risk_flags": row.risk_flags or payload.get("risk_flags") or [],
+            "bettor_view": insights.get("bettor_view") or payload.get("bettor_view") or {},
+            "analysis_summary": insights.get("summary", payload.get("analysis_summary", "")),
+            "analysis_conclusion": insights.get("conclusion", payload.get("analysis_conclusion", "")),
+            "positive_evidence": insights.get("positive_evidence") or payload.get("positive_evidence") or [],
+            "risk_evidence": insights.get("risk_evidence") or payload.get("risk_evidence") or [],
+            "insights": insights,
+            "selected": False,
+            "selected_pick_id": None,
+            "selected_tier": "",
+        }
+    )
+    if row.market_family and "market_family" not in payload:
+        payload["market_family"] = row.market_family
+    if row.data_quality and "data_quality" not in payload:
+        payload["data_quality"] = row.data_quality
+    return payload
 
 
 def _fixture_summaries_for_run(algo_run):
@@ -2789,57 +2832,130 @@ def _market_for_fixture_orientation(market, candidate):
 
 
 def _manual_fixture_game(match_id, match_date, request=None):
+    target_match_id = str(match_id or "").strip()
+    prediction = (
+        MarketPrediction.objects.select_related("run", "selected_pick")
+        .filter(match_id=target_match_id)
+        .order_by("-run__created_at", "-created_at")
+        .first()
+    )
+    if prediction:
+        algo_run = prediction.run
+        predictions = (
+            MarketPrediction.objects.filter(run=algo_run, match_id=target_match_id)
+            .select_related("selected_pick")
+            .order_by("-confidence", "-ev", "market")
+        )
+        source_payload = (
+            AlgoFixture.objects.filter(run=algo_run, match_id=target_match_id)
+            .values_list("source_payload", flat=True)
+            .first()
+            or {}
+        )
+        markets = [
+            _market_prediction_payload(item)
+            for item in predictions
+            if item.market not in EXCLUDED_MARKETS
+        ]
+        fixture_summary = {
+            "fixture": prediction.fixture,
+            "home_team": prediction.home_team,
+            "away_team": prediction.away_team,
+            "league": prediction.league,
+            "kickoff": prediction.kickoff,
+            "match_id": prediction.match_id,
+            "home_recent_form": prediction.home_recent_form,
+            "away_recent_form": prediction.away_recent_form,
+            "fixture_context": prediction.fixture_context,
+            "team_news": prediction.team_news,
+            "markets": markets,
+            "source_payload": source_payload,
+        }
+        game = _game_summary_from_fixture(
+            fixture_summary,
+            _picks_by_match(algo_run),
+            request=request,
+            include_markets=True,
+        )
+        if game and game.get("markets"):
+            log.info(
+                "Slip review market score cache hit match_id=%s run_id=%s markets=%s",
+                match_id,
+                algo_run.id,
+                len(game.get("markets") or []),
+            )
+            return game
+
+    cache_query = SlipReviewMarketCache.objects.filter(
+        cache_scope=SlipReviewMarketCache.Scope.SLIP_REVIEW,
+        expires_at__gt=timezone.now(),
+    )
+    cache_filter = Q(match_id=target_match_id)
+    if target_match_id.startswith("statpal:"):
+        cache_filter |= Q(provider_match_id=target_match_id.replace("statpal:", "", 1))
+    else:
+        cache_filter |= Q(provider_match_id=target_match_id)
+        cache_filter |= Q(match_id=f"statpal:{target_match_id}")
+    if match_date:
+        cache_filter &= Q(match_date=match_date)
+    cache_rows = list(
+        cache_query.filter(cache_filter).order_by("-confidence", "-ev", "market")
+    )
+    if cache_rows:
+        first = cache_rows[0]
+        fixture_payload = first.fixture_payload or {}
+        markets = [
+            _slip_review_market_cache_payload(row)
+            for row in cache_rows
+            if row.market not in EXCLUDED_MARKETS
+        ]
+        fixture_summary = {
+            **fixture_payload,
+            "fixture": first.fixture,
+            "home_team": first.home_team,
+            "away_team": first.away_team,
+            "home_logo": first.home_logo,
+            "away_logo": first.away_logo,
+            "league": first.league,
+            "league_logo": first.league_logo,
+            "country": first.country,
+            "country_flag": first.country_flag,
+            "kickoff": first.kickoff,
+            "match_id": first.match_id,
+            "provider_match_id": first.provider_match_id,
+            "provider_competition_id": first.provider_competition_id,
+            "markets": markets,
+            "market_count": len(markets),
+            "provider_merge": first.provider_merge or {},
+        }
+        game = _game_summary_from_fixture(
+            fixture_summary,
+            {},
+            request=request,
+            include_markets=True,
+        )
+        if game and game.get("markets"):
+            game["slip_review_cache"] = {
+                "source": "slip_review_market_cache",
+                "row_count": len(cache_rows),
+                "market_count": len(game.get("markets") or []),
+                "cache_version": first.cache_version,
+                "expires_at": first.expires_at.isoformat() if first.expires_at else "",
+            }
+            log.info(
+                "Slip review private market cache hit match_id=%s provider_match_id=%s markets=%s cache_version=%s",
+                match_id,
+                first.provider_match_id,
+                len(game.get("markets") or []),
+                first.cache_version,
+            )
+            return game
+
     payload = _game_detail_payload(match_date, match_id, request=request)
     game = payload.get("game")
     if game and game.get("markets"):
         return game
-
-    prediction = (
-        MarketPrediction.objects.select_related("run", "selected_pick")
-        .filter(match_id=str(match_id))
-        .order_by("-run__created_at", "-created_at")
-        .first()
-    )
-    if not prediction:
-        return None
-
-    algo_run = prediction.run
-    predictions = (
-        MarketPrediction.objects.filter(run=algo_run, match_id=str(match_id))
-        .select_related("selected_pick")
-        .order_by("-confidence", "-ev", "market")
-    )
-    source_payload = (
-        AlgoFixture.objects.filter(run=algo_run, match_id=str(match_id))
-        .values_list("source_payload", flat=True)
-        .first()
-        or {}
-    )
-    markets = [
-        _market_prediction_payload(item)
-        for item in predictions
-        if item.market not in EXCLUDED_MARKETS
-    ]
-    fixture_summary = {
-        "fixture": prediction.fixture,
-        "home_team": prediction.home_team,
-        "away_team": prediction.away_team,
-        "league": prediction.league,
-        "kickoff": prediction.kickoff,
-        "match_id": prediction.match_id,
-        "home_recent_form": prediction.home_recent_form,
-        "away_recent_form": prediction.away_recent_form,
-        "fixture_context": prediction.fixture_context,
-        "team_news": prediction.team_news,
-        "markets": markets,
-        "source_payload": source_payload,
-    }
-    return _game_summary_from_fixture(
-        fixture_summary,
-        _picks_by_match(algo_run),
-        request=request,
-        include_markets=True,
-    )
+    return None
 
 
 def _minimal_game_from_candidate(candidate):
@@ -5413,6 +5529,26 @@ def _publish_slip_review_event(review, event_type, payload=None):
             event.id,
             payload,
         )
+        event_payload = {
+            "type": "slip_review.event",
+            "id": event.id,
+            "review_id": review.id,
+            "event_type": event.event_type,
+            "payload": event.payload or {},
+            "created_at": event.created_at.isoformat() if event.created_at else "",
+        }
+        slip_review_redis.push_event(
+            review.id,
+            event_payload,
+            snapshot={
+                "type": "slip_review.snapshot",
+                "review_id": review.id,
+                "status": review.status,
+                "progress": ((review.summary or {}).get("progress") or {}),
+                "latest_event_id": event.id,
+                "updated_at": review.updated_at.isoformat() if review.updated_at else "",
+            },
+        )
         if getattr(settings, "ENABLE_WEBSOCKETS", False):
             try:
                 from asgiref.sync import async_to_sync
@@ -5424,14 +5560,7 @@ def _publish_slip_review_event(review, event_type, payload=None):
                         f"slip_review_{review.id}",
                         {
                             "type": "slip_review.event",
-                            "payload": {
-                                "type": "slip_review.event",
-                                "id": event.id,
-                                "review_id": review.id,
-                                "event_type": event.event_type,
-                                "payload": event.payload or {},
-                                "created_at": event.created_at.isoformat() if event.created_at else "",
-                            },
+                            "payload": event_payload,
                         },
                     )
             except Exception:
@@ -5459,6 +5588,17 @@ def _set_slip_review_progress(review, *, phase, total=0, completed=0, message=""
     review.summary = summary
     if status:
         review.status = status
+    slip_review_redis.store_snapshot(
+        review.id,
+        {
+            "type": "slip_review.snapshot",
+            "review_id": review.id,
+            "status": review.status,
+            "progress": summary["progress"],
+            "latest_event_id": None,
+            "updated_at": timezone.now().isoformat(),
+        },
+    )
     if save:
         fields = ["summary", "updated_at"]
         if status:
@@ -5734,16 +5874,21 @@ def _try_sportybet_statpal_mapping(selection, *, provider_date, resolver_trace):
 
     search_service = FixtureSearchService()
     sync_result = {}
-    if provider_date:
-        try:
-            sync_result = search_service.sync_statpal_daily(provider_date)
-        except Exception as exc:
-            sync_result = {"synced": 0, "errors": [str(exc)]}
 
     try:
         result = provider_mapping_service.match_sportybet_to_statpal(_sportybet_statpal_event(selection))
     except Exception as exc:
         result = {"matched": False, "reason": "sportybet_statpal_mapping_error", "error": str(exc)}
+
+    if not result.get("matched") and provider_date:
+        try:
+            sync_result = search_service.sync_statpal_daily(provider_date)
+        except Exception as exc:
+            sync_result = {"synced": 0, "errors": [str(exc)]}
+        try:
+            result = provider_mapping_service.match_sportybet_to_statpal(_sportybet_statpal_event(selection))
+        except Exception as exc:
+            result = {"matched": False, "reason": "sportybet_statpal_mapping_error_after_sync", "error": str(exc)}
 
     resolver_trace.append(
         {
@@ -5824,8 +5969,7 @@ def _analyse_manual_selection(
         }
 
     search_service = FixtureSearchService()
-    statpal_mapping_result = _try_sportybet_statpal_mapping(selection, provider_date=provider_date, resolver_trace=resolver_trace)
-    statpal_candidate = (statpal_mapping_result or {}).get("candidate") if isinstance(statpal_mapping_result, dict) else {}
+    statpal_candidate = {}
     provider_fixture = search_service.get_provider_fixture(
         provider=provider_metadata.get("provider"),
         provider_event_id=provider_metadata.get("provider_event_id"),
@@ -5851,6 +5995,8 @@ def _analyse_manual_selection(
             }
         )
     else:
+        statpal_mapping_result = _try_sportybet_statpal_mapping(selection, provider_date=provider_date, resolver_trace=resolver_trace)
+        statpal_candidate = (statpal_mapping_result or {}).get("candidate") if isinstance(statpal_mapping_result, dict) else {}
         search = search_service.search(match_text, days=days, limit=5)
         candidates = search.get("results") or []
         resolver_trace.append(
@@ -7397,19 +7543,28 @@ class SlipReviewEventsView(APIView):
             id=review_id,
             user=request.user,
         )
-        events = list(
-            SlipReviewEvent.objects.filter(review=review, id__gt=after_id)
-            .order_by("id")[:limit]
-        )
-        latest_event_id = (
-            SlipReviewEvent.objects.filter(review=review).order_by("-id").values_list("id", flat=True).first()
-        )
+        redis_snapshot = slip_review_redis.get_snapshot(review.id) or {}
+        redis_events = slip_review_redis.get_events_after(review.id, after_id=after_id, limit=limit)
+        if redis_events is not None:
+            events_payload = redis_events
+            latest_event_id = (redis_snapshot or {}).get("latest_event_id")
+            if latest_event_id is None and events_payload:
+                latest_event_id = events_payload[-1].get("id")
+        else:
+            events = list(
+                SlipReviewEvent.objects.filter(review=review, id__gt=after_id)
+                .order_by("id")[:limit]
+            )
+            latest_event_id = (
+                SlipReviewEvent.objects.filter(review=review).order_by("-id").values_list("id", flat=True).first()
+            )
+            events_payload = [_slip_review_event_payload(event) for event in events]
         payload = {
             "review_id": review.id,
             "status": review.status,
-            "progress": (review.summary or {}).get("progress") or {},
+            "progress": (redis_snapshot or {}).get("progress") or (review.summary or {}).get("progress") or {},
             "latest_event_id": latest_event_id,
-            "events": [_slip_review_event_payload(event) for event in events],
+            "events": events_payload,
         }
         response = Response(_api_response_payload(payload))
         response["Cache-Control"] = "private, no-store"
@@ -8223,7 +8378,9 @@ def _maintenance_jobs():
     request open.
     """
     from .tasks import (
+        build_slip_review_market_cache,
         build_statpal_daily_cache,
+        cleanup_slip_review_market_cache,
         fit_score_models,
         refresh_imminent_lineups,
         refresh_player_availability,
@@ -8236,6 +8393,8 @@ def _maintenance_jobs():
         # Ordered so a full run populates fixtures before anything that reads them.
         "statpal_daily_cache": (build_statpal_daily_cache, "Build StatPal 3-day fixtures and analysis snapshots"),
         "fixture_horizon": (sync_fixture_horizon, "Cache every fixture in the 3-day window"),
+        "slip_review_market_cache": (build_slip_review_market_cache, "Pre-score private markets for slip review"),
+        "slip_review_market_cache_cleanup": (cleanup_slip_review_market_cache, "Delete expired private slip-review market rows"),
         "score_models": (fit_score_models, "Refit per-league goal models"),
         "player_availability": (refresh_player_availability, "Reload injuries and suspensions"),
         "lineups": (refresh_imminent_lineups, "Pull team sheets for imminent fixtures"),
@@ -8277,7 +8436,11 @@ class MaintenanceRunView(APIView):
         queued = []
         for name in requested:
             task, description = available[name]
-            async_result = task.delay(days=days) if name in {"fixture_horizon", "statpal_daily_cache"} else task.delay()
+            async_result = (
+                task.delay(days=days)
+                if name in {"fixture_horizon", "statpal_daily_cache", "slip_review_market_cache"}
+                else task.delay()
+            )
             queued.append({"job": name, "task_id": async_result.id, "description": description})
             log.info("Maintenance job queued by %s: %s -> %s", request.user, name, async_result.id)
 

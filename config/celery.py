@@ -11,6 +11,11 @@ app = Celery("betpreneur")
 app.config_from_object("django.conf:settings", namespace="CELERY")
 app.autodiscover_tasks()
 
+
+def _env_bool(name, default="0"):
+    return os.environ.get(name, default).lower() in {"1", "true", "yes", "on"}
+
+
 app.conf.beat_schedule = {
     "generate-daily-picks": {
         "task": "apps.algo.tasks.generate_daily_picks",
@@ -53,6 +58,22 @@ app.conf.beat_schedule = {
         },
         "options": {"expires": timedelta(hours=8).total_seconds()},
     },
+    # Private Match Checker warm cache. This can cover the broad StatPal fixture
+    # universe without changing the restricted public all-games/top-picks feed.
+    "build-slip-review-market-cache": {
+        "task": "apps.algo.tasks.build_slip_review_market_cache",
+        "schedule": crontab(
+            hour=os.environ.get("SLIP_REVIEW_MARKET_CACHE_BUILD_HOURS", "0,12"),
+            minute=os.environ.get("SLIP_REVIEW_MARKET_CACHE_BUILD_MINUTE", "40"),
+        ),
+        "kwargs": {
+            "days": int(os.environ.get("SLIP_REVIEW_MARKET_CACHE_BUILD_DAYS", "3")),
+            "sync_fixtures": _env_bool("SLIP_REVIEW_MARKET_CACHE_BUILD_SYNC_FIXTURES", "1"),
+            "force": _env_bool("SLIP_REVIEW_MARKET_CACHE_BUILD_FORCE", "0"),
+            "max_fixtures": int(os.environ.get("SLIP_REVIEW_MARKET_CACHE_BUILD_MAX_FIXTURES", "0")),
+        },
+        "options": {"expires": timedelta(hours=11).total_seconds()},
+    },
     # Every 15 minutes: team sheets only firm up in the hour before kickoff, and a
     # confirmed omission is what turns a priced player prop into a dead bet.
     "refresh-imminent-lineups": {
@@ -68,6 +89,15 @@ app.conf.beat_schedule = {
             "limit": int(os.environ.get("SLIP_REVIEW_RECOVERY_LIMIT", "25")),
         },
         "options": {"expires": timedelta(minutes=4).total_seconds()},
+    },
+    "cleanup-slip-review-market-cache": {
+        "task": "apps.algo.tasks.cleanup_slip_review_market_cache",
+        "schedule": crontab(minute=os.environ.get("SLIP_REVIEW_MARKET_CACHE_CLEANUP_MINUTES", "55")),
+        "kwargs": {
+            "grace_seconds": int(os.environ.get("SLIP_REVIEW_MARKET_CACHE_CLEANUP_GRACE_SECONDS", "0")),
+            "limit": int(os.environ.get("SLIP_REVIEW_MARKET_CACHE_CLEANUP_LIMIT", "0")),
+        },
+        "options": {"expires": timedelta(minutes=50).total_seconds()},
     },
     # Hourly: a late fitness call is what turns a priced player prop into a dead bet.
     "refresh-player-availability": {
@@ -101,3 +131,8 @@ app.conf.beat_schedule = {
         "options": {"expires": timedelta(hours=12).total_seconds()},
     },
 }
+
+if not _env_bool("SLIP_REVIEW_MARKET_CACHE_BUILD_ENABLED", "1"):
+    app.conf.beat_schedule.pop("build-slip-review-market-cache", None)
+if not _env_bool("SLIP_REVIEW_MARKET_CACHE_CLEANUP_ENABLED", "1"):
+    app.conf.beat_schedule.pop("cleanup-slip-review-market-cache", None)

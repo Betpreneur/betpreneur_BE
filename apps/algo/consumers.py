@@ -4,6 +4,7 @@ import logging
 from channels.db import database_sync_to_async
 from channels.generic.websocket import AsyncJsonWebsocketConsumer
 
+from . import slip_review_redis
 from .models import SlipReview, SlipReviewEvent
 
 
@@ -83,6 +84,9 @@ class SlipReviewConsumer(AsyncJsonWebsocketConsumer):
 
     @database_sync_to_async
     def _snapshot_payload(self, review_id):
+        redis_snapshot = slip_review_redis.get_snapshot(review_id)
+        if redis_snapshot:
+            return redis_snapshot
         review = SlipReview.objects.filter(id=review_id).only("id", "status", "summary", "updated_at").first()
         summary = review.summary or {}
         progress = summary.get("progress") or {}
@@ -98,6 +102,9 @@ class SlipReviewConsumer(AsyncJsonWebsocketConsumer):
 
     @database_sync_to_async
     def _events_after(self, review_id, last_event_id):
+        redis_events = slip_review_redis.get_events_after(review_id, after_id=last_event_id, limit=100)
+        if redis_events is not None:
+            return redis_events
         queryset = (
             SlipReviewEvent.objects.filter(review_id=review_id, id__gt=last_event_id)
             .order_by("id")[:100]

@@ -21,6 +21,7 @@ from .models import (
     ProviderPlayerMap,
     ProviderTeamMap,
     SlipReview,
+    SlipReviewMarketCache,
     SlipSelection,
     StatPalFixtureCoverage,
     StatPalFixtureSnapshot,
@@ -31,7 +32,15 @@ from .statpal_daily_build import StatPalDailyBuildService, statpal_snapshot_usab
 from .council import council_review
 from .performance import performance_dashboard
 from .recommendation_policy import assess_recommendation
-from .tasks import build_statpal_daily_cache, generate_daily_picks, recover_daily_run, run_monthly_auditor, settle_daily_results
+from .tasks import (
+    build_slip_review_market_cache,
+    build_statpal_daily_cache,
+    cleanup_slip_review_market_cache,
+    generate_daily_picks,
+    recover_daily_run,
+    run_monthly_auditor,
+    settle_daily_results,
+)
 
 
 class PickInline(admin.TabularInline):
@@ -1486,6 +1495,170 @@ class MarketPredictionAdmin(admin.ModelAdmin):
         messages.success(request, f"Marked {updated} internal prediction(s) as void.")
 
     actions = ("queue_settlement_for_prediction_dates", "mark_void")
+
+
+@admin.register(SlipReviewMarketCache)
+class SlipReviewMarketCacheAdmin(admin.ModelAdmin):
+    date_hierarchy = "match_date"
+    list_display = (
+        "id",
+        "match_date",
+        "fixture",
+        "league",
+        "country",
+        "market",
+        "market_family",
+        "confidence",
+        "final_confidence",
+        "odds",
+        "odds_source",
+        "eligible",
+        "source",
+        "data_quality",
+        "expires_at",
+        "updated_at",
+    )
+    list_filter = (
+        "cache_scope",
+        "source",
+        "match_date",
+        "country",
+        "league",
+        "market_family",
+        "eligible",
+        "odds_source",
+        "data_quality",
+        "cache_version",
+    )
+    search_fields = (
+        "fixture",
+        "home_team",
+        "away_team",
+        "league",
+        "country",
+        "market",
+        "market_family",
+        "match_id",
+        "provider_match_id",
+        "provider_competition_id",
+        "home_team_id",
+        "away_team_id",
+    )
+    readonly_fields = (
+        "created_at",
+        "updated_at",
+        "market_payload_pretty",
+        "fixture_payload_pretty",
+        "provider_merge_pretty",
+        "insights_pretty",
+        "risk_flags_pretty",
+    )
+    fieldsets = (
+        (
+            "Fixture",
+            {
+                "fields": (
+                    "cache_scope",
+                    "source",
+                    "match_date",
+                    "fixture",
+                    "home_team",
+                    "away_team",
+                    "league",
+                    "league_id",
+                    "country",
+                    "kickoff",
+                    "match_id",
+                    "provider_match_id",
+                    "provider_competition_id",
+                    "home_team_id",
+                    "away_team_id",
+                )
+            },
+        ),
+        (
+            "Market",
+            {
+                "fields": (
+                    "market",
+                    "market_family",
+                    "meaning",
+                    "raw_confidence",
+                    "confidence",
+                    "final_confidence",
+                    "odds",
+                    "ev",
+                    "odds_source",
+                    "eligible",
+                    "data_quality",
+                    "cache_version",
+                    "expires_at",
+                )
+            },
+        ),
+        (
+            "Debug Payloads",
+            {
+                "classes": ("collapse",),
+                "fields": (
+                    "risk_flags_pretty",
+                    "insights_pretty",
+                    "provider_merge_pretty",
+                    "market_payload_pretty",
+                    "fixture_payload_pretty",
+                ),
+            },
+        ),
+        ("Timestamps", {"fields": ("created_at", "updated_at")}),
+    )
+    actions = ("queue_refresh_for_selected_dates", "queue_cleanup_expired", "delete_expired")
+
+    def _pretty(self, value):
+        return format_html("<pre style='white-space:pre-wrap'>{}</pre>", json.dumps(value or {}, indent=2, sort_keys=True, default=str)[:50000])
+
+    @admin.display(description="Market Payload")
+    def market_payload_pretty(self, obj):
+        return self._pretty(obj.market_payload)
+
+    @admin.display(description="Fixture Payload")
+    def fixture_payload_pretty(self, obj):
+        return self._pretty(obj.fixture_payload)
+
+    @admin.display(description="Provider Merge")
+    def provider_merge_pretty(self, obj):
+        return self._pretty(obj.provider_merge)
+
+    @admin.display(description="Insights")
+    def insights_pretty(self, obj):
+        return self._pretty(obj.insights)
+
+    @admin.display(description="Risk Flags")
+    def risk_flags_pretty(self, obj):
+        return self._pretty(obj.risk_flags)
+
+    @admin.action(description="Queue private cache rebuild for selected dates")
+    def queue_refresh_for_selected_dates(self, request, queryset):
+        task_ids = []
+        dates = queryset.values_list("match_date", flat=True).distinct()
+        for match_date in dates:
+            task = build_slip_review_market_cache.delay(
+                start_date=match_date.isoformat(),
+                days=0,
+                sync_fixtures=False,
+                force=True,
+            )
+            task_ids.append(task.id)
+        messages.success(request, f"Queued {len(task_ids)} private cache rebuild task(s): {', '.join(task_ids)}")
+
+    @admin.action(description="Delete expired private cache rows")
+    def delete_expired(self, request, queryset):
+        deleted, _ = queryset.filter(expires_at__lte=timezone.now()).delete()
+        messages.success(request, f"Deleted {deleted} expired private cache row(s).")
+
+    @admin.action(description="Queue expired private cache cleanup")
+    def queue_cleanup_expired(self, request, queryset):
+        task = cleanup_slip_review_market_cache.delay()
+        messages.success(request, f"Queued private cache cleanup task: {task.id}")
 
 
 @admin.register(AlgoFixture)
