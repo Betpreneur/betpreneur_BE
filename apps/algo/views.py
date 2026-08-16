@@ -1973,6 +1973,130 @@ def _daily_picks_payload(target_date, request=None):
     }
 
 
+def _compact_daily_picks_payload(target_date, request=None):
+    algo_run = _latest_successful_run(target_date, prefetch=False)
+    if not algo_run:
+        return {
+            "date": target_date,
+            "published": False,
+            "no_bet": False,
+            "message": "Picks have not been published for this date.",
+            "run_id": None,
+            "posted_at": None,
+            "summary": {
+                "fixture_count": 0,
+                "market_count": 0,
+                "selected_pick_count": 0,
+                "picks_70_plus": 0,
+                "picks_65_plus": 0,
+                "markets_70_plus": 0,
+                "markets_65_plus": 0,
+            },
+            "fixtures": [],
+            "grouped_fixtures": {},
+        }
+
+    picks = sorted(
+        list(Pick.objects.filter(run=algo_run).exclude(market__in=EXCLUDED_MARKETS)),
+        key=_top_pick_sort_key,
+        reverse=True,
+    )
+    match_ids = [str(pick.match_id or "") for pick in picks if str(pick.match_id or "")]
+    backed_game_counts, backed_game_ids, _backed_markets = _bulk_game_back_context(match_ids, request)
+    fixture_by_match = {
+        str(fixture.match_id or ""): fixture
+        for fixture in AlgoFixture.objects.filter(run=algo_run, match_id__in=match_ids).only(
+            "fixture",
+            "home_team",
+            "away_team",
+            "home_logo",
+            "away_logo",
+            "league",
+            "league_logo",
+            "country",
+            "country_flag",
+            "round",
+            "league_type",
+            "kickoff",
+            "match_id",
+        )
+    }
+
+    fixtures = []
+    for pick in picks:
+        match_id = str(pick.match_id or "")
+        fixture = fixture_by_match.get(match_id)
+        home_team = fixture.home_team if fixture else pick.home_team
+        away_team = fixture.away_team if fixture else pick.away_team
+        home_logo = fixture.home_logo if fixture else ""
+        away_logo = fixture.away_logo if fixture else ""
+        pick_payload = _compact_pick_payload(
+            pick,
+            backed_game_counts=backed_game_counts,
+            backed_game_ids=backed_game_ids,
+        )
+        fixtures.append({
+            "fixture": fixture.fixture if fixture else pick.fixture,
+            "home_team": home_team,
+            "away_team": away_team,
+            "home_logo": home_logo,
+            "away_logo": away_logo,
+            "teams": {
+                "home": {"name": home_team, "logo": home_logo},
+                "away": {"name": away_team, "logo": away_logo},
+            },
+            "league": fixture.league if fixture else pick.league,
+            "league_logo": fixture.league_logo if fixture else "",
+            "competition_logo": fixture.league_logo if fixture else "",
+            "country": fixture.country if fixture else "",
+            "country_flag": fixture.country_flag if fixture else "",
+            "round": fixture.round if fixture else "",
+            "league_type": fixture.league_type if fixture else "",
+            "competition": fixture.league if fixture else pick.league,
+            "competition_info": {
+                "name": fixture.league if fixture else pick.league,
+                "logo": fixture.league_logo if fixture else "",
+                "country": fixture.country if fixture else "",
+                "country_flag": fixture.country_flag if fixture else "",
+            },
+            "kickoff": fixture.kickoff if fixture else pick.kickoff,
+            "match_id": match_id,
+            "backed_count": int(backed_game_counts.get(match_id, 0) or 0),
+            "backed_by_me": match_id in backed_game_ids,
+            "picks": [pick_payload],
+        })
+
+    top_pick = picks[0] if picks else None
+    return {
+        "date": target_date,
+        "published": bool(picks),
+        "no_bet": not bool(picks),
+        "message": (
+            "Published picks are available."
+            if picks
+            else "No bet today. The model scored the fixtures but did not find an edge strong enough to publish."
+        ),
+        "run_id": algo_run.id,
+        "posted_at": algo_run.created_at,
+        "summary": {
+            "fixture_count": len(fixtures),
+            "market_count": (algo_run.result or {}).get("market_count", 0),
+            "selected_pick_count": len(picks),
+            "top_pick_id": top_pick.id if top_pick else None,
+            "banker_count": sum(1 for pick in picks if _effective_pick_tier(pick) == Pick.Tier.BANKER),
+            "value_gem_count": sum(1 for pick in picks if _effective_pick_tier(pick) == Pick.Tier.VALUE_GEM),
+            "wild_card_count": sum(1 for pick in picks if _effective_pick_tier(pick) == Pick.Tier.WILD_CARD),
+            "picks_70_plus": sum(1 for pick in picks if pick.confidence >= 70),
+            "picks_65_plus": sum(1 for pick in picks if pick.confidence >= 65),
+            "markets_70_plus": (algo_run.result or {}).get("markets_70_plus", 0),
+            "markets_65_plus": (algo_run.result or {}).get("markets_65_plus", 0),
+        },
+        "strategy": (algo_run.result or {}).get("strategy_profile", {}),
+        "fixtures": fixtures,
+        "grouped_fixtures": _group_by_country_and_league(fixtures, "fixtures"),
+    }
+
+
 @extend_schema_view(
     list=extend_schema(
         summary="List algo runs",
@@ -2140,40 +2264,7 @@ class DailyPicksView(APIView):
         query.is_valid(raise_exception=True)
         target_date = query.validated_data.get("date") or timezone.localdate()
         if query.validated_data.get("view") == "compact":
-            payload = _daily_picks_payload(target_date, request)
-            compact_fixtures = []
-            for fixture in payload.get("fixtures") or []:
-                picks = fixture.get("picks") or []
-                compact_fixtures.append({
-                    "fixture": fixture.get("fixture", ""),
-                    "home_team": fixture.get("home_team", ""),
-                    "away_team": fixture.get("away_team", ""),
-                    "league": fixture.get("league", ""),
-                    "country": fixture.get("country", ""),
-                    "kickoff": fixture.get("kickoff", ""),
-                    "match_id": fixture.get("match_id", ""),
-                    "backed_count": fixture.get("backed_count", 0),
-                    "backed_by_me": fixture.get("backed_by_me", False),
-                    "picks": [
-                        {
-                            "id": pick.get("id"),
-                            "tier": pick.get("tier", ""),
-                            "market": pick.get("market", ""),
-                            "meaning": pick.get("meaning", ""),
-                            "confidence": pick.get("confidence"),
-                            "final_confidence": pick.get("final_confidence"),
-                            "odds": pick.get("odds"),
-                            "ev": pick.get("ev"),
-                            "status": pick.get("status", ""),
-                            "analysis_summary": pick.get("analysis_summary", ""),
-                            "backed_count": pick.get("backed_count", 0),
-                            "backed_by_me": pick.get("backed_by_me", False),
-                        }
-                        for pick in picks
-                    ],
-                })
-            payload = {**payload, "fixtures": compact_fixtures, "grouped_fixtures": _group_by_country_and_league(compact_fixtures, "fixtures")}
-            return _private_cached_response(payload, request=request)
+            return _private_cached_response(_compact_daily_picks_payload(target_date, request), request=request)
         return _private_cached_response(_daily_picks_payload(target_date, request), request=request)
 
 
