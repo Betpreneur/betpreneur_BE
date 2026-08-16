@@ -1044,6 +1044,75 @@ def _fixture_summaries_for_run(algo_run):
     return summaries
 
 
+def _fixture_summary_for_match(algo_run, match_id):
+    target_match_id = str(match_id or "").strip()
+    fixture = (
+        AlgoFixture.objects.filter(run=algo_run, match_id=target_match_id)
+        .only(
+            "fixture",
+            "home_team",
+            "away_team",
+            "home_logo",
+            "away_logo",
+            "league",
+            "league_logo",
+            "country",
+            "country_flag",
+            "round",
+            "league_type",
+            "kickoff",
+            "match_id",
+            "home_recent_form",
+            "away_recent_form",
+            "fixture_context",
+            "team_news",
+            "corner_profile",
+            "insights",
+            "source_payload",
+            "market_count",
+            "markets_70_plus",
+            "markets_65_plus",
+        )
+        .first()
+    )
+    if not fixture:
+        return None
+
+    markets = [
+        _market_prediction_payload(prediction)
+        for prediction in MarketPrediction.objects.filter(run=algo_run, match_id=target_match_id)
+        .select_related("selected_pick")
+        .order_by("-confidence", "-ev", "market")
+        if prediction.market not in EXCLUDED_MARKETS
+    ]
+    return {
+        "fixture": fixture.fixture,
+        "home_team": fixture.home_team,
+        "away_team": fixture.away_team,
+        "home_logo": fixture.home_logo,
+        "away_logo": fixture.away_logo,
+        "league": fixture.league,
+        "league_logo": fixture.league_logo,
+        "country": fixture.country,
+        "country_flag": fixture.country_flag,
+        "round": fixture.round,
+        "league_type": fixture.league_type,
+        "kickoff": fixture.kickoff,
+        "match_id": str(fixture.match_id or ""),
+        "home_recent_form": fixture.home_recent_form or {},
+        "away_recent_form": fixture.away_recent_form or {},
+        "fixture_context": fixture.fixture_context or {},
+        "team_news": fixture.team_news or {},
+        "corner_profile": fixture.corner_profile or {},
+        "insights": fixture.insights or {},
+        "source_payload": fixture.source_payload or {},
+        "market_count": fixture.market_count,
+        "markets_70_plus": fixture.markets_70_plus,
+        "markets_65_plus": fixture.markets_65_plus,
+        "markets": markets,
+    }
+
+
 def _bulk_game_back_context(match_ids, request=None):
     match_ids = [str(match_id or "") for match_id in match_ids if str(match_id or "")]
     if not match_ids:
@@ -1374,7 +1443,7 @@ def _all_games_payload(target_date, request=None):
 
 
 def _game_detail_payload(target_date, match_id, request=None):
-    algo_run = _latest_successful_run(target_date)
+    algo_run = _latest_successful_run(target_date, prefetch=False)
     if not algo_run:
         return {
             "date": target_date,
@@ -1385,15 +1454,13 @@ def _game_detail_payload(target_date, match_id, request=None):
         }
 
     target_match_id = str(match_id)
-    picks_by_match = _picks_by_match(algo_run)
-    fixture_summary = next(
-        (
-            item
-            for item in _fixture_summaries_for_run(algo_run)
-            if str(item.get("match_id") or "") == target_match_id
-        ),
-        None,
+    match_picks = list(
+        Pick.objects.filter(run=algo_run, match_id=target_match_id)
+        .exclude(market__in=EXCLUDED_MARKETS)
+        .order_by("-confidence", "-ev", "market")
     )
+    picks_by_match = {target_match_id: sorted(match_picks, key=_top_pick_sort_key, reverse=True)}
+    fixture_summary = _fixture_summary_for_match(algo_run, target_match_id)
     if not fixture_summary:
         match_picks = picks_by_match.get(target_match_id, [])
         if not match_picks:
