@@ -14,6 +14,7 @@ from decimal import Decimal
 
 import requests
 from django.conf import settings
+from django.db import close_old_connections
 from django.db.models import Count, Q
 from django.utils.dateparse import parse_datetime
 from django.utils import timezone
@@ -3531,19 +3532,24 @@ class AlgoRunnerService:
         ).exists()
 
     def score_fixture_for_slip_review_market_cache(self, cached: FixtureCache, *, force=False):
+        close_old_connections()
         match_id = str(cached.match_id or "").strip()
         if not match_id:
             return {"status": "failed", "error": "match_id_required"}
-        if not force and self._slip_review_cache_fresh(match_id):
-            return {
-                "status": "cached",
-                "match_id": match_id,
-                "fixture": cached.fixture,
-            }
+        try:
+            if not force and self._slip_review_cache_fresh(match_id):
+                return {
+                    "status": "cached",
+                    "match_id": match_id,
+                    "fixture": cached.fixture,
+                }
+        finally:
+            close_old_connections()
 
         target_date = cached.match_date
         performance_profile, strategy_profile = self._pipeline_profiles(target_date)
         try:
+            close_old_connections()
             with temporary_env(self._runner_env({
                 "OVERRIDE_DATE": target_date.isoformat(),
                 "ALGO_PERFORMANCE_PROFILE": json.dumps(performance_profile),
@@ -3571,6 +3577,7 @@ class AlgoRunnerService:
                 )
                 algo_runner.clear_runtime_caches()
         except Exception as exc:
+            close_old_connections()
             log.warning(
                 "Slip review private fixture scoring failed match_id=%s fixture=%r error=%s",
                 match_id,
@@ -3583,6 +3590,8 @@ class AlgoRunnerService:
                 "fixture": cached.fixture,
                 "error": str(exc)[:1000],
             }
+        finally:
+            close_old_connections()
 
         markets = summary.get("markets") or []
         return {
@@ -3629,6 +3638,8 @@ class AlgoRunnerService:
         total_available = queryset.count()
         if max_fixtures > 0:
             queryset = queryset[:max_fixtures]
+        fixtures = list(queryset)
+        close_old_connections()
 
         scored = cached = failed = 0
         market_count = 0
@@ -3636,8 +3647,9 @@ class AlgoRunnerService:
         family_counts = defaultdict(int)
         started_at = timezone.now()
         considered_limit = total_available if max_fixtures <= 0 else min(total_available, max_fixtures)
-        for index, fixture in enumerate(queryset, start=1):
+        for index, fixture in enumerate(fixtures, start=1):
             result = self.score_fixture_for_slip_review_market_cache(fixture, force=force)
+            close_old_connections()
             status_value = result.get("status")
             if status_value == "scored":
                 scored += 1
