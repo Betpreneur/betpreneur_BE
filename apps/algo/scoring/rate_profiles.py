@@ -139,7 +139,6 @@ class TeamRateProfileService:
         row = (
             StatPalFixtureSnapshot.objects.filter(
                 Q(provider_match_id=str(team_id)) | Q(provider_match_id__endswith=f":{team_id}"),
-                provider="statpal",
                 snapshot_type=StatPalFixtureSnapshot.SnapshotType.TEAM_STATS,
                 status="available",
             )

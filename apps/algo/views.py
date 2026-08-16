@@ -5672,6 +5672,15 @@ def _slip_review_progress(*, phase, total=0, completed=0, message="", **extra):
     return progress
 
 
+def _public_slip_review_error_message(error_code="analysis_failed"):
+    messages = {
+        "soft_time_limit_exceeded": "This selection took too long to analyse. Please retry in a moment.",
+        "analysis_failed": "We could not analyse this selection right now. Please retry in a moment.",
+        "failed": "Slip review failed. Please retry in a moment.",
+    }
+    return messages.get(str(error_code or ""), messages["analysis_failed"])
+
+
 def _publish_slip_review_event(review, event_type, payload=None):
     payload = _json_safe(payload or {})
     try:
@@ -6478,13 +6487,14 @@ def _slip_review_completed_leg_count(review):
 
 def _slip_review_leg_failure_result(index, selection, message, *, error_code="analysis_failed"):
     provider_payload = _json_safe((selection or {}).get("provider_payload") or {})
+    public_message = _public_slip_review_error_message(error_code)
     return {
         "match": (selection or {}).get("match", ""),
         "submitted_market": (selection or {}).get("market", ""),
         "market_taxonomy": _selection_market_descriptor(selection or {}, (selection or {}).get("market", "")).to_dict(),
         "status": "analysis_failed",
         "verdict": "not_assessed",
-        "message": str(message or "Slip leg analysis failed."),
+        "message": public_message,
         "provider": (selection or {}).get("provider", ""),
         "provider_payload": provider_payload,
         "fixture_resolution": {
@@ -6647,7 +6657,7 @@ def process_slip_review_leg_failure(review_id, index, selection, message, *, err
         completed=completed,
         message=f"Analysed {completed} of {total} selections.",
         last_completed_match=result.get("match") or (selection or {}).get("match"),
-        last_error=str(message or ""),
+        last_error=result.get("message") or _public_slip_review_error_message(error_code),
     )
     _publish_slip_review_event(
         review,
@@ -6658,7 +6668,7 @@ def process_slip_review_leg_failure(review_id, index, selection, message, *, err
             "match": result.get("match") or (selection or {}).get("match"),
             "market": result.get("submitted_market") or (selection or {}).get("market"),
             "game": _streamed_slip_review_game_payload(review, index, result).get("game"),
-            "error": str(message or ""),
+            "error": result.get("message") or _public_slip_review_error_message(error_code),
             "error_code": error_code,
             "completed": completed,
             "total": total,
@@ -6673,7 +6683,7 @@ def process_slip_review_leg_failure(review_id, index, selection, message, *, err
         error_code,
         message,
     )
-    return {"review_id": review_id, "index": index, "status": "failed", "result": result, "error": str(message or "")}
+    return {"review_id": review_id, "index": index, "status": "failed", "result": result, "error": result.get("message", "")}
 
 
 def process_slip_review_leg_analysis(review_id, index, selection, *, days=3):
@@ -7094,12 +7104,14 @@ def process_slip_review_import(review_id):
             }
         )
     except Exception as exc:
+        log.exception("Slip review import failed review=%s", review.id)
+        public_error = _public_slip_review_error_message("failed")
         review.status = SlipReview.Status.FAILED
-        review.summary = _empty_slip_summary("Slip import failed.", task_id=(review.summary or {}).get("task_id", ""), error=exc)
+        review.summary = _empty_slip_summary("Slip import failed.", task_id=(review.summary or {}).get("task_id", ""), error=public_error)
         review.summary["progress"] = _slip_review_progress(
             phase="failed",
             message="Slip review failed.",
-            error=str(exc),
+            error=public_error,
         )
         review.save(update_fields=["status", "summary", "updated_at"])
         _publish_slip_review_event(
@@ -7107,7 +7119,7 @@ def process_slip_review_import(review_id):
             "review.failed",
             {
                 "status": review.status,
-                "error": str(exc),
+                "error": public_error,
                 "progress": review.summary.get("progress") or {},
             },
         )
