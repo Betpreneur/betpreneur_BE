@@ -695,10 +695,47 @@ class SlipReviewPublicContractTests(SimpleTestCase):
             enhance=False,
         )
 
+        self.assertEqual(payload["status"], "completed")
         self.assertEqual(payload["ticket"]["user_picks"]["summary"]["review"], 1)
         self.assertEqual(payload["recommended_ticket"]["picks"][1]["action"], "review")
         self.assertFalse(payload["recommended_ticket"]["picks"][1]["included_in_estimate"])
         self.assertIn("needs changing", payload["ticket"]["verdict"]["title"])
+
+    def test_bettor_public_filters_provider_context_evidence(self):
+        result = _sample_replace_result()
+        result["statpal_context"] = {
+            "snapshots": {
+                "detailed_stats": {},
+                "injuries_suspensions": {},
+                "lineups": {},
+                "predictions": {},
+            },
+            "hydration_source": "statpal_daily_cache",
+            "snapshot_cache_status": "hit",
+        }
+        result["selected_market"]["advisory_evidence"] = {
+            "note": "StatPal context available: detailed_stats, injuries_suspensions, lineups, predictions."
+        }
+        result["selected_market"]["advisory_warnings"] = [
+            "StatPal context available: detailed_stats, injuries_suspensions, lineups, predictions."
+        ]
+        review = SimpleNamespace(id=37, source="sportybet", status="partial")
+
+        payload = _build_bettor_public_payload(
+            review,
+            _manual_review_summary([result])["public"],
+            enhance=False,
+        )
+
+        game = payload["games"][0]
+        joined = " ".join(
+            game["analysis"]["positive_evidence"]
+            + game["analysis"]["risk_evidence"]
+            + game["recommendation"]["why"]
+        )
+        self.assertNotIn("StatPal", joined)
+        self.assertNotIn("detailed_stats", joined)
+        self.assertNotIn("injuries_suspensions", joined)
 
     def test_public_confidence_label_matches_pick_band(self):
         self.assertEqual(_public_confidence_label(64), "Moderate")
@@ -889,6 +926,23 @@ class SlipReviewPayloadDbTests(TestCase):
         self.assertNotIn("technical_ref", payload["games"][0])
         self.assertNotIn("reason_codes", payload["games"][0])
 
+    def test_public_only_partial_review_is_reported_as_completed(self):
+        user = get_user_model().objects.create_user(username="partial-user")
+        summary = _manual_review_summary([_sample_replace_result(), _sample_market_not_found_without_score()])
+        review = SlipReview.objects.create(
+            user=user,
+            source=SlipReview.Source.SPORTYBET,
+            status=SlipReview.Status.PARTIAL,
+            title="SportyBet review",
+            summary=summary,
+        )
+
+        payload = _slip_review_payload(review, public_only=True)
+        compact = _compact_slip_review_list_payload(review)
+
+        self.assertEqual(payload["status"], SlipReview.Status.COMPLETED)
+        self.assertEqual(compact["status"], SlipReview.Status.COMPLETED)
+
     def test_full_api_review_payload_also_hides_api_usage(self):
         user = get_user_model().objects.create_user(username="tester2")
         summary = _manual_review_summary([_sample_replace_result()])
@@ -947,6 +1001,45 @@ class SlipReviewPayloadDbTests(TestCase):
         self.assertEqual(payload["progress"]["completed"], 1)
         self.assertEqual([event["id"] for event in payload["events"]], [second.id])
         self.assertEqual(payload["events"][0]["event_type"], "leg.completed")
+
+    def test_events_endpoint_maps_partial_to_completed(self):
+        user = get_user_model().objects.create_user(username="event-partial-user")
+        review = SlipReview.objects.create(
+            user=user,
+            source=SlipReview.Source.SPORTYBET,
+            status=SlipReview.Status.PARTIAL,
+            title="SportyBet review",
+            summary={
+                "progress": {
+                    "phase": "completed",
+                    "total": 2,
+                    "completed": 2,
+                    "percent": 100.0,
+                    "message": "Slip review completed.",
+                    "final_status": SlipReview.Status.PARTIAL,
+                }
+            },
+        )
+        event = SlipReviewEvent.objects.create(
+            review=review,
+            event_type="review.completed",
+            payload={
+                "status": SlipReview.Status.PARTIAL,
+                "progress": {"phase": "completed", "final_status": SlipReview.Status.PARTIAL},
+            },
+        )
+        client = APIClient()
+        client.force_authenticate(user=user)
+
+        response = client.get(f"/api/algo/slip-reviews/{review.id}/events/")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["status"], SlipReview.Status.COMPLETED)
+        self.assertEqual(payload["progress"]["final_status"], SlipReview.Status.COMPLETED)
+        self.assertEqual(payload["events"][0]["id"], event.id)
+        self.assertEqual(payload["events"][0]["payload"]["status"], SlipReview.Status.COMPLETED)
+        self.assertEqual(payload["events"][0]["payload"]["progress"]["final_status"], SlipReview.Status.COMPLETED)
 
     def test_streamed_leg_payload_contains_public_game_card(self):
         user = get_user_model().objects.create_user(username="stream-card")

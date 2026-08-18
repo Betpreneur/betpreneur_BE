@@ -4520,9 +4520,25 @@ def _period_or_family_line(selection, market_payload=None):
         return "This card market should be judged from fouls, cards, referee tendency and match intensity."
     if "shots_on_target" in family or "Shots On Target" in market:
         return "This shots-on-target market should be judged from attacking shot volume and defensive shot allowance."
-    if snapshots:
-        return f"StatPal context available: {', '.join(str(item) for item in snapshots[:4])}."
     return ""
+
+
+def _clean_public_slip_evidence_text(value):
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    lowered = text.lower()
+    if "statpal context available" in lowered:
+        return ""
+    if "statpal" in lowered and any(marker in lowered for marker in ("context", "snapshot", "available")):
+        return ""
+    if "snapshot" in lowered and any(marker in lowered for marker in ("available", "missing", "required")):
+        return ""
+    text = text.replace("StatPal-backed expected goals", "expected goals")
+    text = text.replace("StatPal-backed", "")
+    text = text.replace("StatPal", "").strip()
+    text = text.replace("_", " ")
+    return " ".join(text.split())
 
 
 def _stats_backed_evidence(selection, *, market_payload=None, include_context=True):
@@ -4551,7 +4567,7 @@ def _stats_backed_evidence(selection, *, market_payload=None, include_context=Tr
 
     raw_evidence = list((selection or {}).get("evidence") or (selection or {}).get("why") or [])
     for item in raw_evidence:
-        text = str(item or "").strip()
+        text = _clean_public_slip_evidence_text(item)
         lowered = text.lower()
         if not text:
             continue
@@ -4569,7 +4585,7 @@ def _stats_backed_evidence(selection, *, market_payload=None, include_context=Tr
 def _clean_bettor_evidence_items(items, *, limit=4):
     cleaned = []
     for item in items or []:
-        text = str(item or "").strip()
+        text = _clean_public_slip_evidence_text(item)
         lowered = text.lower()
         if not text:
             continue
@@ -4779,7 +4795,7 @@ def _build_bettor_public_payload(review, technical_public, *, enhance=False):
     payload = {
         "id": review.id,
         "source": review.source,
-        "status": review.status,
+        "status": _public_slip_review_status(review.status),
         "ticket": {
             "total_games": ticket_summary.get("total_legs") or len(games),
             "original_odds": user_ticket.get("combined_odds"),
@@ -4895,6 +4911,7 @@ def _enhance_bettor_public_with_deepseek(payload):
                         "Do not introduce Over 0.5, 1H Over 0.5, 2H Over 0.5, team Over 0.5, "
                         "or player shots/SOT Over 0.5 as replacement recommendations unless it is the user's submitted pick. "
                         "Do not use StatPal reference-price wording as evidence. Bettors need football stats, "
+                        "Do not mention StatPal, API-Football, snapshots, provider context, or internal source names. "
                         "such as expected goals, recent form, first-half/second-half profile, corners, cards, "
                         "shots, or the market-specific confidence already supplied. "
                         "Return strict valid JSON only."
@@ -4926,7 +4943,9 @@ def _enhance_bettor_public_with_deepseek(payload):
             if not update:
                 continue
             if update.get("user_pick_summary"):
-                game["user_pick"]["summary"] = str(update["user_pick_summary"]).strip()[:320]
+                summary_text = _clean_public_slip_evidence_text(update["user_pick_summary"])
+                if summary_text:
+                    game["user_pick"]["summary"] = summary_text[:320]
             if isinstance(update.get("positive_evidence"), list):
                 cleaned = _clean_bettor_evidence_items(update["positive_evidence"])
                 if cleaned:
@@ -4934,7 +4953,9 @@ def _enhance_bettor_public_with_deepseek(payload):
             if isinstance(update.get("risk_evidence"), list):
                 game["analysis"]["risk_evidence"] = _clean_bettor_evidence_items(update["risk_evidence"])
             if update.get("conclusion"):
-                game["analysis"]["conclusion"] = str(update["conclusion"]).strip()[:360]
+                conclusion = _clean_public_slip_evidence_text(update["conclusion"])
+                if conclusion:
+                    game["analysis"]["conclusion"] = conclusion[:360]
             if isinstance(update.get("recommendation_why"), list):
                 cleaned = _clean_deepseek_recommendation_why(game, update["recommendation_why"])
                 if cleaned:
@@ -5681,13 +5702,29 @@ def _public_slip_review_error_message(error_code="analysis_failed"):
     return messages.get(str(error_code or ""), messages["analysis_failed"])
 
 
+def _public_slip_review_status(value):
+    return SlipReview.Status.COMPLETED if value == SlipReview.Status.PARTIAL else value
+
+
+def _public_slip_review_progress(progress):
+    progress = dict(progress or {})
+    if progress.get("final_status"):
+        progress["final_status"] = _public_slip_review_status(progress.get("final_status"))
+    return progress
+
+
 def _publish_slip_review_event(review, event_type, payload=None):
     payload = _json_safe(payload or {})
+    public_payload = dict(payload)
+    if public_payload.get("status"):
+        public_payload["status"] = _public_slip_review_status(public_payload["status"])
+    if isinstance(public_payload.get("progress"), dict) and public_payload["progress"].get("final_status"):
+        public_payload["progress"] = _public_slip_review_progress(public_payload["progress"])
     try:
         event = SlipReviewEvent.objects.create(
             review=review,
             event_type=str(event_type or ""),
-            payload=payload,
+            payload=public_payload,
         )
         log.info(
             "Slip review event review=%s event=%s event_id=%s payload=%s",
@@ -5710,8 +5747,8 @@ def _publish_slip_review_event(review, event_type, payload=None):
             snapshot={
                 "type": "slip_review.snapshot",
                 "review_id": review.id,
-                "status": review.status,
-                "progress": ((review.summary or {}).get("progress") or {}),
+                "status": _public_slip_review_status(review.status),
+                "progress": _public_slip_review_progress((review.summary or {}).get("progress") or {}),
                 "latest_event_id": event.id,
                 "updated_at": review.updated_at.isoformat() if review.updated_at else "",
             },
@@ -5755,13 +5792,14 @@ def _set_slip_review_progress(review, *, phase, total=0, completed=0, message=""
     review.summary = summary
     if status:
         review.status = status
+    public_progress = _public_slip_review_progress(summary["progress"])
     slip_review_redis.store_snapshot(
         review.id,
         {
             "type": "slip_review.snapshot",
             "review_id": review.id,
-            "status": review.status,
-            "progress": summary["progress"],
+            "status": _public_slip_review_status(review.status),
+            "progress": public_progress,
             "latest_event_id": None,
             "updated_at": timezone.now().isoformat(),
         },
@@ -5775,8 +5813,8 @@ def _set_slip_review_progress(review, *, phase, total=0, completed=0, message=""
             review,
             "review.progress",
             {
-                "status": review.status,
-                "progress": summary["progress"],
+                "status": _public_slip_review_status(review.status),
+                "progress": public_progress,
             },
         )
     return summary["progress"]
@@ -5894,7 +5932,7 @@ def _compact_slip_review_list_payload(review):
     return {
         "id": review.id,
         "number_of_games": len(selections) or len(games),
-        "status": review.status,
+        "status": _public_slip_review_status(review.status),
         "picks": picks,
     }
 
@@ -5921,10 +5959,10 @@ def _slip_review_payload(review, *, include_selections=True, public_only=False):
                 {
                     "id": review.id,
                     "source": review.source,
-                    "status": review.status,
+                    "status": _public_slip_review_status(review.status),
                     "created_at": review.created_at,
                     "updated_at": review.updated_at,
-                    "progress": progress,
+                    "progress": _public_slip_review_progress(progress),
                     "latest_event_id": latest_event_id,
                 }
             )
@@ -5939,11 +5977,12 @@ def _slip_review_payload(review, *, include_selections=True, public_only=False):
                 public_payload,
                 enhance=False,
             )
+        bettor_payload = {**bettor_payload, "status": _public_slip_review_status(bettor_payload.get("status"))}
         return _api_response_payload(bettor_payload)
     payload = {
         "id": review.id,
         "source": review.source,
-        "status": review.status,
+        "status": _public_slip_review_status(review.status),
         "title": review.title,
         "summary": summary,
         "public": public_payload,
@@ -6869,7 +6908,7 @@ def finalize_slip_review_import_results(review_id, leg_results):
         total=len(results),
         completed=len(results),
         message="Slip review completed.",
-        final_status=review.status,
+        final_status=_public_slip_review_status(review.status),
     )
     review.summary = summary
     final_payload = _json_safe({**payload, "fanout_analysis": True})
@@ -6892,13 +6931,13 @@ def finalize_slip_review_import_results(review_id, leg_results):
         review,
         "review.completed",
         {
-            "status": review.status,
+            "status": _public_slip_review_status(review.status),
             "total": len(results),
             "completed": len(results),
             "progress": summary.get("progress") or {},
         },
     )
-    return _api_response_payload({"review_id": review.id, "status": review.status, **summary})
+    return _api_response_payload({"review_id": review.id, "status": _public_slip_review_status(review.status), **summary})
 
 
 def _leg_results_from_persisted_slip_selections(review):
@@ -7098,7 +7137,7 @@ def process_slip_review_import(review_id):
         return _api_response_payload(
             {
                 "review_id": review.id,
-                "status": review.status,
+                "status": _public_slip_review_status(review.status),
                 "fanout_task_id": getattr(workflow, "id", ""),
                 **(review.summary or {}),
             }
@@ -7154,7 +7193,7 @@ def fail_slip_review_import(review_id, message, *, error_code="failed"):
     return _api_response_payload(
         {
             "review_id": review.id,
-            "status": review.status,
+            "status": _public_slip_review_status(review.status),
             "error": message,
             "error_code": error_code,
             **(review.summary or {}),
@@ -7202,7 +7241,7 @@ class ManualSlipReviewView(APIView):
             _api_response_payload({
                 "id": review.id,
                 "source": review.source,
-                "status": review.status,
+                "status": _public_slip_review_status(review.status),
                 "public": summary.get("public", {}),
                 **summary,
                 "selections": safe_results,
@@ -7220,7 +7259,7 @@ class SportyBetSlipImportView(APIView):
             "Authenticated user endpoint. Accepts a SportyBet share URL/code or raw share payload, imports the booked "
             "football selections asynchronously, matches them against cached fixtures, analyses each selected market, "
             "and saves the review. Returns a queued review immediately; poll the review detail endpoint until the "
-            "status becomes completed, partial, or failed."
+            "status becomes completed or failed."
         ),
         tags=["Slip Reviews"],
         request=SportyBetSlipImportRequestSerializer,
@@ -7267,7 +7306,7 @@ class BetanoSlipImportView(APIView):
             "importer, captures the getbetslip payload, imports the booked football selections, matches them against "
             "cached fixtures, analyses each selected market, and saves the review asynchronously. A raw getbetslip "
             "payload can also be supplied as a fallback. Returns a queued review immediately; poll the review detail "
-            "endpoint until the status becomes completed, partial, or failed."
+            "endpoint until the status becomes completed or failed."
         ),
         tags=["Slip Reviews"],
         request=BetanoSlipImportRequestSerializer,
@@ -7680,13 +7719,29 @@ class SlipReviewDetailView(APIView):
 
 
 def _slip_review_event_payload(event):
+    payload = dict(event.payload or {})
+    if payload.get("status"):
+        payload["status"] = _public_slip_review_status(payload["status"])
+    if isinstance(payload.get("progress"), dict):
+        payload["progress"] = _public_slip_review_progress(payload["progress"])
     return {
         "id": event.id,
         "review_id": event.review_id,
         "event_type": event.event_type,
-        "payload": event.payload or {},
+        "payload": payload,
         "created_at": event.created_at.isoformat() if event.created_at else "",
     }
+
+
+def _public_slip_review_stream_event(event):
+    event = dict(event or {})
+    payload = dict(event.get("payload") or {})
+    if payload.get("status"):
+        payload["status"] = _public_slip_review_status(payload["status"])
+    if isinstance(payload.get("progress"), dict):
+        payload["progress"] = _public_slip_review_progress(payload["progress"])
+    event["payload"] = payload
+    return event
 
 
 class SlipReviewEventsView(APIView):
@@ -7716,7 +7771,7 @@ class SlipReviewEventsView(APIView):
         redis_snapshot = slip_review_redis.get_snapshot(review.id) or {}
         redis_events = slip_review_redis.get_events_after(review.id, after_id=after_id, limit=limit)
         if redis_events is not None:
-            events_payload = redis_events
+            events_payload = [_public_slip_review_stream_event(event) for event in redis_events]
             latest_event_id = (redis_snapshot or {}).get("latest_event_id")
             if latest_event_id is None and events_payload:
                 latest_event_id = events_payload[-1].get("id")
@@ -7731,8 +7786,10 @@ class SlipReviewEventsView(APIView):
             events_payload = [_slip_review_event_payload(event) for event in events]
         payload = {
             "review_id": review.id,
-            "status": review.status,
-            "progress": (redis_snapshot or {}).get("progress") or (review.summary or {}).get("progress") or {},
+            "status": _public_slip_review_status(review.status),
+            "progress": _public_slip_review_progress(
+                (redis_snapshot or {}).get("progress") or (review.summary or {}).get("progress") or {}
+            ),
             "latest_event_id": latest_event_id,
             "events": events_payload,
         }
