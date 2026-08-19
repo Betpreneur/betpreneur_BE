@@ -113,6 +113,8 @@ from .serializers import (
     MaintenanceRunResponseSerializer,
     SlipRepairRequestSerializer,
     SlipRepairResponseSerializer,
+    SlipReviewRandomizeRequestSerializer,
+    SlipReviewRandomizeResponseSerializer,
     SlipReviewRecapQuerySerializer,
     SlipReviewRecapResponseSerializer,
     SportyBetSlipImportRequestSerializer,
@@ -4774,6 +4776,7 @@ def _bettor_recommendation(selection):
     if action == "replace" and ai_pick.get("available"):
         pick = {
             "market": ai_pick.get("market"),
+            "odds": ai_pick.get("odds"),
             "confidence_score": _public_score(ai_pick.get("confidence_score")),
             "confidence_label": _public_confidence_label(ai_pick.get("confidence_score")),
         }
@@ -4781,6 +4784,7 @@ def _bettor_recommendation(selection):
         action = "keep" if _simple_pick_verdict(selection) == "keep" else "caution"
         pick = {
             "market": user_pick.get("market"),
+            "odds": user_pick.get("odds"),
             "confidence_score": _public_score(user_pick.get("confidence_score")),
             "confidence_label": _public_confidence_label(user_pick.get("confidence_score")),
         }
@@ -4803,6 +4807,192 @@ def _bettor_recommendation(selection):
         else:
             why = ["No confident recommendation is available from the current match data."]
     return {"action": action, "pick": pick, "why": why}
+
+
+SMART_RANDOMIZE_MIN_CONFIDENCE = 50.0
+
+
+def _smart_randomize_option_values(eligible_count):
+    count = int(eligible_count or 0)
+    if count < 2:
+        return []
+    options = list(range(2, count, 2))
+    return options or [2]
+
+
+def _smart_randomize_pick_for_game(game):
+    user_pick = (game or {}).get("user_pick") or {}
+    recommendation = (game or {}).get("recommendation") or {}
+    recommended_pick = recommendation.get("pick") or {}
+    candidates = []
+
+    user_confidence = _float_or_none(user_pick.get("confidence_score"))
+    user_verdict = str(user_pick.get("verdict") or "").lower()
+    if user_confidence is not None and user_verdict not in {"review", "unknown", "no_data"}:
+        candidates.append(
+            {
+                "source": "user_pick",
+                "action": recommendation.get("action") or user_verdict or "keep",
+                "market": user_pick.get("market"),
+                "odds": user_pick.get("odds"),
+                "confidence_score": user_confidence,
+                "confidence_label": _public_confidence_label(user_confidence),
+                "changed_from_user_pick": False,
+            }
+        )
+
+    recommended_confidence = _float_or_none(recommended_pick.get("confidence_score"))
+    if recommended_pick and recommended_confidence is not None:
+        action = recommendation.get("action") or "recommend"
+        changed = action == "replace" and not _market_matches(
+            recommended_pick.get("market"),
+            user_pick.get("market"),
+        )
+        candidates.append(
+            {
+                "source": "ai_pick" if changed else "user_pick",
+                "action": action,
+                "market": recommended_pick.get("market"),
+                "odds": recommended_pick.get("odds"),
+                "confidence_score": recommended_confidence,
+                "confidence_label": _public_confidence_label(recommended_confidence),
+                "changed_from_user_pick": changed,
+            }
+        )
+
+    if not candidates:
+        return None
+    pick = max(candidates, key=lambda item: (item["confidence_score"], 1 if item["source"] == "ai_pick" else 0))
+    if pick["confidence_score"] < SMART_RANDOMIZE_MIN_CONFIDENCE:
+        return None
+    return {
+        "id": (game or {}).get("id"),
+        "match": (game or {}).get("match"),
+        "kickoff": (game or {}).get("kickoff"),
+        **pick,
+    }
+
+
+def _smart_randomize_candidates(public_payload):
+    candidates = []
+    excluded = []
+    for game in (public_payload or {}).get("games") or []:
+        pick = _smart_randomize_pick_for_game(game)
+        if pick:
+            candidates.append(pick)
+        else:
+            excluded.append(
+                {
+                    "id": (game or {}).get("id"),
+                    "match": (game or {}).get("match"),
+                    "reason": "No analysed pick reached the minimum confidence for a generated ticket.",
+                }
+            )
+    return sorted(
+        candidates,
+        key=lambda item: (item.get("confidence_score") or 0, item.get("match") or ""),
+        reverse=True,
+    ), excluded
+
+
+def _smart_randomize_summary(public_payload):
+    candidates, _ = _smart_randomize_candidates(public_payload)
+    options = _smart_randomize_option_values(len(candidates))
+    return {
+        "available": bool(options),
+        "options": options,
+        "eligible_games": len(candidates),
+        "min_confidence_score": SMART_RANDOMIZE_MIN_CONFIDENCE,
+        "message": (
+            "Build a smaller ticket from the strongest analysed picks in this slip."
+            if options
+            else "Not enough analysed picks reached the minimum confidence for smart randomize."
+        ),
+    }
+
+
+def _smart_randomize_ticket(public_payload, requested_games):
+    requested = int(requested_games or 0)
+    candidates, excluded = _smart_randomize_candidates(public_payload)
+    options = _smart_randomize_option_values(len(candidates))
+    if requested not in options:
+        return None, {
+            "detail": "Choose one of the available smart randomize options.",
+            "available_options": options,
+            "eligible_games": len(candidates),
+        }
+
+    selected = candidates[:requested]
+    probabilities = [
+        max(1.0, min(95.0, float(item["confidence_score"]))) / 100.0
+        for item in selected
+        if item.get("confidence_score") is not None
+    ]
+    ticket_probability = None
+    ticket_confidence = None
+    if probabilities:
+        total = 1.0
+        for probability in probabilities:
+            total *= probability
+        ticket_probability = round(total * 100, 2) if total * 100 >= 0.01 else float(f"{total * 100:.4g}")
+        ticket_confidence = round(math.exp(sum(math.log(probability) for probability in probabilities) / len(probabilities)) * 100, 1)
+
+    odds_values = [_float_or_none(item.get("odds")) for item in selected]
+    odds_complete = all(value and value > 1 for value in odds_values)
+    selected_keys = {(item.get("id"), item.get("match"), item.get("market")) for item in selected}
+    return {
+        "review_id": (public_payload or {}).get("id"),
+        "requested_games": requested,
+        "available_options": options,
+        "ticket": {
+            "total_games": len(selected),
+            "confidence_score": _public_score(ticket_confidence),
+            "confidence_label": _public_ticket_label(ticket_confidence),
+            "estimated_success_percent": ticket_probability,
+            "estimated_success_display": _success_percent_display(ticket_probability),
+            "estimated_odds": _combined_odds(odds_values) if odds_complete else None,
+            "odds_complete": odds_complete,
+            "label": _public_ticket_label(ticket_confidence),
+        },
+        "picks": [
+            {
+                "id": item.get("id"),
+                "match": item.get("match"),
+                "kickoff": item.get("kickoff"),
+                "market": item.get("market"),
+                "odds": item.get("odds"),
+                "source": item.get("source"),
+                "action": item.get("action"),
+                "confidence_score": _public_score(item.get("confidence_score")),
+                "confidence_label": _public_confidence_label(item.get("confidence_score")),
+                "changed_from_user_pick": bool(item.get("changed_from_user_pick")),
+            }
+            for item in selected
+        ],
+        "excluded": excluded + [
+            {
+                "id": item.get("id"),
+                "match": item.get("match"),
+                "market": item.get("market"),
+                "confidence_score": _public_score(item.get("confidence_score")),
+                "reason": "Lower confidence than the selected smart-randomize picks.",
+            }
+            for item in candidates
+            if (item.get("id"), item.get("match"), item.get("market")) not in selected_keys
+        ],
+        "disclaimer": (
+            "Smart randomize selects the strongest analysed picks from this slip. "
+            "Confidence scores are statistical estimates and do not guarantee an outcome."
+        ),
+    }, None
+
+
+def _with_smart_randomize(public_payload):
+    payload = dict(public_payload or {})
+    if payload.get("status") in {"queued", "importing", "analysing"}:
+        return payload
+    payload["smart_randomize"] = _smart_randomize_summary(payload)
+    return payload
 
 
 def _build_bettor_public_payload(review, technical_public, *, enhance=False):
@@ -4940,7 +5130,7 @@ def _build_bettor_public_payload(review, technical_public, *, enhance=False):
                 game_count,
                 SLIP_REVIEW_DEEPSEEK_MAX_GAMES,
             )
-    return payload
+    return _with_smart_randomize(payload)
 
 
 def _streamed_slip_review_game_payload(review, index, result):
@@ -6079,6 +6269,7 @@ def _slip_review_payload(review, *, include_selections=True, public_only=False):
                 enhance=False,
             )
         bettor_payload = {**bettor_payload, "status": _public_slip_review_status(bettor_payload.get("status"))}
+        bettor_payload = _with_smart_randomize(bettor_payload)
         return _api_response_payload(bettor_payload)
     payload = {
         "id": review.id,
@@ -7577,6 +7768,50 @@ class SlipRepairView(APIView):
             changes=[decision.to_dict() for decision in plan.decisions],
         )
         return Response(_repair_payload(review, plan, repair), status=status.HTTP_201_CREATED)
+
+
+class SlipReviewRandomizeView(APIView):
+    permission_classes = [IsAuthenticated]
+    serializer_class = SlipReviewRandomizeResponseSerializer
+
+    @extend_schema(
+        summary="Build a smart randomized slip ticket",
+        description=(
+            "Authenticated user endpoint. After a slip review has completed, send the number of games "
+            "the user wants in the generated ticket. The backend deterministically returns the strongest "
+            "analysed picks from that slip; there are no modes or frontend-side ranking rules."
+        ),
+        tags=["Slip Reviews"],
+        request=SlipReviewRandomizeRequestSerializer,
+        responses={200: SlipReviewRandomizeResponseSerializer},
+    )
+    def post(self, request, review_id):
+        review = get_object_or_404(
+            SlipReview.objects.prefetch_related("selections"),
+            id=review_id,
+            user=request.user,
+        )
+        if review.status in {
+            SlipReview.Status.QUEUED,
+            SlipReview.Status.IMPORTING,
+            SlipReview.Status.ANALYSING,
+        }:
+            return Response(
+                {
+                    "detail": "Slip review is still being analysed.",
+                    "status": _public_slip_review_status(review.status),
+                    "progress": _public_slip_review_progress((review.summary or {}).get("progress") or {}),
+                },
+                status=status.HTTP_409_CONFLICT,
+            )
+
+        serializer = SlipReviewRandomizeRequestSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        public_payload = _slip_review_payload(review, include_selections=True, public_only=True)
+        ticket, error = _smart_randomize_ticket(public_payload, serializer.validated_data["games"])
+        if error:
+            return Response(error, status=status.HTTP_400_BAD_REQUEST)
+        return Response(_api_response_payload(ticket))
 
 
 class SlipReviewRecapView(APIView):

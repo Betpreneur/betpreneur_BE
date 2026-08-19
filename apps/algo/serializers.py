@@ -720,6 +720,24 @@ class SlipRepairResponseSerializer(serializers.Serializer):
     disclosure = serializers.CharField()
 
 
+class SlipReviewRandomizeRequestSerializer(serializers.Serializer):
+    games = serializers.IntegerField(
+        min_value=2,
+        max_value=100,
+        help_text="Number of strongest analysed games to build into the generated ticket.",
+    )
+
+
+class SlipReviewRandomizeResponseSerializer(serializers.Serializer):
+    review_id = serializers.IntegerField()
+    requested_games = serializers.IntegerField()
+    available_options = serializers.JSONField()
+    ticket = serializers.JSONField()
+    picks = serializers.JSONField()
+    excluded = serializers.JSONField(required=False)
+    disclaimer = serializers.CharField()
+
+
 class SlipReviewRecapQuerySerializer(serializers.Serializer):
     days = serializers.IntegerField(required=False, min_value=1, max_value=90, default=1)
 

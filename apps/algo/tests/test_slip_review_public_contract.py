@@ -897,6 +897,145 @@ class SlipReviewPublicContractTests(SimpleTestCase):
 
 
 class SlipReviewPayloadDbTests(TestCase):
+    def _randomize_review_payload(self):
+        games = [
+            {
+                "id": "a",
+                "match": "Alpha vs Beta",
+                "kickoff": "2026-08-20T18:00:00Z",
+                "user_pick": {
+                    "market": "Home Win",
+                    "odds": 1.55,
+                    "confidence_score": 72,
+                    "confidence_label": "Strong",
+                    "verdict": "keep",
+                    "summary": "Supported.",
+                },
+                "analysis": {"positive_evidence": [], "risk_evidence": [], "conclusion": ""},
+                "recommendation": {
+                    "action": "keep",
+                    "pick": {
+                        "market": "Home Win",
+                        "odds": 1.55,
+                        "confidence_score": 72,
+                        "confidence_label": "Strong",
+                    },
+                    "why": [],
+                },
+            },
+            {
+                "id": "b",
+                "match": "Gamma vs Delta",
+                "kickoff": "2026-08-20T19:00:00Z",
+                "user_pick": {
+                    "market": "Draw",
+                    "odds": 3.2,
+                    "confidence_score": 42,
+                    "confidence_label": "Low",
+                    "verdict": "risky",
+                    "summary": "Risky.",
+                },
+                "analysis": {"positive_evidence": [], "risk_evidence": [], "conclusion": ""},
+                "recommendation": {
+                    "action": "replace",
+                    "pick": {
+                        "market": "DC: X2",
+                        "odds": 1.42,
+                        "confidence_score": 80,
+                        "confidence_label": "Very Strong",
+                    },
+                    "why": [],
+                },
+            },
+            {
+                "id": "c",
+                "match": "Epsilon vs Zeta",
+                "kickoff": "2026-08-20T20:00:00Z",
+                "user_pick": {
+                    "market": "BTTS Yes",
+                    "odds": 1.8,
+                    "confidence_score": None,
+                    "confidence_label": "Unknown",
+                    "verdict": "review",
+                    "summary": "Needs review.",
+                },
+                "analysis": {"positive_evidence": [], "risk_evidence": [], "conclusion": ""},
+                "recommendation": {"action": "review", "pick": None, "why": []},
+            },
+            {
+                "id": "d",
+                "match": "Eta vs Theta",
+                "kickoff": "2026-08-20T21:00:00Z",
+                "user_pick": {
+                    "market": "Over 1.5",
+                    "odds": 1.35,
+                    "confidence_score": 65,
+                    "confidence_label": "Moderate",
+                    "verdict": "caution",
+                    "summary": "Playable.",
+                },
+                "analysis": {"positive_evidence": [], "risk_evidence": [], "conclusion": ""},
+                "recommendation": {
+                    "action": "caution",
+                    "pick": {
+                        "market": "Over 1.5",
+                        "odds": 1.35,
+                        "confidence_score": 65,
+                        "confidence_label": "Moderate",
+                    },
+                    "why": [],
+                },
+            },
+            {
+                "id": "e",
+                "match": "Iota vs Kappa",
+                "kickoff": "2026-08-20T22:00:00Z",
+                "user_pick": {
+                    "market": "Under 3.5",
+                    "odds": 1.44,
+                    "confidence_score": 55,
+                    "confidence_label": "Borderline",
+                    "verdict": "risky",
+                    "summary": "Borderline.",
+                },
+                "analysis": {"positive_evidence": [], "risk_evidence": [], "conclusion": ""},
+                "recommendation": {"action": "caution", "pick": None, "why": []},
+            },
+            {
+                "id": "f",
+                "match": "Lambda vs Mu",
+                "kickoff": "2026-08-20T23:00:00Z",
+                "user_pick": {
+                    "market": "Away Win",
+                    "odds": 1.62,
+                    "confidence_score": 78,
+                    "confidence_label": "Strong",
+                    "verdict": "keep",
+                    "summary": "Strong.",
+                },
+                "analysis": {"positive_evidence": [], "risk_evidence": [], "conclusion": ""},
+                "recommendation": {
+                    "action": "keep",
+                    "pick": {
+                        "market": "Away Win",
+                        "odds": 1.62,
+                        "confidence_score": 78,
+                        "confidence_label": "Strong",
+                    },
+                    "why": [],
+                },
+            },
+        ]
+        return {
+            "id": 999,
+            "source": "sportybet",
+            "status": "completed",
+            "ticket": {"total_games": len(games)},
+            "games": games,
+            "recommended_ticket": {"picks": []},
+            "disclaimer": "Confidence scores are estimates.",
+        }
+
     def test_public_only_review_payload_is_minimal_while_analysing(self):
         user = get_user_model().objects.create_user(username="progress")
         review = SlipReview.objects.create(
@@ -952,6 +1091,86 @@ class SlipReviewPayloadDbTests(TestCase):
         self.assertNotIn("api_usage", payload)
         self.assertNotIn("technical_ref", payload["games"][0])
         self.assertNotIn("reason_codes", payload["games"][0])
+
+    def test_public_only_review_payload_exposes_smart_randomize_options(self):
+        user = get_user_model().objects.create_user(username="randomize-options")
+        review = SlipReview.objects.create(
+            user=user,
+            source=SlipReview.Source.SPORTYBET,
+            status=SlipReview.Status.COMPLETED,
+            title="SportyBet review",
+            summary={"bettor_public": self._randomize_review_payload()},
+        )
+
+        payload = _slip_review_payload(review, public_only=True)
+
+        self.assertTrue(payload["smart_randomize"]["available"])
+        self.assertEqual(payload["smart_randomize"]["eligible_games"], 5)
+        self.assertEqual(payload["smart_randomize"]["options"], [2, 4])
+
+    def test_randomize_endpoint_returns_top_requested_picks(self):
+        user = get_user_model().objects.create_user(username="randomize-user")
+        review = SlipReview.objects.create(
+            user=user,
+            source=SlipReview.Source.SPORTYBET,
+            status=SlipReview.Status.COMPLETED,
+            title="SportyBet review",
+            summary={"bettor_public": self._randomize_review_payload()},
+        )
+        client = APIClient()
+        client.force_authenticate(user=user)
+
+        response = client.post(f"/api/algo/slip-reviews/{review.id}/randomize/", {"games": 4}, format="json")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["requested_games"], 4)
+        self.assertEqual(payload["available_options"], [2, 4])
+        self.assertEqual([pick["match"] for pick in payload["picks"]], [
+            "Gamma vs Delta",
+            "Lambda vs Mu",
+            "Alpha vs Beta",
+            "Eta vs Theta",
+        ])
+        self.assertEqual(payload["picks"][0]["market"], "DC: X2")
+        self.assertTrue(payload["picks"][0]["changed_from_user_pick"])
+        self.assertEqual(payload["ticket"]["total_games"], 4)
+        self.assertGreater(payload["ticket"]["confidence_score"], 70)
+        self.assertTrue(any(item["match"] == "Epsilon vs Zeta" for item in payload["excluded"]))
+
+    def test_randomize_endpoint_rejects_unavailable_size(self):
+        user = get_user_model().objects.create_user(username="randomize-size")
+        review = SlipReview.objects.create(
+            user=user,
+            source=SlipReview.Source.SPORTYBET,
+            status=SlipReview.Status.COMPLETED,
+            title="SportyBet review",
+            summary={"bettor_public": self._randomize_review_payload()},
+        )
+        client = APIClient()
+        client.force_authenticate(user=user)
+
+        response = client.post(f"/api/algo/slip-reviews/{review.id}/randomize/", {"games": 6}, format="json")
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["available_options"], [2, 4])
+
+    def test_randomize_endpoint_waits_for_analysis_to_finish(self):
+        user = get_user_model().objects.create_user(username="randomize-progress")
+        review = SlipReview.objects.create(
+            user=user,
+            source=SlipReview.Source.SPORTYBET,
+            status=SlipReview.Status.ANALYSING,
+            title="SportyBet review",
+            summary={},
+        )
+        client = APIClient()
+        client.force_authenticate(user=user)
+
+        response = client.post(f"/api/algo/slip-reviews/{review.id}/randomize/", {"games": 2}, format="json")
+
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.json()["status"], "analysing")
 
     def test_public_only_partial_review_is_reported_as_completed(self):
         user = get_user_model().objects.create_user(username="partial-user")
