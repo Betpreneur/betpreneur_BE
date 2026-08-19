@@ -614,6 +614,33 @@ class SlipReviewPublicContractTests(SimpleTestCase):
         self.assertNotIn("reason_codes", game)
         self.assertEqual(payload["recommended_ticket"]["picks"][0]["match"], game["match"])
 
+    def test_bettor_public_payload_displays_tiny_success_percent(self):
+        review = SimpleNamespace(id=38, source="sportybet", status="completed")
+        payload = _build_bettor_public_payload(
+            review,
+            {
+                "ticket_summary": {
+                    "total_legs": 36,
+                    "pick_breakdown": {},
+                    "user_ticket": {
+                        "overall_confidence_score": 59,
+                        "estimated_success_percent": 0.00042,
+                    },
+                    "ai_ticket": {
+                        "overall_confidence_score": 65,
+                        "estimated_success_percent": 0.0042,
+                    },
+                    "improvement": {},
+                },
+                "selections": [],
+            },
+            enhance=False,
+        )
+
+        self.assertEqual(payload["ticket"]["user_picks"]["estimated_success_display"], "<0.01%")
+        self.assertEqual(payload["ticket"]["recommended_picks"]["estimated_success_display"], "<0.01%")
+        self.assertEqual(payload["recommended_ticket"]["estimated_success_display"], "<0.01%")
+
     def test_market_not_found_with_replacement_counts_as_analysed(self):
         summary = _manual_review_summary([_sample_market_not_found_with_replacement()])
         public = summary["public"]

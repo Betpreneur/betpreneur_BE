@@ -10,8 +10,10 @@ from apps.algo.views import (
     _blocked_slip_recommendation_market,
     _market_can_skip_core_on_demand,
     _manual_verdict,
+    _public_market_pick,
     _replacement_market_for_slip,
     _submitted_market_payload,
+    _with_statpal_advisory,
     _with_market_capability,
 )
 from apps.algo.market_taxonomy import describe_market
@@ -80,6 +82,44 @@ class UserPickAdvisoryTests(SimpleTestCase):
         self.assertEqual(submitted["market_capability"]["data_quality"], "medium")
         self.assertEqual(submitted["market_capability"]["confidence_cap"], 75)
         self.assertNotIn("no_expected_goals_available", submitted["market_capability"]["warnings"])
+
+    def test_statpal_score_replaces_unscored_cached_market(self):
+        market = {
+            "market": "Over 1.5",
+            "confidence": None,
+            "final_confidence": None,
+            "raw_confidence": None,
+            "advisory_score": 0,
+            "advisory_status": "avoid",
+            "advisory_basis": "match_specific_analysis",
+            "advisory_evidence": {},
+        }
+
+        upgraded = _with_statpal_advisory(
+            market,
+            {
+                "available": True,
+                "score": 72,
+                "status": "strong",
+                "basis": "statpal_goal_market_model",
+                "warnings": [],
+                "evidence": {
+                    "estimated_probability": 72,
+                    "expected_total_goals": 2.8,
+                },
+            },
+        )
+
+        self.assertEqual(upgraded["advisory_score"], 72)
+        self.assertEqual(upgraded["advisory_status"], "playable")
+        self.assertEqual(upgraded["advisory_evidence"]["statpal_merge_mode"], "primary")
+
+    def test_public_market_pick_exposes_confidence_score(self):
+        pick = _public_market_pick({"market": "Over 1.5", "advisory_score": 68})
+
+        self.assertEqual(pick["confidence_score"], 68)
+        self.assertEqual(pick["confidence_label"], "Moderate")
+        self.assertEqual(pick["score"], 68)
 
     def test_user_pick_is_not_replaced_unless_alternative_is_clearly_better(self):
         selected = {

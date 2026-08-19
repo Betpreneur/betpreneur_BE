@@ -428,6 +428,54 @@ class StatPalAdvisoryUnitTests(SimpleTestCase):
         self.assertEqual(result["evidence"]["market_family"], "match_result")
         self.assertGreater(result["evidence"]["estimated_probability"], 45)
 
+    def test_match_result_uses_prediction_percentages_when_expected_goals_missing(self):
+        descriptor = describe_market("Home Win")
+        fixture = {
+            "statpal_context": {
+                "available": True,
+                "snapshots": {
+                    "predictions": {
+                        "summary": {
+                            "home_win_percent": 61.5,
+                            "draw_percent": 23.0,
+                            "away_win_percent": 15.5,
+                        }
+                    }
+                },
+            }
+        }
+
+        result = statpal_market_advisory._score_matrix_fallback(descriptor, fixture=fixture)
+
+        self.assertTrue(result["available"])
+        self.assertEqual(result["basis"], "statpal_prediction_percentages")
+        self.assertEqual(result["score"], 61.5)
+        self.assertEqual(result["evidence"]["estimated_probability"], 61.5)
+
+    def test_double_chance_uses_prediction_percentages_when_expected_goals_missing(self):
+        descriptor = describe_market("DC: X2")
+        fixture = {
+            "statpal_context": {
+                "available": True,
+                "snapshots": {
+                    "predictions": {
+                        "summary": {
+                            "home_win_percent": 39.0,
+                            "draw_percent": 26.0,
+                            "away_win_percent": 35.0,
+                        }
+                    }
+                },
+            }
+        }
+
+        result = statpal_market_advisory._score_matrix_fallback(descriptor, fixture=fixture)
+
+        self.assertTrue(result["available"])
+        self.assertEqual(result["basis"], "statpal_prediction_percentages")
+        self.assertEqual(result["score"], 61.0)
+        self.assertEqual(result["evidence"]["estimated_probability"], 61.0)
+
     def test_snapshot_odds_payload_adds_positive_value_evidence(self):
         descriptor = describe_market("Over 2.5")
         fixture = {

@@ -113,6 +113,17 @@ def _prior_probability(score: float) -> float:
     return 0.5 + (naive - 0.5) * PRIOR_TRUST
 
 
+def _ticket_success_percent(probability: float) -> float:
+    percent = max(0.0, min(1.0, probability)) * 100
+    if percent == 0:
+        return 0.0
+    if percent >= 0.01:
+        return round(percent, 2)
+    # Long accumulators can be genuinely below 0.01%; keep significant digits so
+    # the API does not report a non-zero probability as exactly 0.0.
+    return float(f"{percent:.4g}")
+
+
 @dataclass(frozen=True)
 class Calibration:
     basis: str
@@ -330,7 +341,7 @@ class TicketRiskService:
         geometric_mean = math.exp(sum(math.log(p) for p in probabilities) / len(probabilities))
 
         return TicketRisk(
-            success_percent=round(ticket_probability * 100, 2),
+            success_percent=_ticket_success_percent(ticket_probability),
             health_percent=round(geometric_mean * 100, 1),
             assessed_legs=len(probabilities),
             unassessed_legs=len(items) - len(probabilities),
@@ -338,7 +349,7 @@ class TicketRiskService:
             legs=resolved,
             killers=_killers(resolved, items),
             calibration=calibration,
-            repaired_success_percent=round(min(1.0, repaired_probability * correlation.factor) * 100, 2),
+            repaired_success_percent=_ticket_success_percent(repaired_probability * correlation.factor),
             correlation=correlation.to_dict(),
         )
 

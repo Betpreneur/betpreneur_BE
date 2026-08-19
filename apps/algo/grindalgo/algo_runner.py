@@ -3037,13 +3037,11 @@ def _market_evidence(pick):
     return f"Recent team context: {_format_form_line('Home', home)}. {_format_form_line('Away', away)}."
 
 def pick_reasoning(pick):
-    edge_note = "real market odds" if pick.get("odds_is_real") else "estimated odds"
     ev_text = f"{pick.get('ev'):+.3f} expected value" if pick.get("ev") is not None else "unpriced expected value"
     return (
         f"{pick.get('market')} rates at {pick.get('conf')}% confidence with "
         f"{pick.get('odds')} odds and {ev_text}. "
-        f"{_market_evidence(pick)} "
-        f"Pricing is based on {edge_note}."
+        f"{_market_evidence(pick)}"
     )
 
 def pick_verdict(pick):

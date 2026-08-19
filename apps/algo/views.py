@@ -6,6 +6,7 @@ import dataclasses
 import logging
 import math
 import os
+import re
 import secrets
 import time
 from decimal import Decimal, InvalidOperation
@@ -701,10 +702,17 @@ def _market_evidence_for_game(market, item):
     )
 
 
+def _public_reasoning_text(value):
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    text = re.sub(r"(?:^|\s+)Pricing is based on [^.]+ odds\.", " ", text, flags=re.IGNORECASE)
+    return " ".join(text.split())
+
+
 def _market_reasoning_for_game(market, item):
     ev = market.get("ev")
     ev_text = f"{ev:+.3f} expected value" if ev is not None else "no priced EV"
-    odds_source = market.get("odds_source") or "unknown"
     final_confidence = market.get("final_confidence") or market.get("confidence")
     raw_confidence = market.get("confidence")
     confidence_text = (
@@ -715,8 +723,7 @@ def _market_reasoning_for_game(market, item):
     return (
         f"{market.get('market')} rates at {confidence_text} with "
         f"{market.get('odds')} odds and {ev_text}. "
-        f"{_market_evidence_for_game(market, item)} "
-        f"Pricing is based on {odds_source} odds."
+        f"{_market_evidence_for_game(market, item)}"
     )
 
 
@@ -780,7 +787,7 @@ def _normalise_fixture_markets(item, picks_by_match, request=None, user_backed_m
         payload["market_backed_count"] = _back_count(match_id, payload.get("market")) if match_id else 0
         payload["backed_by_me"] = payload.get("market") in user_backed_markets
         payload.update(_apply_council_recommendation_gate(payload))
-        payload["reasoning"] = _market_reasoning_for_game(payload, item)
+        payload["reasoning"] = _public_reasoning_text(_market_reasoning_for_game(payload, item))
         payload["model_verdict"] = _market_verdict_for_game(payload)
         payload["display_score"] = round(_market_display_score(payload)[0], 3)
         markets.append(payload)
@@ -900,7 +907,7 @@ def _game_summary_from_fixture(
             "top_market": top_market,
             "best_market": top_market,
             "recommended_market": recommended_market,
-            "reasoning": (recommended_market or top_market or {}).get("reasoning", ""),
+            "reasoning": _public_reasoning_text((recommended_market or top_market or {}).get("reasoning", "")),
             "model_verdict": (recommended_market or top_market or {}).get("model_verdict", ""),
         }
     return payload
@@ -1743,7 +1750,7 @@ def _pick_detail_payload(pick, request=None):
         },
         "model_summary": {
             "meaning": pick.meaning,
-            "reasoning": pick.reasoning,
+            "reasoning": _public_reasoning_text(pick.reasoning),
             "model_verdict": pick_data.get("model_verdict", pick.model_verdict),
             "risk_flags": pick.risk_flags,
             "insights": pick_data.get("insights", {}),
@@ -2570,9 +2577,26 @@ def _with_statpal_advisory(market, statpal_advisory):
     if score is None:
         return market
     payload = dict(market)
-    current_score = _float_or_none(payload.get("advisory_score")) or 0
-    adjustment = max(-6.0, min(6.0, (score - 55.0) * 0.20))
-    adjusted_score = round(max(0, min(100, current_score + adjustment)), 1)
+    review = payload.get("council_review") or {}
+    has_core_confidence = any(
+        _float_or_none(value) is not None
+        for value in (
+            review.get("final_confidence"),
+            review.get("consensus_score"),
+            payload.get("final_confidence"),
+            payload.get("confidence"),
+            payload.get("raw_confidence"),
+        )
+    )
+    current_score = _float_or_none(payload.get("advisory_score"))
+    if not has_core_confidence or current_score is None:
+        adjustment = 0.0
+        adjusted_score = round(max(0, min(100, score)), 1)
+        merge_mode = "primary"
+    else:
+        adjustment = max(-6.0, min(6.0, (score - 55.0) * 0.20))
+        adjusted_score = round(max(0, min(100, current_score + adjustment)), 1)
+        merge_mode = "adjustment"
     payload["advisory_score"] = adjusted_score
     payload["advisory_status"] = _match_checker_status(adjusted_score)
     payload["statpal_advisory"] = statpal_advisory
@@ -2583,6 +2607,7 @@ def _with_statpal_advisory(market, statpal_advisory):
     evidence = dict(payload.get("advisory_evidence") or {})
     evidence["statpal_score"] = score
     evidence["statpal_adjustment"] = adjustment
+    evidence["statpal_merge_mode"] = merge_mode
     evidence["statpal_basis"] = statpal_advisory.get("basis")
     evidence["statpal"] = statpal_advisory.get("evidence") or {}
     payload["advisory_evidence"] = evidence
@@ -3462,6 +3487,17 @@ def _fair_odds(probability):
     return round(1 / parsed, 2)
 
 
+def _success_percent_display(value):
+    parsed = _float_or_none(value)
+    if parsed is None:
+        return None
+    if parsed == 0:
+        return "0%"
+    if 0 < parsed < 0.01:
+        return "<0.01%"
+    return f"{round(parsed, 2)}%"
+
+
 def _implied_probability_from_odds(odds):
     parsed = _float_or_none(odds)
     if parsed is None or parsed <= 1:
@@ -3743,6 +3779,8 @@ def _public_market_pick(market, *, fallback_market="", fallback_odds=None):
         "label": market_name,
         "meaning": (market or {}).get("meaning") or _public_market_meaning(market_name),
         "confidence": (market or {}).get("final_confidence") or (market or {}).get("confidence"),
+        "confidence_score": score,
+        "confidence_label": _public_confidence_label(score),
         "odds": _float_or_none((market or {}).get("odds")) if market else fallback_odds,
         "score": score,
         "decision_score": score,
@@ -4803,6 +4841,7 @@ def _build_bettor_public_payload(review, technical_public, *, enhance=False):
                 "confidence_score": _public_score(user_ticket.get("overall_confidence_score")),
                 "label": _public_ticket_label(user_ticket.get("overall_confidence_score")),
                 "estimated_success_percent": user_ticket.get("estimated_success_percent"),
+                "estimated_success_display": _success_percent_display(user_ticket.get("estimated_success_percent")),
                 "summary": {
                     "strong": int(breakdown.get("strong") or 0),
                     "playable": int(breakdown.get("playable") or 0),
@@ -4814,6 +4853,7 @@ def _build_bettor_public_payload(review, technical_public, *, enhance=False):
                 "confidence_score": _public_score(ai_ticket.get("overall_confidence_score")),
                 "label": _public_ticket_label(ai_ticket.get("overall_confidence_score")),
                 "estimated_success_percent": ai_ticket.get("estimated_success_percent"),
+                "estimated_success_display": _success_percent_display(ai_ticket.get("estimated_success_percent")),
                 "estimated_odds": ai_ticket.get("combined_odds"),
                 "changes": changes,
             },
@@ -4824,6 +4864,7 @@ def _build_bettor_public_payload(review, technical_public, *, enhance=False):
             "confidence_score": _public_score(ai_ticket.get("overall_confidence_score")),
             "confidence_label": _public_ticket_label(ai_ticket.get("overall_confidence_score")),
             "estimated_success_percent": ai_ticket.get("estimated_success_percent"),
+            "estimated_success_display": _success_percent_display(ai_ticket.get("estimated_success_percent")),
             "estimated_odds": ai_ticket.get("combined_odds"),
             "picks": recommended_picks,
         },
@@ -5195,6 +5236,7 @@ def _slip_intelligence(results):
             "unmatched_legs": len([item for item in enriched if _selection_is_unmatched(item)]),
             "expired_legs": len(expired_items),
             "estimated_success_percent": ticket_risk.success_percent,
+            "estimated_success_display": _success_percent_display(ticket_risk.success_percent),
             "risk_tiers": ticket_risk.tier_counts,
             "assessed_legs_in_estimate": ticket_risk.assessed_legs,
             "legs_excluded_from_estimate": ticket_risk.unassessed_legs,
@@ -5209,6 +5251,7 @@ def _slip_intelligence(results):
             "user_ticket": {
                 "overall_confidence_score": overall_score,
                 "estimated_success_percent": original_success,
+                "estimated_success_display": _success_percent_display(original_success),
                 "risk_level": risk_level,
                 "label": _ticket_health_label(overall_score),
                 "combined_odds": original_combined,
@@ -5217,6 +5260,7 @@ def _slip_intelligence(results):
             "ai_ticket": {
                 "overall_confidence_score": repaired_confidence_score,
                 "estimated_success_percent": optimized_success,
+                "estimated_success_display": _success_percent_display(optimized_success),
                 "risk_level": _ticket_risk_level_from_score(repaired_confidence_score),
                 "label": "Improved" if confidence_change is not None and confidence_change > 0 else _ticket_health_label(repaired_confidence_score),
                 "combined_odds": suggested_combined,
@@ -8206,7 +8250,7 @@ def _official_pick_from_back(back, fixture=None, prediction=None):
         "tier": snapshot.get("selected_tier") or snapshot.get("suggested_tier") or "",
         "market": market,
         "meaning": back.meaning or snapshot.get("meaning", ""),
-        "reasoning": snapshot.get("reasoning", ""),
+        "reasoning": _public_reasoning_text(snapshot.get("reasoning", "")),
         "model_verdict": snapshot.get("model_verdict", ""),
         "risk_flags": snapshot.get("risk_flags") or [],
         "confidence": back.confidence if back.confidence is not None else snapshot.get("confidence"),
@@ -8247,7 +8291,7 @@ def _backed_market_payload(back, fixture=None, prediction=None):
         "confidence": back.confidence if back.confidence is not None else backed_pick.get("confidence"),
         "final_confidence": back.final_confidence if back.final_confidence is not None else backed_pick.get("final_confidence"),
         "risk_flags": snapshot.get("risk_flags") or backed_pick.get("risk_flags") or [],
-        "reasoning": snapshot.get("reasoning") or backed_pick.get("reasoning", ""),
+        "reasoning": _public_reasoning_text(snapshot.get("reasoning") or backed_pick.get("reasoning", "")),
         "model_verdict": snapshot.get("model_verdict") or backed_pick.get("model_verdict", ""),
         "council_review": snapshot.get("council_review") or backed_pick.get("council_review") or {},
         "recommendation_status": snapshot.get("recommendation_status", ""),

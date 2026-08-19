@@ -569,9 +569,79 @@ class StatPalMarketAdvisoryService:
             return None
         return payload
 
+    def _prediction_percentage_fallback(self, descriptor: MarketDescriptor, *, fixture=None, provider_payload=None) -> StatPalAdvisory | None:
+        if descriptor.family not in {"match_result", "double_chance", "draw_no_bet"}:
+            return None
+        predictions = (self._statpal_summaries(fixture or {}).get("predictions") or {})
+        home = _num(predictions.get("home_win_percent"), None)
+        draw = _num(predictions.get("draw_percent"), None)
+        away = _num(predictions.get("away_win_percent"), None)
+        if home is None or draw is None or away is None:
+            return None
+
+        if descriptor.family == "match_result":
+            probability = {"home": home, "draw": draw, "away": away}.get(descriptor.side)
+        elif descriptor.family == "double_chance":
+            probability = {
+                "home_or_draw": home + draw,
+                "draw_or_away": draw + away,
+                "home_or_away": home + away,
+            }.get(descriptor.side)
+        else:
+            if descriptor.side == "home":
+                denominator = home + away
+                probability = (home / denominator * 100) if denominator else None
+            elif descriptor.side == "away":
+                denominator = home + away
+                probability = (away / denominator * 100) if denominator else None
+            else:
+                probability = None
+
+        if probability is None:
+            return None
+        probability = round(max(0, min(100, probability)), 1)
+        payload = {
+            "available": True,
+            "score": probability,
+            "status": _status(probability),
+            "basis": "statpal_prediction_percentages",
+            "evidence": {
+                "market_family": descriptor.family,
+                "estimated_probability": probability,
+                "home_win_percent": home,
+                "draw_percent": draw,
+                "away_win_percent": away,
+                "recognized": True,
+            },
+            "warnings": ["score_matrix_fit_missing", "prediction_percentage_fallback"],
+        }
+        payload = self._apply_odds_overlay(
+            payload,
+            descriptor=descriptor,
+            fixture=fixture,
+            provider_payload=provider_payload,
+        )
+        score = round(max(0, min(100, _num(payload.get("score"), probability))), 1)
+        return StatPalAdvisory(
+            available=True,
+            score=score,
+            status=_status(score),
+            basis="statpal_prediction_percentages",
+            evidence=payload.get("evidence") or {},
+            warnings=payload.get("warnings") or [],
+            message=f"Statistical prediction support for {descriptor.canonical or descriptor.raw} is about {probability}%.",
+        )
+
     def _evaluate_score_matrix_market(self, descriptor: MarketDescriptor, *, fixture=None, provider_payload=None) -> StatPalAdvisory:
         home_expected, away_expected, evidence, warnings = self._expected_score_rates(fixture, period=descriptor.period)
         if home_expected <= 0 or away_expected <= 0:
+            prediction_fallback = self._prediction_percentage_fallback(
+                descriptor,
+                fixture=fixture,
+                provider_payload=provider_payload,
+            )
+            if prediction_fallback:
+                return prediction_fallback
             warnings.append("score_matrix_fallback_profile_missing")
             return StatPalAdvisory(
                 available=False,

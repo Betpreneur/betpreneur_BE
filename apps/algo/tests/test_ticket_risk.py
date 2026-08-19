@@ -59,6 +59,12 @@ class TicketProbabilityTests(TestCase):
             places=1,
         )
 
+    def test_tiny_nonzero_accumulator_probability_is_not_flattened_to_zero(self):
+        ticket = TicketRiskService().assess([_leg(64)] * 36, calibration=PRIOR)
+
+        self.assertGreater(ticket.success_percent, 0)
+        self.assertLess(ticket.success_percent, 0.01)
+
     def test_independent_assessed_legs_are_declared_in_correlation_metadata(self):
         legs = [_leg(70), _leg(65)]
         legs[0]["match_id"] = "fixture-1"
