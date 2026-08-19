@@ -4504,14 +4504,154 @@ class AlgoRunnerService:
         return checks.get(market)
 
     def _finished_fixture_map(self, target_date):
-        fixtures = self._api_football_get(
-            "/fixtures",
-            {"date": target_date.isoformat(), "timezone": "Africa/Lagos"},
+        fixture_map = {}
+
+        def add_fixture(keys, fixture):
+            for key in keys:
+                key = str(key or "").strip()
+                if key:
+                    fixture_map.setdefault(key, fixture)
+
+        try:
+            fixtures = self._api_football_get(
+                "/fixtures",
+                {"date": target_date.isoformat(), "timezone": "Africa/Lagos"},
+            )
+        except Exception as exc:
+            log.warning("API-Football result lookup failed date=%s error=%s", target_date, exc)
+            fixtures = []
+
+        for fixture in fixtures or []:
+            fixture_id = (fixture.get("fixture") or {}).get("id")
+            if ((fixture.get("fixture") or {}).get("status") or {}).get("short") not in {"FT", "AET", "PEN"}:
+                continue
+            keys = [fixture_id]
+            for mapping in ProviderFixtureMap.objects.filter(api_fixture_id=str(fixture_id), active=True):
+                keys.extend([mapping.api_fixture_id, mapping.provider_event_id, f"{mapping.provider}:{mapping.provider_event_id}"])
+                if mapping.provider == "statpal":
+                    keys.append(f"statpal:{mapping.provider_event_id}")
+            add_fixture(keys, fixture)
+
+        for cached in FixtureCache.objects.filter(match_date=target_date, source="statpal"):
+            fixture = self._statpal_cached_finished_fixture(cached)
+            if not fixture:
+                continue
+            payload = cached.api_payload or {}
+            provider_match_id = str(
+                payload.get("provider_match_id")
+                or payload.get("statpal_provider_match_id")
+                or payload.get("main_id")
+                or str(cached.match_id).replace("statpal:", "", 1)
+                or ""
+            )
+            keys = [cached.match_id, provider_match_id, f"statpal:{provider_match_id}" if provider_match_id else ""]
+            mapped = ProviderFixtureMap.objects.filter(
+                provider="statpal",
+                provider_event_id=provider_match_id,
+                active=True,
+            ).first()
+            if mapped:
+                keys.extend([mapped.api_fixture_id, mapped.provider_event_id, f"statpal:{mapped.provider_event_id}"])
+            add_fixture(keys, fixture)
+
+        for row in SlipReviewMarketCache.objects.filter(match_date=target_date).exclude(provider_match_id=""):
+            fixture = self._statpal_payload_finished_fixture(
+                row.fixture_payload or {},
+                match_id=row.match_id,
+                home_team=row.home_team,
+                away_team=row.away_team,
+            )
+            if fixture:
+                add_fixture([row.match_id, row.provider_match_id, f"statpal:{row.provider_match_id}"], fixture)
+
+        return fixture_map
+
+    @staticmethod
+    def _status_is_finished(status):
+        normalized = str(status or "").strip().lower().replace("_", " ")
+        return normalized in {
+            "ft",
+            "aet",
+            "pen",
+            "finished",
+            "full time",
+            "fulltime",
+            "after extra time",
+            "after penalties",
+            "complete",
+            "completed",
+            "ended",
+        }
+
+    @staticmethod
+    def _settlement_int_or_none(value):
+        try:
+            if value in (None, ""):
+                return None
+            return int(value)
+        except (TypeError, ValueError):
+            return None
+
+    def _statpal_cached_finished_fixture(self, cached):
+        return self._statpal_payload_finished_fixture(
+            cached.api_payload or {},
+            match_id=cached.match_id,
+            home_team=cached.home_team,
+            away_team=cached.away_team,
+        )
+
+    def _statpal_payload_finished_fixture(self, payload, *, match_id="", home_team="", away_team=""):
+        payload = payload if isinstance(payload, dict) else {}
+        status = payload.get("status") or (payload.get("fixture") or {}).get("status")
+        if isinstance(status, dict):
+            status = status.get("short") or status.get("long") or status.get("status")
+        home_goals = self._settlement_int_or_none(
+            payload.get("home_goals")
+            if payload.get("home_goals") not in (None, "")
+            else payload.get("ft_home_goals")
+        )
+        away_goals = self._settlement_int_or_none(
+            payload.get("away_goals")
+            if payload.get("away_goals") not in (None, "")
+            else payload.get("ft_away_goals")
+        )
+        if home_goals is None or away_goals is None:
+            goals = payload.get("goals") if isinstance(payload.get("goals"), dict) else {}
+            home_goals = self._settlement_int_or_none(goals.get("home"))
+            away_goals = self._settlement_int_or_none(goals.get("away"))
+        if home_goals is None or away_goals is None:
+            return None
+        if status and not self._status_is_finished(status):
+            return None
+
+        provider_match_id = str(
+            payload.get("provider_match_id")
+            or payload.get("statpal_provider_match_id")
+            or payload.get("main_id")
+            or str(match_id).replace("statpal:", "", 1)
+            or ""
+        )
+        home = (
+            home_team
+            or payload.get("home_name")
+            or payload.get("hname")
+            or ((payload.get("home") or {}).get("name") if isinstance(payload.get("home"), dict) else "")
+        )
+        away = (
+            away_team
+            or payload.get("away_name")
+            or payload.get("aname")
+            or ((payload.get("away") or {}).get("name") if isinstance(payload.get("away"), dict) else "")
         )
         return {
-            str((fixture.get("fixture") or {}).get("id")): fixture
-            for fixture in fixtures
-            if ((fixture.get("fixture") or {}).get("status") or {}).get("short") in {"FT", "AET", "PEN"}
+            "fixture": {
+                "id": match_id or f"statpal:{provider_match_id}" if provider_match_id else match_id,
+                "status": {"short": "FT", "long": str(status or "finished")},
+            },
+            "goals": {"home": home_goals, "away": away_goals},
+            "teams": {"home": {"name": home}, "away": {"name": away}},
+            "provider": "statpal",
+            "provider_match_id": provider_match_id,
         }
 
     @staticmethod

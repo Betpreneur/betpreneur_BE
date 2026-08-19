@@ -4,7 +4,7 @@ from unittest import mock
 from django.contrib.auth import get_user_model
 from django.test import TestCase
 
-from apps.algo.models import SlipReview, SlipSelection
+from apps.algo.models import AlgoRun, FixtureCache, Pick, ProviderFixtureMap, SlipReview, SlipSelection
 from apps.algo.services import AlgoRunnerService
 from apps.algo.views import _slip_recap_payload
 
@@ -137,6 +137,105 @@ class SettleSlipSelectionsTests(TestCase):
 
         fixture_map.assert_not_called()
         self.assertEqual(report["considered"], 0)
+
+    def test_statpal_cached_fixture_settles_statpal_match_id(self):
+        selection = self._selection(match_id="statpal:2026080812345")
+        FixtureCache.objects.create(
+            match_date=SETTLE_DATE,
+            fixture="Dundee vs Aberdeen",
+            home_team="Dundee",
+            away_team="Aberdeen",
+            match_id="statpal:2026080812345",
+            source="statpal",
+            api_payload={
+                "provider_match_id": "2026080812345",
+                "status": "finished",
+                "home_goals": 2,
+                "away_goals": 1,
+            },
+        )
+
+        service = AlgoRunnerService()
+        with mock.patch.object(service, "_api_football_get", return_value=[]):
+            report = service.settle_slip_selections(target_date=SETTLE_DATE)
+
+        selection.refresh_from_db()
+        self.assertEqual(selection.outcome, SlipSelection.Outcome.WIN)
+        self.assertEqual(selection.score, "2-1")
+        self.assertEqual(report["settled"], 1)
+
+    def test_statpal_cached_fixture_settles_raw_provider_match_id(self):
+        selection = self._selection(match_id="2026080812345")
+        FixtureCache.objects.create(
+            match_date=SETTLE_DATE,
+            fixture="Dundee vs Aberdeen",
+            home_team="Dundee",
+            away_team="Aberdeen",
+            match_id="statpal:2026080812345",
+            source="statpal",
+            api_payload={
+                "provider_match_id": "2026080812345",
+                "status": "FT",
+                "goals": {"home": 2, "away": 1},
+            },
+        )
+        ProviderFixtureMap.objects.create(
+            provider="statpal",
+            provider_event_id="2026080812345",
+            api_fixture_id="1556634",
+            active=True,
+        )
+
+        service = AlgoRunnerService()
+        with mock.patch.object(service, "_api_football_get", return_value=[]):
+            report = service.settle_slip_selections(target_date=SETTLE_DATE)
+
+        selection.refresh_from_db()
+        self.assertEqual(selection.outcome, SlipSelection.Outcome.WIN)
+        self.assertEqual(selection.score, "2-1")
+        self.assertEqual(report["settled"], 1)
+
+
+class SettleDailyPickTests(TestCase):
+    def test_statpal_cached_fixture_settles_daily_pick_for_public_record(self):
+        run = AlgoRun.objects.create(target_date=SETTLE_DATE)
+        pick = Pick.objects.create(
+            run=run,
+            match_date=SETTLE_DATE,
+            fixture="Dundee vs Aberdeen",
+            home_team="Dundee",
+            away_team="Aberdeen",
+            match_id="statpal:2026080812345",
+            tier=Pick.Tier.BANKER,
+            market="Over 2.5",
+            confidence=72,
+            odds="1.70",
+            ev="0.050",
+            stake="1000",
+        )
+        FixtureCache.objects.create(
+            match_date=SETTLE_DATE,
+            fixture="Dundee vs Aberdeen",
+            home_team="Dundee",
+            away_team="Aberdeen",
+            match_id="statpal:2026080812345",
+            source="statpal",
+            api_payload={
+                "provider_match_id": "2026080812345",
+                "status": "finished",
+                "home_goals": 2,
+                "away_goals": 1,
+            },
+        )
+
+        service = AlgoRunnerService()
+        with mock.patch.object(service, "_api_football_get", return_value=[]):
+            report = service.update_results(target_date=SETTLE_DATE)
+
+        pick.refresh_from_db()
+        self.assertEqual(pick.status, Pick.Status.WIN)
+        self.assertEqual(pick.score, "2-1")
+        self.assertEqual(report["updated_count"], 1)
 
 
 class SlipRecapTests(TestCase):
