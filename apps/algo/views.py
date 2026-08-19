@@ -2615,13 +2615,50 @@ def _with_statpal_advisory(market, statpal_advisory):
 
 
 def _cap_advisory_score(score, market_capability):
+    """
+    The modelled probability, unchanged by data quality.
+
+    Truncating the estimate at the data-quality ceiling collapsed distinct
+    probabilities onto one number: with a cap of 75, six in ten markets landed on
+    exactly 75; with a cap of 62, nineteen in twenty landed on 62. That is where the
+    clustering came from, and it conflated two different questions.
+
+    "How likely is this?" and "how much do we trust that estimate?" are now reported
+    separately -- see `_data_confidence`. Data quality still constrains what we *claim*
+    (the tier and the verdict), it just no longer rewrites the number.
+    """
     parsed = _float_or_none(score)
     if parsed is None:
         return None
+    return round(max(0, min(100, parsed)), 1)
+
+
+def _data_confidence(market_capability):
+    """How much evidence stands behind the estimate, on the same 0-100 scale."""
     cap = _float_or_none((market_capability or {}).get("confidence_cap"))
-    if cap is None or cap <= 0:
-        return round(max(0, min(100, parsed)), 1)
-    return round(max(0, min(cap, parsed)), 1)
+    return None if cap is None else round(max(0, min(100, cap)), 1)
+
+
+def _scored_claim(score, market_capability):
+    """
+    Split "how likely is this?" from "how much do we trust it?".
+
+    Returns (probability, data_confidence, status, evidence_flags). The probability
+    is reported as modelled; thin evidence is expressed by holding the *status*
+    back, never by rewriting the number. Both the submitted-market path and the
+    direct-analysis path go through here so the two cannot drift apart.
+    """
+    probability = _cap_advisory_score(score, market_capability)
+    if probability is None:
+        return None, _data_confidence(market_capability), "needs_data", {}
+    confidence = _data_confidence(market_capability)
+    status = _match_checker_status(
+        min(probability, confidence) if confidence is not None else probability
+    )
+    flags = {"data_confidence": confidence}
+    if confidence is not None and probability > confidence:
+        flags["claim_limited_by_data_quality"] = True
+    return probability, confidence, status, flags
 
 
 def _statpal_advisory_scored(statpal_advisory):
@@ -2661,17 +2698,18 @@ def _with_market_capability(market, market_capability):
     payload = dict(market)
     market_capability = _effective_market_capability(market_capability, payload.get("statpal_advisory"))
     payload["market_capability"] = market_capability or {}
-    capped_score = _cap_advisory_score(payload.get("advisory_score"), market_capability)
-    if capped_score is not None:
-        original_score = _float_or_none(payload.get("advisory_score"))
-        payload["advisory_score"] = capped_score
-        payload["advisory_status"] = _match_checker_status(capped_score)
-        evidence = dict(payload.get("advisory_evidence") or {})
-        evidence["market_capability"] = market_capability or {}
-        if original_score is not None and capped_score < original_score:
-            evidence["uncapped_advisory_score"] = original_score
-            evidence["cap_applied"] = True
-        payload["advisory_evidence"] = evidence
+    scored, confidence, status, flags = _scored_claim(
+        payload.get("advisory_score"), market_capability
+    )
+    if scored is not None:
+        payload["advisory_score"] = scored
+        payload["data_confidence"] = confidence
+        payload["advisory_status"] = status
+        payload["advisory_evidence"] = {
+            **(payload.get("advisory_evidence") or {}),
+            "market_capability": market_capability or {},
+            **flags,
+        }
     warnings = list(payload.get("advisory_warnings") or [])
     warnings.extend((market_capability or {}).get("warnings") or [])
     data_quality = (market_capability or {}).get("data_quality")
@@ -2689,11 +2727,9 @@ def _submitted_market_payload(
     market_capability,
 ):
     market_capability = _effective_market_capability(market_capability, statpal_advisory)
-    advisory_score = _cap_advisory_score((statpal_advisory or {}).get("score"), market_capability)
-    if advisory_score is None:
-        advisory_status = "needs_data"
-    else:
-        advisory_status = _match_checker_status(advisory_score)
+    advisory_score, data_confidence, advisory_status, claim_flags = _scored_claim(
+        (statpal_advisory or {}).get("score"), market_capability
+    )
     warnings = list((statpal_advisory or {}).get("warnings") or [])
     warnings.extend((market_capability or {}).get("warnings") or [])
     return {
@@ -2703,12 +2739,14 @@ def _submitted_market_payload(
         "confidence": None,
         "final_confidence": None,
         "advisory_score": advisory_score,
+        "data_confidence": data_confidence,
         "advisory_status": advisory_status,
         "advisory_basis": (statpal_advisory or {}).get("basis") or "submitted_market_advisory",
         "advisory_warnings": list(dict.fromkeys(warnings))[:10],
         "advisory_evidence": {
             **((statpal_advisory or {}).get("evidence") or {}),
             "market_capability": market_capability or {},
+            **claim_flags,
         },
         "statpal_advisory": statpal_advisory or {},
     }
@@ -3372,6 +3410,18 @@ def _manual_verdict(selected_market, replacement_market):
             "This selection is fragile; the alternative market has better match-specific support."
             if has_better_market
             else "This selection has some support, but the match and league signals require caution."
+        )
+    elif advisory_status == "avoid":
+        # An assessed leg the model judges weak is a "remove", with or without a
+        # replacement. Without this branch it fell through to `no_edge`, which
+        # downgraded it to "caution" whenever no alternative was found -- softening
+        # the verdict precisely where the evidence was clearest. Failing to find a
+        # better market is a statement about the alternatives, not about this pick.
+        verdict = "replace" if has_better_market else "remove"
+        message = (
+            "This selection is weak on the match evidence; the alternative market has better support."
+            if has_better_market
+            else "This selection is weak on the match evidence, and no stronger replacement was found for this game."
         )
     elif status_value == "watchlist":
         verdict = "replace" if has_better_market else "caution"
@@ -4280,7 +4330,10 @@ def _with_leg_risk(card, leg):
         "label": tier_label,
         "estimated_success_percent": probability_percent,
         "risk_share_percent": leg.risk_share_percent,
+        # `capped_by_data_quality` now means "the claim was held back", not "the
+        # number was truncated" -- the probability below is reported as modelled.
         "capped_by_data_quality": leg.capped_by_data_quality,
+        "data_confidence_percent": leg.data_confidence_percent,
     }
     card["repair"] = {
         "available": leg.repair_probability is not None,
@@ -4290,7 +4343,11 @@ def _with_leg_risk(card, leg):
         "drop_lift_points": leg.drop_lift_points,
     }
     your_pick = card.get("your_pick") or {}
-    data_confidence_score = _float_or_none(your_pick.get("confidence_cap") or your_pick.get("confidence"))
+    data_confidence_score = _float_or_none(
+        your_pick.get("data_confidence")
+        if your_pick.get("data_confidence") is not None
+        else (leg.data_confidence_percent if leg.data_confidence_percent is not None else (your_pick.get("confidence_cap") or your_pick.get("confidence")))
+    )
     offered_probability = _implied_probability_from_odds(your_pick.get("odds"))
     price_check = card.get("price_check") or {}
     reference_probability = _implied_probability_from_odds(price_check.get("reference_odds"))

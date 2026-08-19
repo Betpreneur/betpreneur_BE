@@ -155,6 +155,7 @@ class LegRisk:
     repair_lift_points: float | None
     drop_lift_points: float | None
     capped_by_data_quality: bool
+    data_confidence_percent: float | None = None
     unassessed_reason: str = ""
 
     def to_dict(self):
@@ -280,6 +281,7 @@ class TicketRiskService:
                     repair_lift_points=None,
                     drop_lift_points=None,
                     capped_by_data_quality=capped,
+                    data_confidence_percent=_data_confidence_percent(item),
                 )
             )
 
@@ -330,6 +332,7 @@ class TicketRiskService:
                     repair_lift_points=round(repair_lift * 100, 2) if repair_lift is not None else None,
                     drop_lift_points=round(drop_lift * 100, 2),
                     capped_by_data_quality=leg.capped_by_data_quality,
+                    data_confidence_percent=leg.data_confidence_percent,
                 )
             )
 
@@ -494,21 +497,39 @@ def _has_scored_quantitative_advisory(item: dict[str, Any]) -> bool:
     )
 
 
+def _data_confidence_percent(item) -> float | None:
+    """Evidence strength behind the estimate, reported alongside it rather than
+    folded into it -- see `_apply_capability_cap`."""
+    cap = _float_or_none(_capability(item).get("confidence_cap"))
+    return None if cap is None else round(max(0.0, min(100.0, cap)), 1)
+
+
 def _apply_capability_cap(probability: float, item: dict[str, Any]) -> tuple[float, bool]:
-    """Thin StatPal coverage caps how confident the model is allowed to sound."""
+    """
+    Report whether thin coverage limits the *claim* — without rewriting the estimate.
+
+    Truncating the probability at the coverage ceiling flattened the distribution onto
+    the cap, so unrelated markets came out with identical numbers. The estimate is what
+    the model computed; the ceiling constrains the tier (see `_tier_for`) and is
+    surfaced as `capped_by_data_quality` so the caller can say the evidence is thin.
+    """
     cap = _float_or_none(_capability(item).get("confidence_cap"))
     if cap is None or cap <= 0:
         return probability, False
     ceiling = max(PROBABILITY_FLOOR, min(PROBABILITY_CEILING, cap / 100.0))
-    if probability > ceiling:
-        return ceiling, True
-    return probability, False
+    return probability, probability > ceiling
 
 
 def _tier_for(probability: float, item: dict[str, Any]) -> str:
+    # Grade on what the evidence supports, not on the raw estimate alone: a high
+    # probability drawn from thin coverage must not present as a headline pick.
+    cap = _float_or_none(_capability(item).get("confidence_cap"))
+    graded = probability
+    if cap and cap > 0:
+        graded = min(probability, max(PROBABILITY_FLOOR, min(PROBABILITY_CEILING, cap / 100.0)))
     tier = AVOID
     for threshold, name in TIER_THRESHOLDS:
-        if probability >= threshold:
+        if graded >= threshold:
             tier = name
             break
     if _data_quality(item) in THIN_DATA_QUALITY and TIER_ORDER.index(tier) > TIER_ORDER.index(THIN_DATA_TIER_CAP):

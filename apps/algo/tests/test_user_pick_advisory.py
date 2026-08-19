@@ -54,8 +54,16 @@ class UserPickAdvisoryTests(SimpleTestCase):
             },
         )
 
-        self.assertEqual(submitted["advisory_score"], 56)
+        # The modelled probability is not truncated by data quality -- the two
+        # answer different questions. Truncating collapsed distinct probabilities
+        # onto the cap value, which is what produced the 64%-everywhere reviews.
+        self.assertEqual(submitted["advisory_score"], 82)
+        self.assertEqual(submitted["data_confidence"], 56)
+        # Thin evidence still holds back what we are willing to *claim*.
         self.assertEqual(submitted["advisory_status"], "caution")
+        self.assertTrue(
+            submitted["advisory_evidence"]["claim_limited_by_data_quality"]
+        )
         self.assertIn("low_statpal_coverage", submitted["advisory_warnings"])
 
     def test_scored_statpal_fallback_upgrades_stale_poor_capability(self):
@@ -78,7 +86,8 @@ class UserPickAdvisoryTests(SimpleTestCase):
             },
         )
 
-        self.assertEqual(submitted["advisory_score"], 75)
+        self.assertEqual(submitted["advisory_score"], 91.4)
+        self.assertEqual(submitted["data_confidence"], 75)
         self.assertEqual(submitted["market_capability"]["data_quality"], "medium")
         self.assertEqual(submitted["market_capability"]["confidence_cap"], 75)
         self.assertNotIn("no_expected_goals_available", submitted["market_capability"]["warnings"])
@@ -174,10 +183,13 @@ class UserPickAdvisoryTests(SimpleTestCase):
             },
         )
 
-        self.assertEqual(market["advisory_score"], 70)
+        self.assertEqual(market["advisory_score"], 84)
+        self.assertEqual(market["data_confidence"], 70)
         self.assertEqual(market["advisory_status"], "playable")
         self.assertIn("missing_required_snapshots", market["advisory_warnings"])
-        self.assertTrue(market["advisory_evidence"]["cap_applied"])
+        self.assertTrue(
+            market["advisory_evidence"]["claim_limited_by_data_quality"]
+        )
 
     def test_replacement_prefers_same_market_family_over_higher_broad_market(self):
         selected = {

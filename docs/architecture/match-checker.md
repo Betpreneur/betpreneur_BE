@@ -428,6 +428,51 @@ not "recommended replacement". A constant-58 evaluator does not justify a recomm
 
 ---
 
+## 10b. ADR-005 — Probability and data confidence are separate numbers
+
+**Problem.** ~80% of live slip reviews reported roughly the same confidence (~64%). The models
+were not the cause: the score matrix produced a healthy spread (the most common single output
+accounted for 5% of 135 values, with all buckets populated). The flattening happened in the
+presentation layer, where data quality was applied as `min(cap, probability)`.
+
+Because a handful of capability tiers cover most fixtures, truncating at the tier ceiling
+collapsed genuinely different estimates onto a few numbers:
+
+| Capability | Cap | Legs landing exactly on the cap |
+|---|---|---|
+| medium data | 75 | 12 / 20 (60%) |
+| limited data | 62 | 19 / 20 (95%) |
+
+Across a simulated 400-leg production mix, four values covered **39%** of all legs.
+
+**Root cause.** `min(cap, probability)` conflates two questions that have different answers:
+
+- *How likely is this outcome?* — a property of the fixture and the model.
+- *How much evidence stands behind that estimate?* — a property of our data coverage.
+
+Overwriting the first with the second destroys the first and misreports the second.
+
+**Decision.** Report both, and never let one rewrite the other.
+
+| Field | Meaning |
+|---|---|
+| `advisory_score` / `estimated_success_percent` | The modelled probability, as modelled. |
+| `data_confidence` / `data_confidence_percent` | Evidence strength behind that estimate, same 0-100 scale. |
+| `advisory_status`, `risk_tier` | The **claim**, graded at `min(probability, confidence)`. |
+| `claim_limited_by_data_quality` | Set when confidence, not the model, held the claim back. |
+
+Thin evidence therefore constrains what we are willing to *say* — an 88% estimate backed by
+58 points of evidence is published as 88% with `caution`, not as 58%. This keeps the number
+honest without letting the verdict become reckless.
+
+**Result.** Across the same 400-leg mix, the top four values now cover **4%** of legs (from 39%),
+and no capability tier produces any pile-up on its cap.
+
+**Enforcement.** Both the submitted-market and direct-analysis paths go through a single
+`_scored_claim` helper — they had already drifted apart once, with one path applying the
+hold-back and the other not. `apps/algo/tests/test_confidence_distribution.py` guards the
+distribution directly and fails against the old truncating behaviour.
+
 ## 11. Async execution and cost
 
 Current: serial per-leg loop, one `AlgoRun` per leg, worker at `--concurrency=1`. A 20-leg slip
