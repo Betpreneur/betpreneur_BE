@@ -90,6 +90,22 @@ app.conf.beat_schedule = {
         },
         "options": {"expires": timedelta(minutes=4).total_seconds()},
     },
+    "refill-daily-free-tokens": {
+        "task": "apps.algo.tasks.refill_daily_free_tokens",
+        "schedule": crontab(
+            hour=os.environ.get("TOKEN_FREE_REFILL_HOUR", "0"),
+            minute=os.environ.get("TOKEN_FREE_REFILL_MINUTE", "15"),
+        ),
+        "options": {"expires": timedelta(hours=6).total_seconds()},
+    },
+    "expire-token-reservations": {
+        "task": "apps.algo.tasks.expire_token_reservations",
+        "schedule": crontab(minute=os.environ.get("TOKEN_RESERVATION_EXPIRY_MINUTES", "*/5")),
+        "kwargs": {
+            "limit": int(os.environ.get("TOKEN_RESERVATION_EXPIRY_LIMIT", "200")),
+        },
+        "options": {"expires": timedelta(minutes=4).total_seconds()},
+    },
     "cleanup-slip-review-market-cache": {
         "task": "apps.algo.tasks.cleanup_slip_review_market_cache",
         "schedule": crontab(minute=os.environ.get("SLIP_REVIEW_MARKET_CACHE_CLEANUP_MINUTES", "55")),

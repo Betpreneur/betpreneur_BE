@@ -118,6 +118,28 @@ SLIP_REVIEW_MARKET_CACHE_CLEANUP_GRACE_SECONDS = config(
     cast=int,
 )
 SLIP_REVIEW_MARKET_CACHE_CLEANUP_LIMIT = config("SLIP_REVIEW_MARKET_CACHE_CLEANUP_LIMIT", default=0, cast=int)
+TOKEN_FREE_DAILY_CAP = config("TOKEN_FREE_DAILY_CAP", default=50, cast=int)
+TOKEN_FREE_REFILL_THRESHOLD = config("TOKEN_FREE_REFILL_THRESHOLD", default=10, cast=int)
+# Granted once, when a new account's email is verified. Defaults to the daily free cap so
+# a new user starts level with an established one rather than waiting for 00:15.
+TOKEN_SIGNUP_GRANT = config("TOKEN_SIGNUP_GRANT", default=TOKEN_FREE_DAILY_CAP, cast=int)
+TOKEN_FREE_REFILL_HOUR = config("TOKEN_FREE_REFILL_HOUR", default=0, cast=int)
+TOKEN_FREE_REFILL_MINUTE = config("TOKEN_FREE_REFILL_MINUTE", default=15, cast=int)
+TOKEN_PURCHASE_PACKAGES = config(
+    "TOKEN_PURCHASE_PACKAGES",
+    default="240:990,480:1980,720:2970,960:3960,1200:4950",
+)
+TOKEN_PURCHASE_CURRENCY = config("TOKEN_PURCHASE_CURRENCY", default="NGN")
+SLIP_REVIEW_TOKEN_COST_PER_GAME = config("SLIP_REVIEW_TOKEN_COST_PER_GAME", default=1, cast=int)
+SLIP_REVIEW_RANDOMIZE_TOKEN_COST = config("SLIP_REVIEW_RANDOMIZE_TOKEN_COST", default=5, cast=int)
+TOKEN_RESERVATION_TTL_MINUTES = config("TOKEN_RESERVATION_TTL_MINUTES", default=30, cast=int)
+PAYFONTE_BASE_URL = config("PAYFONTE_BASE_URL", default="https://sandbox-api.payfonte.com")
+PAYFONTE_CLIENT_ID = config("PAYFONTE_CLIENT_ID", default="")
+PAYFONTE_CLIENT_SECRET = config("PAYFONTE_CLIENT_SECRET", default="")
+PAYFONTE_COLLECTION_PROVIDER = config("PAYFONTE_COLLECTION_PROVIDER", default="bank-transfer-nigeria")
+PAYFONTE_BANK_TRANSFER_NETWORK = config("PAYFONTE_BANK_TRANSFER_NETWORK", default="")
+PAYFONTE_WEBHOOK_URL = config("PAYFONTE_WEBHOOK_URL", default="")
+PAYFONTE_TIMEOUT = config("PAYFONTE_TIMEOUT", default=30, cast=int)
 
 if ENABLE_WEBSOCKETS:
     INSTALLED_APPS.append("channels")
@@ -159,6 +181,8 @@ CELERY_TASK_ROUTES = {
     "apps.algo.tasks.refresh_player_availability": {"queue": ALGO_MAINTENANCE_QUEUE},
     "apps.algo.tasks.recover_stale_slip_reviews": {"queue": ALGO_MAINTENANCE_QUEUE},
     "apps.algo.tasks.cleanup_slip_review_market_cache": {"queue": ALGO_MAINTENANCE_QUEUE},
+    "apps.algo.tasks.refill_daily_free_tokens": {"queue": ALGO_MAINTENANCE_QUEUE},
+    "apps.algo.tasks.expire_token_reservations": {"queue": ALGO_MAINTENANCE_QUEUE},
     "apps.algo.tasks.run_monthly_auditor": {"queue": ALGO_MAINTENANCE_QUEUE},
     "apps.algo.tasks.import_slip_review": {"queue": SLIP_REVIEW_IMPORT_QUEUE},
     "apps.algo.tasks.analyse_slip_review_leg": {"queue": SLIP_REVIEW_LEG_QUEUE},

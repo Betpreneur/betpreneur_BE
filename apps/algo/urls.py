@@ -30,6 +30,15 @@ from .views import (
     StatPalFixtureRefreshView,
     StatPalReadinessView,
     TaskStatusView,
+    PayfonteWebhookView,
+    TokenAdminAdjustmentView,
+    TokenPackageListView,
+    TokenPurchaseAdminCompleteView,
+    TokenPurchaseAdminFailView,
+    TokenPurchaseVerifyView,
+    TokenPurchaseView,
+    TokenTransactionListView,
+    TokenWalletView,
     TopPickView,
 )
 
@@ -40,6 +49,27 @@ router.register("runs", AlgoRunViewSet, basename="algo-run")
 urlpatterns = [
     path("public/summary/", PublicSummaryView.as_view(), name="algo-public-summary"),
     path("public/record/", PublicRecordView.as_view(), name="algo-public-record"),
+    path("tokens/", TokenWalletView.as_view(), name="algo-token-wallet"),
+    path("tokens/packages/", TokenPackageListView.as_view(), name="algo-token-packages"),
+    path("tokens/purchases/", TokenPurchaseView.as_view(), name="algo-token-purchases"),
+    path("tokens/payfonte/webhook/", PayfonteWebhookView.as_view(), name="algo-token-payfonte-webhook"),
+    path(
+        "tokens/purchases/<int:purchase_id>/admin-complete/",
+        TokenPurchaseAdminCompleteView.as_view(),
+        name="algo-token-purchase-admin-complete",
+    ),
+    path(
+        "tokens/purchases/<int:purchase_id>/verify/",
+        TokenPurchaseVerifyView.as_view(),
+        name="algo-token-purchase-verify",
+    ),
+    path(
+        "tokens/purchases/<int:purchase_id>/admin-fail/",
+        TokenPurchaseAdminFailView.as_view(),
+        name="algo-token-purchase-admin-fail",
+    ),
+    path("tokens/transactions/", TokenTransactionListView.as_view(), name="algo-token-transactions"),
+    path("tokens/admin/adjust/", TokenAdminAdjustmentView.as_view(), name="algo-token-admin-adjust"),
     path("picks/", DailyPicksView.as_view(), name="algo-picks"),
     path("picks/download/", DailyPicksDownloadView.as_view(), name="algo-picks-download"),
     path("picks/<int:pick_id>/", PickDetailView.as_view(), name="algo-pick-detail"),

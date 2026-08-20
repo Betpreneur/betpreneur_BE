@@ -13,6 +13,7 @@ from decimal import Decimal, InvalidOperation
 
 from celery.result import AsyncResult
 from django.conf import settings
+from django.contrib.auth import get_user_model
 from django.db import IntegrityError
 from django.http import HttpResponse, HttpResponseNotModified
 from django.shortcuts import get_object_or_404
@@ -39,6 +40,9 @@ from .models import (
     SlipReviewStreamToken,
     SlipReview,
     SlipSelection,
+    TokenPurchase,
+    TokenReservation,
+    TokenTransaction,
 )
 from . import slip_review_redis
 from .market_taxonomy import (
@@ -125,9 +129,31 @@ from .serializers import (
     StatPalReadinessResponseSerializer,
     TaskQueuedSerializer,
     TaskStatusSerializer,
+    TokenAdminAdjustmentRequestSerializer,
+    TokenAdminAdjustmentResponseSerializer,
+    TokenPurchaseAdminCompleteRequestSerializer,
+    TokenPurchaseAdminCompleteResponseSerializer,
+    TokenPurchaseAdminFailRequestSerializer,
+    TokenPurchaseAdminFailResponseSerializer,
+    TokenPackageListResponseSerializer,
+    TokenPurchaseCreateRequestSerializer,
+    TokenPurchaseCreateResponseSerializer,
+    TokenPurchaseListResponseSerializer,
+    TokenPurchaseSerializer,
+    TokenPurchaseVerifyResponseSerializer,
+    TokenTransactionListResponseSerializer,
+    TokenTransactionSerializer,
+    TokenWalletResponseSerializer,
     TopPickResponseSerializer,
 )
 from .tasks import generate_daily_picks, import_slip_review, run_monthly_auditor, settle_daily_results
+from .payfonte import (
+    PayfonteError,
+    build_direct_charge_payload,
+    payfonte_client,
+    payfonte_config,
+)
+from .tokens import InsufficientTokens, token_package_by_id, token_package_catalogue, token_wallet_service, token_wallet_snapshot
 
 
 log = logging.getLogger(__name__)
@@ -221,6 +247,308 @@ def _private_cached_response(payload, *, request=None, seconds=None, status_code
         status_code=status_code,
         private=True,
     )
+
+
+def _token_pricing_payload():
+    return {
+        "slip_review_token_cost_per_game": int(getattr(settings, "SLIP_REVIEW_TOKEN_COST_PER_GAME", 1)),
+        "smart_randomize_token_cost": int(getattr(settings, "SLIP_REVIEW_RANDOMIZE_TOKEN_COST", 5)),
+    }
+
+
+def _token_refill_policy_payload():
+    return {
+        "signup_grant": int(getattr(settings, "TOKEN_SIGNUP_GRANT", getattr(settings, "TOKEN_FREE_DAILY_CAP", 50))),
+        "free_daily_cap": int(getattr(settings, "TOKEN_FREE_DAILY_CAP", 50)),
+        "free_refill_threshold": int(getattr(settings, "TOKEN_FREE_REFILL_THRESHOLD", 10)),
+        "refill_hour": int(getattr(settings, "TOKEN_FREE_REFILL_HOUR", 0)),
+        "refill_minute": int(getattr(settings, "TOKEN_FREE_REFILL_MINUTE", 15)),
+    }
+
+
+def _token_wallet_payload(user, *, transaction_limit=10):
+    wallet = token_wallet_service.get_or_create_wallet(user)
+    transactions = TokenTransaction.objects.filter(user=user).order_by("-created_at", "-id")[:transaction_limit]
+    wallet_payload = token_wallet_snapshot(wallet)
+    wallet_payload["last_free_refill_date"] = (
+        wallet.last_free_refill_date.isoformat() if wallet.last_free_refill_date else None
+    )
+    return {
+        "wallet": wallet_payload,
+        "pricing": _token_pricing_payload(),
+        "refill_policy": _token_refill_policy_payload(),
+        "recent_transactions": TokenTransactionSerializer(transactions, many=True).data,
+    }
+
+
+def _payfonte_webhook_url(request):
+    configured = str(getattr(settings, "PAYFONTE_WEBHOOK_URL", "") or "").strip()
+    if configured:
+        return configured
+    return request.build_absolute_uri("/api/algo/tokens/payfonte/webhook/")
+
+
+def _payfonte_purchase_reference(purchase):
+    return f"BP-TOK-{purchase.id}-{secrets.token_hex(4)}"
+
+
+def _initiate_payfonte_purchase(request, purchase):
+    reference = _payfonte_purchase_reference(purchase)
+    payload = build_direct_charge_payload(
+        purchase=purchase,
+        reference=reference,
+        webhook_url=_payfonte_webhook_url(request),
+        user=request.user,
+    )
+    data = payfonte_client().direct_charge(payload)
+    provider_reference = str(data.get("reference") or reference)
+    return token_wallet_service.attach_purchase_payment(
+        purchase,
+        provider="payfonte",
+        provider_reference=provider_reference,
+        metadata={
+            "payfonte": {
+                "direct_charge": {
+                    "request": {**payload, "customerInput": payload.get("customerInput") or {}},
+                    "data": data,
+                }
+            }
+        },
+    )
+
+
+def _verified_payfonte_amount_matches(purchase, data):
+    amount = data.get("amount")
+    currency = data.get("currency")
+    if amount is not None and int(amount) != int(purchase.amount_kobo):
+        raise ValueError("Verified Payfonte amount does not match this token purchase.")
+    if currency and str(currency).upper() != str(purchase.currency).upper():
+        raise ValueError("Verified Payfonte currency does not match this token purchase.")
+
+
+def _settle_payfonte_purchase(purchase, *, verification_data=None):
+    reference = purchase.provider_reference
+    if not reference:
+        raise ValueError("Token purchase has no Payfonte reference to verify.")
+    data = verification_data or payfonte_client().verify_payment(reference)
+    status_value = str(data.get("status") or "").lower()
+    metadata = {"payfonte": {"verification": {"data": data, "verified_at": timezone.now().isoformat()}}}
+    if status_value == "success":
+        _verified_payfonte_amount_matches(purchase, data)
+        result = token_wallet_service.complete_token_purchase(
+            purchase,
+            provider="payfonte",
+            provider_reference=reference,
+            metadata=metadata,
+        )
+        return {
+            "purchase": result.purchase,
+            "wallet": result.balance_after,
+            "transaction": result.transaction,
+            "idempotent": result.idempotent,
+            "payfonte_status": status_value,
+        }
+    if status_value in {"failed", "rejected", "expired", "reversed"}:
+        purchase = token_wallet_service.fail_token_purchase(
+            purchase,
+            provider="payfonte",
+            provider_reference=reference,
+            metadata=metadata,
+        )
+        return {
+            "purchase": purchase,
+            "wallet": {},
+            "transaction": None,
+            "idempotent": False,
+            "payfonte_status": status_value,
+        }
+
+    purchase = token_wallet_service.attach_purchase_payment(
+        purchase,
+        provider="payfonte",
+        provider_reference=reference,
+        metadata=metadata,
+    )
+    return {
+        "purchase": purchase,
+        "wallet": {},
+        "transaction": None,
+        "idempotent": False,
+        "payfonte_status": status_value or "pending",
+    }
+
+
+def _token_purchase_verify_payload(result):
+    return {
+        "purchase": TokenPurchaseSerializer(result["purchase"]).data,
+        "wallet": result.get("wallet") or {},
+        "transaction": TokenTransactionSerializer(result["transaction"]).data if result.get("transaction") else None,
+        "idempotent": bool(result.get("idempotent")),
+        "payfonte_status": result.get("payfonte_status") or "",
+    }
+
+
+def _slip_review_token_cost(selection_count):
+    return max(0, int(selection_count or 0)) * int(getattr(settings, "SLIP_REVIEW_TOKEN_COST_PER_GAME", 1))
+
+
+def _slip_review_billing_payload(review, *, selection_count, reservation=None, status_value="reserved"):
+    token_cost = _slip_review_token_cost(selection_count)
+    payload = {
+        "status": status_value,
+        "token_cost": token_cost,
+        "cost_per_game": int(getattr(settings, "SLIP_REVIEW_TOKEN_COST_PER_GAME", 1)),
+        "games": int(selection_count or 0),
+    }
+    if reservation:
+        payload["reservation_id"] = reservation.id
+        payload["reservation_status"] = reservation.status
+        payload["reservation_expires_at"] = reservation.expires_at.isoformat() if reservation.expires_at else None
+    review_payload = dict(review.submitted_payload or {})
+    if review_payload.get("token_reservation_id"):
+        payload["reservation_id"] = review_payload.get("token_reservation_id")
+    return payload
+
+
+def _store_slip_review_billing(review, billing):
+    summary = dict(review.summary or {})
+    summary["billing"] = _json_safe(billing)
+    review.summary = summary
+
+
+def _reserve_slip_review_tokens(review, selection_count):
+    token_cost = _slip_review_token_cost(selection_count)
+    if token_cost <= 0:
+        billing = _slip_review_billing_payload(review, selection_count=selection_count, status_value="not_required")
+        _store_slip_review_billing(review, billing)
+        return None
+
+    result = token_wallet_service.reserve_tokens(
+        review.user,
+        token_cost,
+        reference_type="slip_review",
+        reference_id=str(review.id),
+        metadata={
+            "review_id": review.id,
+            "source": review.source,
+            "selection_count": int(selection_count or 0),
+            "cost_per_game": int(getattr(settings, "SLIP_REVIEW_TOKEN_COST_PER_GAME", 1)),
+        },
+    )
+    submitted_payload = dict(review.submitted_payload or {})
+    submitted_payload["token_reservation_id"] = result.reservation.id
+    submitted_payload["token_cost"] = token_cost
+    review.submitted_payload = _json_safe(submitted_payload)
+    _store_slip_review_billing(
+        review,
+        _slip_review_billing_payload(
+            review,
+            selection_count=selection_count,
+            reservation=result.reservation,
+            status_value="reserved",
+        ),
+    )
+    return result
+
+
+def _consume_slip_review_token_reservation(review):
+    reservation_id = (review.submitted_payload or {}).get("token_reservation_id")
+    if not reservation_id:
+        return None
+    try:
+        result = token_wallet_service.consume_reservation(int(reservation_id))
+        _store_slip_review_billing(
+            review,
+            _slip_review_billing_payload(
+                review,
+                selection_count=(review.submitted_payload or {}).get("selection_count") or review.selections.count(),
+                reservation=result.reservation,
+                status_value="consumed",
+            ),
+        )
+        return result
+    except Exception:
+        # Do not fail a delivered review over a billing hiccup -- but do not hide it
+        # either. The escrow is still open, so the reservation sweeper reconciles it
+        # against the review's status and recognises the tokens rather than refunding
+        # a review the user already received.
+        log.exception(
+            "Slip review token reservation consume failed review=%s reservation=%s "
+            "-- left open for reconciliation",
+            review.id,
+            reservation_id,
+        )
+        _store_slip_review_billing(
+            review,
+            {
+                **_slip_review_billing_payload(
+                    review,
+                    selection_count=(review.submitted_payload or {}).get("selection_count") or review.selections.count(),
+                    status_value="consume_failed",
+                ),
+                "reconciliation_pending": True,
+            },
+        )
+        return None
+
+
+def _release_slip_review_token_reservation(review):
+    reservation_id = (review.submitted_payload or {}).get("token_reservation_id")
+    if not reservation_id:
+        return None
+    try:
+        result = token_wallet_service.release_reservation(int(reservation_id))
+        _store_slip_review_billing(
+            review,
+            _slip_review_billing_payload(
+                review,
+                selection_count=(review.submitted_payload or {}).get("selection_count") or review.selections.count(),
+                reservation=result.reservation,
+                status_value="released",
+            ),
+        )
+        return result
+    except ValueError:
+        return None
+    except TokenReservation.DoesNotExist:
+        return None
+    except Exception:
+        log.exception("Slip review token reservation release failed review=%s reservation=%s", review.id, reservation_id)
+        return None
+
+
+def _insufficient_tokens_payload(exc, *, review_id=None, selection_count=0):
+    required = int(getattr(exc, "required_tokens", 0) or 0)
+    available = int(getattr(exc, "available_tokens", 0) or 0)
+    payload = {
+        "code": "insufficient_tokens",
+        "message": f"You need {required} tokens to analyse this slip, but you only have {available}.",
+        "required_tokens": required,
+        "available_tokens": available,
+        "shortfall": max(required - available, 0),
+        "selection_count": int(selection_count or 0),
+        "cost_per_game": int(getattr(settings, "SLIP_REVIEW_TOKEN_COST_PER_GAME", 1)),
+        "wallet": exc.to_dict().get("wallet", {}),
+    }
+    if review_id:
+        payload["review_id"] = review_id
+    return payload
+
+
+def _insufficient_feature_tokens_payload(exc, *, feature, token_cost, review_id=None):
+    available = int(getattr(exc, "available_tokens", 0) or 0)
+    payload = {
+        "code": "insufficient_tokens",
+        "feature": str(feature or ""),
+        "message": f"You need {int(token_cost or 0)} tokens to use this feature, but you only have {available}.",
+        "required_tokens": int(token_cost or 0),
+        "available_tokens": available,
+        "shortfall": max(int(token_cost or 0) - available, 0),
+        "wallet": exc.to_dict().get("wallet", {}),
+    }
+    if review_id:
+        payload["review_id"] = review_id
+    return payload
 
 
 def _public_cached_response(payload, *, request=None, seconds=None, status_code=status.HTTP_200_OK):
@@ -4779,6 +5107,7 @@ def _bettor_recommendation(selection):
             "odds": ai_pick.get("odds"),
             "confidence_score": _public_score(ai_pick.get("confidence_score")),
             "confidence_label": _public_confidence_label(ai_pick.get("confidence_score")),
+            "data_confidence_score": _public_score(ai_pick.get("data_confidence_score")),
         }
     elif action in {"keep", "caution"} or _simple_pick_verdict(selection) in {"keep", "caution"}:
         action = "keep" if _simple_pick_verdict(selection) == "keep" else "caution"
@@ -4787,6 +5116,7 @@ def _bettor_recommendation(selection):
             "odds": user_pick.get("odds"),
             "confidence_score": _public_score(user_pick.get("confidence_score")),
             "confidence_label": _public_confidence_label(user_pick.get("confidence_score")),
+            "data_confidence_score": _public_score(user_pick.get("data_confidence_score")),
         }
     else:
         pick = None
@@ -4809,7 +5139,14 @@ def _bettor_recommendation(selection):
     return {"action": action, "pick": pick, "why": why}
 
 
-SMART_RANDOMIZE_MIN_CONFIDENCE = 50.0
+# Anything the review grades below this is "avoid" (see `_match_checker_status`), and
+# `_simple_pick_verdict` calls it "risky". Generating a ticket out of picks we tell the
+# user to avoid is a straight contradiction, so the two share one boundary.
+SMART_RANDOMIZE_MIN_CONFIDENCE = 55.0
+
+# Verdicts whose pick we are willing to stand behind. An allowlist, so a verdict code
+# added later has to be opted in rather than silently becoming eligible.
+SMART_RANDOMIZE_ELIGIBLE_VERDICTS = frozenset({"keep", "caution"})
 
 
 def _smart_randomize_option_values(eligible_count):
@@ -4820,6 +5157,23 @@ def _smart_randomize_option_values(eligible_count):
     return options or [2]
 
 
+def _smart_randomize_ranking_score(confidence, data_confidence):
+    """
+    The claim we are willing to stand behind, which is what selection must rank on.
+
+    `confidence_score` is the modelled probability and is reported unchanged (ADR-005).
+    Ranking on it alone would promote an 88%-estimate-on-58-points-of-evidence over an
+    80%-estimate-on-92-points -- and put a leg the review labels `caution` at the top of
+    a ticket sold as "the strongest analysed picks". Gating on the same
+    `min(probability, confidence)` the status already uses keeps the two consistent.
+    """
+    confidence = _float_or_none(confidence)
+    if confidence is None:
+        return None
+    data_confidence = _float_or_none(data_confidence)
+    return confidence if data_confidence is None else min(confidence, data_confidence)
+
+
 def _smart_randomize_pick_for_game(game):
     user_pick = (game or {}).get("user_pick") or {}
     recommendation = (game or {}).get("recommendation") or {}
@@ -4828,7 +5182,7 @@ def _smart_randomize_pick_for_game(game):
 
     user_confidence = _float_or_none(user_pick.get("confidence_score"))
     user_verdict = str(user_pick.get("verdict") or "").lower()
-    if user_confidence is not None and user_verdict not in {"review", "unknown", "no_data"}:
+    if user_confidence is not None and user_verdict in SMART_RANDOMIZE_ELIGIBLE_VERDICTS:
         candidates.append(
             {
                 "source": "user_pick",
@@ -4837,6 +5191,10 @@ def _smart_randomize_pick_for_game(game):
                 "odds": user_pick.get("odds"),
                 "confidence_score": user_confidence,
                 "confidence_label": _public_confidence_label(user_confidence),
+                "data_confidence_score": _float_or_none(user_pick.get("data_confidence_score")),
+                "ranking_score": _smart_randomize_ranking_score(
+                    user_confidence, user_pick.get("data_confidence_score")
+                ),
                 "changed_from_user_pick": False,
             }
         )
@@ -4856,14 +5214,19 @@ def _smart_randomize_pick_for_game(game):
                 "odds": recommended_pick.get("odds"),
                 "confidence_score": recommended_confidence,
                 "confidence_label": _public_confidence_label(recommended_confidence),
+                "data_confidence_score": _float_or_none(recommended_pick.get("data_confidence_score")),
+                "ranking_score": _smart_randomize_ranking_score(
+                    recommended_confidence, recommended_pick.get("data_confidence_score")
+                ),
                 "changed_from_user_pick": changed,
             }
         )
 
+    candidates = [item for item in candidates if item.get("ranking_score") is not None]
     if not candidates:
         return None
-    pick = max(candidates, key=lambda item: (item["confidence_score"], 1 if item["source"] == "ai_pick" else 0))
-    if pick["confidence_score"] < SMART_RANDOMIZE_MIN_CONFIDENCE:
+    pick = max(candidates, key=lambda item: (item["ranking_score"], 1 if item["source"] == "ai_pick" else 0))
+    if pick["ranking_score"] < SMART_RANDOMIZE_MIN_CONFIDENCE:
         return None
     return {
         "id": (game or {}).get("id"),
@@ -4890,7 +5253,7 @@ def _smart_randomize_candidates(public_payload):
             )
     return sorted(
         candidates,
-        key=lambda item: (item.get("confidence_score") or 0, item.get("match") or ""),
+        key=lambda item: (item.get("ranking_score") or 0, item.get("match") or ""),
         reverse=True,
     ), excluded
 
@@ -4965,6 +5328,7 @@ def _smart_randomize_ticket(public_payload, requested_games):
                 "action": item.get("action"),
                 "confidence_score": _public_score(item.get("confidence_score")),
                 "confidence_label": _public_confidence_label(item.get("confidence_score")),
+                "data_confidence_score": _public_score(item.get("data_confidence_score")),
                 "changed_from_user_pick": bool(item.get("changed_from_user_pick")),
             }
             for item in selected
@@ -5027,6 +5391,7 @@ def _build_bettor_public_payload(review, technical_public, *, enhance=False):
                     "odds": user_pick.get("odds"),
                     "confidence_score": _public_score(user_pick.get("confidence_score")),
                     "confidence_label": _public_confidence_label(user_pick.get("confidence_score")),
+                    "data_confidence_score": _public_score(user_pick.get("data_confidence_score")),
                     "verdict": _simple_pick_verdict(selection),
                     "summary": _bettor_game_summary(selection),
                 },
@@ -7203,6 +7568,7 @@ def finalize_slip_review_import_results(review_id, leg_results):
         final_status=_public_slip_review_status(review.status),
     )
     review.summary = summary
+    _consume_slip_review_token_reservation(review)
     final_payload = _json_safe({**payload, "fanout_analysis": True})
     review.submitted_payload = final_payload
     final_updated_at = timezone.now()
@@ -7370,6 +7736,9 @@ def process_slip_review_import(review_id):
             for item in imported.get("selections") or []
             if item.get("match") and item.get("market")
         ]
+        if not selections:
+            raise ValueError("No supported football selections were found in this slip.")
+        _reserve_slip_review_tokens(review, len(selections))
         _initialize_slip_selection_progress_rows(review, selections)
         _set_slip_review_progress(
             review,
@@ -7389,18 +7758,16 @@ def process_slip_review_import(review_id):
             plan["fixtures_served_by_model"],
             plan.get("estimated_snapshot_calls"),
         )
-        if not selections:
-            raise ValueError("No supported football selections were found in this slip.")
         final_payload = _json_safe(
             {
-                **payload,
+                **(review.submitted_payload or payload),
                 "provider_code": imported.get("share_code") or imported.get("booking_code") or "",
                 "selection_count": imported.get("selection_count", 0),
                 "fanout_analysis": True,
             }
         )
         review.submitted_payload = final_payload
-        review.save(update_fields=["submitted_payload", "updated_at"])
+        review.save(update_fields=["submitted_payload", "summary", "updated_at"])
 
         from celery import chord as celery_chord
         from .tasks import analyse_slip_review_leg, finalize_slip_review_import
@@ -7434,8 +7801,26 @@ def process_slip_review_import(review_id):
                 **(review.summary or {}),
             }
         )
+    except InsufficientTokens as exc:
+        selection_count = len(locals().get("selections") or [])
+        error_payload = _insufficient_tokens_payload(exc, review_id=review.id, selection_count=selection_count)
+        log.info(
+            "Slip review insufficient tokens review=%s required=%s available=%s selections=%s",
+            review.id,
+            error_payload["required_tokens"],
+            error_payload["available_tokens"],
+            selection_count,
+        )
+        return fail_slip_review_import(
+            review.id,
+            error_payload["message"],
+            error_code="insufficient_tokens",
+            error_payload=error_payload,
+            release_tokens=False,
+        )
     except Exception as exc:
         log.exception("Slip review import failed review=%s", review.id)
+        _release_slip_review_token_reservation(review)
         public_error = _public_slip_review_error_message("failed")
         review.status = SlipReview.Status.FAILED
         review.summary = _empty_slip_summary("Slip import failed.", task_id=(review.summary or {}).get("task_id", ""), error=public_error)
@@ -7457,8 +7842,10 @@ def process_slip_review_import(review_id):
         raise
 
 
-def fail_slip_review_import(review_id, message, *, error_code="failed"):
+def fail_slip_review_import(review_id, message, *, error_code="failed", error_payload=None, release_tokens=True):
     review = SlipReview.objects.get(id=review_id)
+    if release_tokens:
+        _release_slip_review_token_reservation(review)
     review.status = SlipReview.Status.FAILED
     review.summary = _empty_slip_summary(
         message,
@@ -7466,6 +7853,8 @@ def fail_slip_review_import(review_id, message, *, error_code="failed"):
         error=message,
     )
     review.summary["error_code"] = error_code
+    if error_payload:
+        review.summary["error_payload"] = _json_safe(error_payload)
     review.summary["progress"] = _slip_review_progress(
         phase="failed",
         message=message,
@@ -7479,6 +7868,7 @@ def fail_slip_review_import(review_id, message, *, error_code="failed"):
             "status": review.status,
             "error": message,
             "error_code": error_code,
+            "error_payload": _json_safe(error_payload or {}),
             "progress": review.summary.get("progress") or {},
         },
     )
@@ -7488,6 +7878,7 @@ def fail_slip_review_import(review_id, message, *, error_code="failed"):
             "status": _public_slip_review_status(review.status),
             "error": message,
             "error_code": error_code,
+            "error_payload": _json_safe(error_payload or {}),
             **(review.summary or {}),
         }
     )
@@ -7512,23 +7903,49 @@ class ManualSlipReviewView(APIView):
         serializer = ManualSlipReviewRequestSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         days = serializer.validated_data.get("days", 3)
-        review_scoring_context = {"fixture_universe_synced": False}
-        results = [
-            _analyse_manual_selection(
-                selection,
-                days=days,
-                request=request,
-                force_fresh=True,
-                review_scoring_context=review_scoring_context,
-            )
-            for selection in serializer.validated_data["selections"]
-        ]
-        review, summary, safe_results = _create_slip_review(
+        selections = serializer.validated_data["selections"]
+        review = _create_queued_slip_review(
             request.user,
             source=SlipReview.Source.MANUAL,
             submitted_payload=serializer.validated_data,
-            results=results,
         )
+        try:
+            _reserve_slip_review_tokens(review, len(selections))
+            _set_slip_review_progress(
+                review,
+                phase="analysing_legs",
+                total=len(selections),
+                completed=0,
+                message=f"Analysing {len(selections)} selections.",
+                status=SlipReview.Status.ANALYSING,
+            )
+            review_scoring_context = {"fixture_universe_synced": False}
+            results = [
+                _analyse_manual_selection(
+                    selection,
+                    days=days,
+                    request=request,
+                    force_fresh=True,
+                    review_scoring_context=review_scoring_context,
+                )
+                for selection in selections
+            ]
+            summary, safe_results = _populate_slip_review(review, results)
+            _consume_slip_review_token_reservation(review)
+            review.save(update_fields=["summary", "submitted_payload", "updated_at"])
+        except InsufficientTokens as exc:
+            error_payload = _insufficient_tokens_payload(exc, review_id=review.id, selection_count=len(selections))
+            fail_payload = fail_slip_review_import(
+                review.id,
+                error_payload["message"],
+                error_code="insufficient_tokens",
+                error_payload=error_payload,
+                release_tokens=False,
+            )
+            return Response(fail_payload, status=status.HTTP_402_PAYMENT_REQUIRED)
+        except Exception:
+            _release_slip_review_token_reservation(review)
+            raise
         return Response(
             _api_response_payload({
                 "id": review.id,
@@ -7811,6 +8228,36 @@ class SlipReviewRandomizeView(APIView):
         ticket, error = _smart_randomize_ticket(public_payload, serializer.validated_data["games"])
         if error:
             return Response(error, status=status.HTTP_400_BAD_REQUEST)
+        token_cost = int(getattr(settings, "SLIP_REVIEW_RANDOMIZE_TOKEN_COST", 5))
+        try:
+            charge = token_wallet_service.charge_tokens(
+                request.user,
+                token_cost,
+                reason=TokenTransaction.Reason.SMART_RANDOMIZE_CHARGE,
+                reference_type="slip_review_randomize",
+                reference_id=str(review.id),
+                metadata={
+                    "review_id": review.id,
+                    "requested_games": serializer.validated_data["games"],
+                    "source": review.source,
+                },
+            )
+        except InsufficientTokens as exc:
+            return Response(
+                _insufficient_feature_tokens_payload(
+                    exc,
+                    feature="smart_randomize",
+                    token_cost=token_cost,
+                    review_id=review.id,
+                ),
+                status=status.HTTP_402_PAYMENT_REQUIRED,
+            )
+        ticket["billing"] = {
+            "status": "charged",
+            "token_cost": token_cost,
+            "transaction_id": charge.transaction.id if charge.transaction else None,
+            "wallet": charge.balance_after,
+        }
         return Response(_api_response_payload(ticket))
 
 
@@ -7835,6 +8282,356 @@ class SlipReviewRecapView(APIView):
         query.is_valid(raise_exception=True)
         days = query.validated_data.get("days") or 1
         return Response(_slip_recap_payload(request.user, days=days))
+
+
+class TokenWalletView(APIView):
+    permission_classes = [IsAuthenticated]
+    serializer_class = TokenWalletResponseSerializer
+
+    @extend_schema(
+        summary="Token wallet",
+        description=(
+            "Authenticated user endpoint. Returns the current user's token balance, "
+            "the active slip-review token costs, the free-token refill policy, and recent ledger activity."
+        ),
+        tags=["Tokens"],
+        responses={200: TokenWalletResponseSerializer},
+    )
+    def get(self, request):
+        try:
+            limit = int(request.query_params.get("transaction_limit", 10))
+        except (TypeError, ValueError):
+            limit = 10
+        limit = max(0, min(limit, 50))
+        return Response(_token_wallet_payload(request.user, transaction_limit=limit))
+
+
+class TokenPackageListView(APIView):
+    permission_classes = [IsAuthenticated]
+    serializer_class = TokenPackageListResponseSerializer
+
+    @extend_schema(
+        summary="Token packages",
+        description=(
+            "Authenticated user endpoint. Returns the configured token purchase packages. "
+            "This does not initiate payment; payment integration will validate against these package ids."
+        ),
+        tags=["Tokens"],
+        responses={200: TokenPackageListResponseSerializer},
+    )
+    def get(self, request):
+        packages = token_package_catalogue()
+        return Response(
+            {
+                "currency": str(getattr(settings, "TOKEN_PURCHASE_CURRENCY", "NGN") or "NGN").upper(),
+                "packages": packages,
+                "pricing": _token_pricing_payload(),
+                "refill_policy": _token_refill_policy_payload(),
+            }
+        )
+
+
+class TokenPurchaseView(APIView):
+    permission_classes = [IsAuthenticated]
+    serializer_class = TokenPurchaseListResponseSerializer
+
+    @extend_schema(
+        summary="Token purchases",
+        description=(
+            "Authenticated user endpoint. GET returns the current user's token purchase records. "
+            "POST creates a pending token purchase and asks Payfonte for bank-transfer payment details."
+        ),
+        tags=["Tokens"],
+        responses={200: TokenPurchaseListResponseSerializer},
+    )
+    def get(self, request):
+        try:
+            limit = int(request.query_params.get("limit", 50))
+        except (TypeError, ValueError):
+            limit = 50
+        limit = max(1, min(limit, 200))
+        purchases = TokenPurchase.objects.filter(user=request.user).order_by("-created_at", "-id")[:limit]
+        return Response(
+            {
+                "count": len(purchases),
+                "purchases": TokenPurchaseSerializer(purchases, many=True).data,
+            }
+        )
+
+    @extend_schema(
+        summary="Create token purchase",
+        description=(
+            "Creates a pending purchase record from one of the configured token packages and generates "
+            "Payfonte bank-transfer payment details. Tokens are credited only after Payfonte verification succeeds."
+        ),
+        tags=["Tokens"],
+        request=TokenPurchaseCreateRequestSerializer,
+        responses={201: TokenPurchaseCreateResponseSerializer},
+    )
+    def post(self, request):
+        serializer = TokenPurchaseCreateRequestSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        package_id = serializer.validated_data["package_id"]
+        package = token_package_by_id(package_id)
+        if not package:
+            return Response({"detail": "Unknown token package."}, status=status.HTTP_400_BAD_REQUEST)
+
+        purchase = token_wallet_service.create_token_purchase(
+            request.user,
+            package_id=package_id,
+            metadata=serializer.validated_data.get("metadata") or {},
+        )
+        try:
+            purchase = _initiate_payfonte_purchase(request, purchase)
+        except PayfonteError as exc:
+            token_wallet_service.fail_token_purchase(
+                purchase,
+                provider="payfonte",
+                metadata={"payfonte": {"initiation_error": str(exc)}},
+            )
+            return Response(
+                {"detail": "Could not generate payment account. Please try again.", "provider_error": str(exc)},
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
+
+        return Response(
+            {
+                "purchase": TokenPurchaseSerializer(purchase).data,
+                "package": package,
+            },
+            status=status.HTTP_201_CREATED,
+        )
+
+
+class TokenPurchaseAdminCompleteView(APIView):
+    permission_classes = [IsAdminUser]
+    serializer_class = TokenPurchaseAdminCompleteResponseSerializer
+
+    @extend_schema(
+        summary="Admin complete token purchase",
+        description=(
+            "Admin-only endpoint. Marks a pending token purchase as paid and credits paid tokens to the user's "
+            "wallet. The operation is idempotent, so retrying a paid purchase does not credit tokens twice."
+        ),
+        tags=["Tokens"],
+        request=TokenPurchaseAdminCompleteRequestSerializer,
+        responses={200: TokenPurchaseAdminCompleteResponseSerializer},
+    )
+    def post(self, request, purchase_id):
+        serializer = TokenPurchaseAdminCompleteRequestSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        purchase = get_object_or_404(TokenPurchase, id=purchase_id)
+        try:
+            result = token_wallet_service.complete_token_purchase(
+                purchase,
+                provider=serializer.validated_data.get("provider") or "",
+                provider_reference=serializer.validated_data.get("provider_reference") or "",
+                metadata={
+                    **(serializer.validated_data.get("metadata") or {}),
+                    "admin_user_id": request.user.id,
+                    "admin_username": getattr(request.user, "username", ""),
+                    "source": "admin_complete",
+                },
+            )
+        except ValueError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+        return Response(
+            {
+                "purchase": TokenPurchaseSerializer(result.purchase).data,
+                "wallet": result.balance_after,
+                "transaction": TokenTransactionSerializer(result.transaction).data if result.transaction else None,
+                "idempotent": result.idempotent,
+            }
+        )
+
+
+class TokenPurchaseVerifyView(APIView):
+    permission_classes = [IsAuthenticated]
+    serializer_class = TokenPurchaseVerifyResponseSerializer
+
+    @extend_schema(
+        summary="Verify token purchase payment",
+        description=(
+            "Authenticated user endpoint. Verifies the purchase with Payfonte using the provider reference. "
+            "If Payfonte returns success, paid tokens are credited idempotently."
+        ),
+        tags=["Tokens"],
+        responses={200: TokenPurchaseVerifyResponseSerializer},
+    )
+    def post(self, request, purchase_id):
+        purchase = get_object_or_404(TokenPurchase, id=purchase_id, user=request.user)
+        if purchase.provider != "payfonte":
+            return Response({"detail": "This purchase has no Payfonte payment to verify."}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            result = _settle_payfonte_purchase(purchase)
+        except (PayfonteError, ValueError) as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        return Response(_token_purchase_verify_payload(result))
+
+
+class PayfonteWebhookView(APIView):
+    permission_classes = [AllowAny]
+    authentication_classes = []
+
+    @extend_schema(
+        summary="Payfonte payment webhook",
+        description=(
+            "Webhook endpoint for Payfonte collection events. The payload is never trusted by itself; "
+            "the transaction is verified with Payfonte before tokens are credited."
+        ),
+        tags=["Tokens"],
+        request=dict,
+        responses={200: dict},
+    )
+    def post(self, request):
+        payload = request.data if isinstance(request.data, dict) else {}
+        data = payload.get("data") if isinstance(payload.get("data"), dict) else payload
+        reference = (
+            data.get("reference")
+            or data.get("externalReference")
+            or data.get("external_reference")
+            or data.get("providerReference")
+        )
+        if not reference:
+            return Response({"status": "ignored", "reason": "missing_reference"})
+
+        purchase = (
+            TokenPurchase.objects.filter(provider="payfonte", provider_reference=str(reference))
+            .order_by("-created_at", "-id")
+            .first()
+        )
+        if not purchase:
+            return Response({"status": "ignored", "reason": "purchase_not_found"})
+
+        try:
+            result = _settle_payfonte_purchase(purchase)
+        except PayfonteError as exc:
+            log.warning("Payfonte webhook verification failed reference=%s error=%s", reference, exc)
+            return Response({"status": "retry", "detail": "verification_failed"}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+        except ValueError as exc:
+            log.warning("Payfonte webhook rejected reference=%s error=%s", reference, exc)
+            return Response({"status": "rejected", "detail": str(exc)}, status=status.HTTP_200_OK)
+
+        return Response(
+            {
+                "status": "processed",
+                "purchase_id": result["purchase"].id,
+                "payfonte_status": result.get("payfonte_status") or "",
+                "idempotent": bool(result.get("idempotent")),
+            }
+        )
+
+
+class TokenPurchaseAdminFailView(APIView):
+    permission_classes = [IsAdminUser]
+    serializer_class = TokenPurchaseAdminFailResponseSerializer
+
+    @extend_schema(
+        summary="Admin fail token purchase",
+        description="Admin-only endpoint. Marks a pending token purchase as failed without crediting tokens.",
+        tags=["Tokens"],
+        request=TokenPurchaseAdminFailRequestSerializer,
+        responses={200: TokenPurchaseAdminFailResponseSerializer},
+    )
+    def post(self, request, purchase_id):
+        serializer = TokenPurchaseAdminFailRequestSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        purchase = get_object_or_404(TokenPurchase, id=purchase_id)
+        try:
+            purchase = token_wallet_service.fail_token_purchase(
+                purchase,
+                provider=serializer.validated_data.get("provider") or "",
+                provider_reference=serializer.validated_data.get("provider_reference") or "",
+                metadata={
+                    **(serializer.validated_data.get("metadata") or {}),
+                    "admin_user_id": request.user.id,
+                    "admin_username": getattr(request.user, "username", ""),
+                    "source": "admin_fail",
+                },
+            )
+        except ValueError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+        return Response({"purchase": TokenPurchaseSerializer(purchase).data})
+
+
+class TokenTransactionListView(APIView):
+    permission_classes = [IsAuthenticated]
+    serializer_class = TokenTransactionListResponseSerializer
+
+    @extend_schema(
+        summary="Token transactions",
+        description="Authenticated user endpoint. Returns recent token ledger transactions for the current user.",
+        tags=["Tokens"],
+        responses={200: TokenTransactionListResponseSerializer},
+    )
+    def get(self, request):
+        try:
+            limit = int(request.query_params.get("limit", 50))
+        except (TypeError, ValueError):
+            limit = 50
+        limit = max(1, min(limit, 200))
+        transactions = TokenTransaction.objects.filter(user=request.user).order_by("-created_at", "-id")[:limit]
+        return Response(
+            {
+                "count": len(transactions),
+                "transactions": TokenTransactionSerializer(transactions, many=True).data,
+            }
+        )
+
+
+class TokenAdminAdjustmentView(APIView):
+    permission_classes = [IsAdminUser]
+    serializer_class = TokenAdminAdjustmentResponseSerializer
+
+    @extend_schema(
+        summary="Admin token adjustment",
+        description=(
+            "Admin-only endpoint. Adds or removes free/paid tokens from a user's wallet and records a ledger "
+            "transaction. Intended for support credits, corrections, and future payment-webhook reuse."
+        ),
+        tags=["Tokens"],
+        request=TokenAdminAdjustmentRequestSerializer,
+        responses={200: TokenAdminAdjustmentResponseSerializer},
+    )
+    def post(self, request):
+        serializer = TokenAdminAdjustmentRequestSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+        user_model = get_user_model()
+        if data.get("user_id"):
+            target_user = get_object_or_404(user_model, id=data["user_id"])
+        else:
+            target_user = get_object_or_404(user_model, email=data["email"])
+
+        try:
+            result = token_wallet_service.adjust_tokens(
+                target_user,
+                free_tokens_delta=data.get("free_tokens_delta") or 0,
+                paid_tokens_delta=data.get("paid_tokens_delta") or 0,
+                reference_type="admin_adjustment",
+                reference_id=data.get("reference_id") or "",
+                metadata={
+                    "note": data.get("note", ""),
+                    "admin_user_id": request.user.id,
+                    "admin_username": getattr(request.user, "username", ""),
+                },
+            )
+        except ValueError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+        return Response(
+            {
+                "user": {
+                    "id": target_user.id,
+                    "username": getattr(target_user, "username", ""),
+                    "email": getattr(target_user, "email", ""),
+                },
+                "wallet": token_wallet_snapshot(result.wallet),
+                "transaction": TokenTransactionSerializer(result.transaction).data,
+            }
+        )
 
 
 class SlipReviewListView(APIView):

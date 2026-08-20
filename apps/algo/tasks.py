@@ -190,6 +190,21 @@ def recover_stale_slip_reviews(self, stale_after_seconds=None, limit=25):
 
 
 @shared_task(bind=True, ignore_result=False)
+def refill_daily_free_tokens(self, run_date=None, limit=None):
+    from .tokens import token_wallet_service
+
+    parsed_date = date.fromisoformat(run_date) if run_date else None
+    return token_wallet_service.refill_daily_free_tokens(run_date=parsed_date, limit=limit)
+
+
+@shared_task(bind=True, ignore_result=False)
+def expire_token_reservations(self, limit=200):
+    from .tokens import token_wallet_service
+
+    return token_wallet_service.expire_stale_reservations(limit=limit)
+
+
+@shared_task(bind=True, ignore_result=False)
 def recover_daily_run(self, run_id, rescore_failed=False):
     return algo_runner_service.recover_fanout_run(run_id, rescore_failed=rescore_failed)
 

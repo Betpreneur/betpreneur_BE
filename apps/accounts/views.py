@@ -129,8 +129,13 @@ class VerifyEmailView(APIView):
             user.email_verification_code = ""
             user.save(update_fields=["is_email_verified", "email_verification_code"])
 
+            grant = _grant_signup_tokens(user)
+
             return Response(
-                {"message": "Email verified successfully"},
+                {
+                    "message": "Email verified successfully",
+                    "tokens": grant,
+                },
                 status=status.HTTP_200_OK,
             )
 
@@ -138,6 +143,25 @@ class VerifyEmailView(APIView):
             {"error": "Invalid or expired verification code"},
             status=status.HTTP_400_BAD_REQUEST,
         )
+
+
+def _grant_signup_tokens(user):
+    """
+    Give a newly verified account its starting token balance.
+
+    Deliberately best-effort: the account *is* verified by the time this runs, and
+    failing the request would leave the user unable to retry (the code has already been
+    cleared). A failure here is self-healing -- the nightly refill tops any wallet at or
+    below the threshold up to the same cap -- so it is logged loudly and swallowed rather
+    than surfaced as a verification error.
+    """
+    from apps.algo.tokens import token_wallet_service
+
+    try:
+        return token_wallet_service.grant_signup_tokens(user).to_dict()
+    except Exception:
+        logger.exception("Signup token grant failed for user=%s", getattr(user, "id", None))
+        return None
 
 
 @extend_schema_view(

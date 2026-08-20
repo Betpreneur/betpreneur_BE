@@ -6,7 +6,7 @@ from django.test import SimpleTestCase, TestCase
 from django.utils import timezone
 from rest_framework.test import APIClient
 
-from apps.algo.models import SlipReview, SlipReviewEvent, SlipReviewStreamToken, SlipSelection
+from apps.algo.models import SlipReview, SlipReviewEvent, SlipReviewStreamToken, SlipSelection, TokenTransaction, TokenWallet
 from apps.algo.ticket_risk import SCORE_BANDS, Calibration
 from apps.algo.views import (
     _build_bettor_public_payload,
@@ -995,7 +995,10 @@ class SlipReviewPayloadDbTests(TestCase):
                     "odds": 1.44,
                     "confidence_score": 55,
                     "confidence_label": "Borderline",
-                    "verdict": "risky",
+                    # `_simple_pick_verdict` maps a 55 to "caution"; it only says "risky"
+                    # below 55. A "risky" pick is one the review told the user to avoid and
+                    # is no longer offered as a smart-randomize candidate.
+                    "verdict": "caution",
                     "summary": "Borderline.",
                 },
                 "analysis": {"positive_evidence": [], "risk_evidence": [], "conclusion": ""},
@@ -1110,6 +1113,7 @@ class SlipReviewPayloadDbTests(TestCase):
 
     def test_randomize_endpoint_returns_top_requested_picks(self):
         user = get_user_model().objects.create_user(username="randomize-user")
+        TokenWallet.objects.create(user=user, free_tokens=10, paid_tokens=0)
         review = SlipReview.objects.create(
             user=user,
             source=SlipReview.Source.SPORTYBET,
@@ -1137,9 +1141,42 @@ class SlipReviewPayloadDbTests(TestCase):
         self.assertEqual(payload["ticket"]["total_games"], 4)
         self.assertGreater(payload["ticket"]["confidence_score"], 70)
         self.assertTrue(any(item["match"] == "Epsilon vs Zeta" for item in payload["excluded"]))
+        self.assertEqual(payload["billing"]["status"], "charged")
+        self.assertEqual(payload["billing"]["token_cost"], 5)
+        self.assertEqual(payload["billing"]["wallet"]["free_tokens"], 5)
+        tx = TokenTransaction.objects.get(user=user)
+        self.assertEqual(tx.amount, -5)
+        self.assertEqual(tx.reason, TokenTransaction.Reason.SMART_RANDOMIZE_CHARGE)
+        self.assertEqual(tx.reference_type, "slip_review_randomize")
+        self.assertEqual(tx.reference_id, str(review.id))
+
+    def test_randomize_endpoint_rejects_when_wallet_cannot_cover_charge(self):
+        user = get_user_model().objects.create_user(username="randomize-low-balance")
+        TokenWallet.objects.create(user=user, free_tokens=4, paid_tokens=0)
+        review = SlipReview.objects.create(
+            user=user,
+            source=SlipReview.Source.SPORTYBET,
+            status=SlipReview.Status.COMPLETED,
+            title="SportyBet review",
+            summary={"bettor_public": self._randomize_review_payload()},
+        )
+        client = APIClient()
+        client.force_authenticate(user=user)
+
+        response = client.post(f"/api/algo/slip-reviews/{review.id}/randomize/", {"games": 4}, format="json")
+
+        self.assertEqual(response.status_code, 402)
+        payload = response.json()
+        self.assertEqual(payload["code"], "insufficient_tokens")
+        self.assertEqual(payload["feature"], "smart_randomize")
+        self.assertEqual(payload["required_tokens"], 5)
+        self.assertEqual(payload["available_tokens"], 4)
+        self.assertEqual(TokenWallet.objects.get(user=user).free_tokens, 4)
+        self.assertEqual(TokenTransaction.objects.count(), 0)
 
     def test_randomize_endpoint_rejects_unavailable_size(self):
         user = get_user_model().objects.create_user(username="randomize-size")
+        TokenWallet.objects.create(user=user, free_tokens=10, paid_tokens=0)
         review = SlipReview.objects.create(
             user=user,
             source=SlipReview.Source.SPORTYBET,
@@ -1154,6 +1191,8 @@ class SlipReviewPayloadDbTests(TestCase):
 
         self.assertEqual(response.status_code, 400)
         self.assertEqual(response.json()["available_options"], [2, 4])
+        self.assertEqual(TokenWallet.objects.get(user=user).free_tokens, 10)
+        self.assertEqual(TokenTransaction.objects.count(), 0)
 
     def test_randomize_endpoint_waits_for_analysis_to_finish(self):
         user = get_user_model().objects.create_user(username="randomize-progress")

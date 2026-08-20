@@ -473,6 +473,16 @@ and no capability tier produces any pile-up on its cap.
 hold-back and the other not. `apps/algo/tests/test_confidence_distribution.py` guards the
 distribution directly and fails against the old truncating behaviour.
 
+**Consumers must rank on the claim, not the estimate.** Anything that *selects between*
+legs has to use `min(probability, confidence)` — the same rule the status uses — or it will
+silently prefer thin evidence. Smart randomize did exactly that: it ranked on the raw
+probability, so a leg the review labelled `caution` could top a ticket sold as "the
+strongest analysed picks". Reporting the probability unchanged is right; *choosing* on it
+is not. It also filtered candidates with a denylist that let `risky` through, offering
+picks the review had told the user to avoid; that filter is now an allowlist and its floor
+is tied to the same 55 boundary `_match_checker_status` uses for `avoid`.
+See `apps/algo/tests/test_smart_randomize.py`.
+
 ## 11. Async execution and cost
 
 Current: serial per-leg loop, one `AlgoRun` per leg, worker at `--concurrency=1`. A 20-leg slip
