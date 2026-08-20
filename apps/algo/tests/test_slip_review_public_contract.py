@@ -1423,6 +1423,69 @@ class SlipReviewPayloadDbTests(TestCase):
         self.assertNotIn("summary", payload)
         self.assertNotIn("intelligence", payload)
 
+    def test_slip_review_list_defaults_to_lightweight_history(self):
+        user = get_user_model().objects.create_user(username="compact-list-api")
+        review = SlipReview.objects.create(
+            user=user,
+            source=SlipReview.Source.SPORTYBET,
+            status=SlipReview.Status.COMPLETED,
+            title="SportyBet review",
+            summary={},
+        )
+        for index in range(5):
+            SlipSelection.objects.create(
+                review=review,
+                order=index + 1,
+                submitted_match=f"Game {index + 1}",
+                submitted_market="Home Win",
+                status="analysed",
+                verdict="keep",
+                odds="1.80",
+            )
+
+        client = APIClient()
+        client.force_authenticate(user=user)
+        response = client.get("/api/algo/slip-reviews/")
+
+        self.assertEqual(response.status_code, 200)
+        item = response.json()["reviews"][0]
+        self.assertEqual(item["number_of_games"], 5)
+        self.assertEqual(item["picks"], [])
+        self.assertIn("created_at", item)
+        self.assertNotIn("summary", item)
+        self.assertNotIn("intelligence", item)
+
+    def test_slip_review_list_can_return_pick_preview(self):
+        user = get_user_model().objects.create_user(username="compact-list-preview")
+        review = SlipReview.objects.create(
+            user=user,
+            source=SlipReview.Source.SPORTYBET,
+            status=SlipReview.Status.COMPLETED,
+            title="SportyBet review",
+            summary={},
+        )
+        for index in range(3):
+            SlipSelection.objects.create(
+                review=review,
+                order=index + 1,
+                submitted_match=f"Game {index + 1}",
+                submitted_market="Home Win",
+                status="analysed",
+                verdict="keep",
+                odds="1.80",
+            )
+
+        client = APIClient()
+        client.force_authenticate(user=user)
+        response = client.get("/api/algo/slip-reviews/", {"pick_limit": 2})
+
+        self.assertEqual(response.status_code, 200)
+        item = response.json()["reviews"][0]
+        self.assertEqual(item["number_of_games"], 3)
+        self.assertEqual(item["picks_returned"], 2)
+        self.assertTrue(item["has_more_picks"])
+        self.assertEqual(item["picks"][0]["match"], "Game 1")
+
     def test_stale_recovery_finalizes_from_persisted_completed_legs(self):
         user = get_user_model().objects.create_user(username="stale-finalize")
         review = SlipReview.objects.create(

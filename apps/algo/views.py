@@ -6545,14 +6545,30 @@ def _compact_ai_pick_from_selection(selection):
     }
 
 
-def _compact_slip_review_list_payload(review):
-    selections = list(review.selections.all().order_by("order", "id"))
-    public_payload = (review.summary or {}).get("bettor_public") or {}
-    if not public_payload and (review.summary or {}).get("public"):
-        public_payload = _build_bettor_public_payload(review, (review.summary or {}).get("public") or {})
+def _compact_slip_review_list_payload(review, *, include_picks=True, pick_limit=None, use_summary=True):
+    summary = (review.summary or {}) if use_summary else {}
+    public_payload = summary.get("bettor_public") or {}
+    if not public_payload and summary.get("public"):
+        public_payload = _build_bettor_public_payload(review, summary.get("public") or {})
 
+    ticket = public_payload.get("ticket") or {}
+    number_of_games = (
+        ticket.get("total_games")
+        or getattr(review, "selection_count", None)
+        or summary.get("count")
+        or summary.get("total_legs")
+    )
     games = public_payload.get("games") or []
-    if games:
+    if not number_of_games:
+        number_of_games = len(games)
+
+    picks = []
+    truncated = False
+    if include_picks and games:
+        selected_games = games
+        if pick_limit is not None:
+            selected_games = games[:pick_limit]
+            truncated = len(games) > len(selected_games)
         picks = [
             {
                 "match": game.get("match"),
@@ -6568,9 +6584,17 @@ def _compact_slip_review_list_payload(review):
                     "action": (game.get("recommendation") or {}).get("action"),
                 },
             }
-            for game in games
+            for game in selected_games
         ]
-    else:
+    elif include_picks:
+        selections_qs = review.selections.all().order_by("order", "id")
+        if pick_limit is not None:
+            selections_qs = selections_qs[:pick_limit]
+        selections = list(selections_qs)
+        if not number_of_games:
+            number_of_games = len(selections)
+        if pick_limit is not None and number_of_games:
+            truncated = int(number_of_games) > len(selections)
         picks = [
             {
                 "match": selection.submitted_match,
@@ -6585,12 +6609,20 @@ def _compact_slip_review_list_payload(review):
             for selection in selections
         ]
 
-    return {
+    payload = {
         "id": review.id,
-        "number_of_games": len(selections) or len(games),
+        "number_of_games": int(number_of_games or 0),
         "status": _public_slip_review_status(review.status),
+        "source": review.source,
+        "title": review.title,
+        "created_at": review.created_at.isoformat() if review.created_at else None,
+        "updated_at": review.updated_at.isoformat() if review.updated_at else None,
         "picks": picks,
     }
+    if include_picks:
+        payload["picks_returned"] = len(picks)
+        payload["has_more_picks"] = truncated
+    return payload
 
 
 def _slip_review_payload(review, *, include_selections=True, public_only=False):
@@ -8653,16 +8685,41 @@ class SlipReviewListView(APIView):
         except (TypeError, ValueError):
             limit = 20
         limit = max(1, min(limit, 100))
-        reviews = (
+        view_mode = (request.query_params.get("view") or "compact").strip().lower()
+        include_picks = view_mode in {"full", "legacy"} or str(
+            request.query_params.get("include_picks", "")
+        ).strip().lower() in {"1", "true", "yes"}
+        try:
+            pick_limit = int(request.query_params.get("pick_limit", 0))
+        except (TypeError, ValueError):
+            pick_limit = 0
+        pick_limit = max(0, min(pick_limit, 20))
+        if include_picks and pick_limit == 0:
+            pick_limit = None
+
+        selected_fields = ["id", "source", "status", "title", "created_at", "updated_at"]
+        use_summary = include_picks and pick_limit is None
+        if use_summary:
+            selected_fields.append("summary")
+        reviews_qs = (
             SlipReview.objects.filter(user=request.user)
-            .prefetch_related("selections")
-            .order_by("-created_at")[:limit]
+            .annotate(selection_count=Count("selections"))
+            .only(*selected_fields)
+            .order_by("-created_at")
         )
+        if include_picks and pick_limit is None:
+            reviews_qs = reviews_qs.prefetch_related("selections")
+        reviews = list(reviews_qs[:limit])
         return Response(
             {
                 "count": len(reviews),
                 "reviews": [
-                    _compact_slip_review_list_payload(review)
+                    _compact_slip_review_list_payload(
+                        review,
+                        include_picks=include_picks or pick_limit > 0,
+                        pick_limit=pick_limit if pick_limit > 0 else None,
+                        use_summary=use_summary,
+                    )
                     for review in reviews
                 ],
             }
