@@ -448,7 +448,7 @@ class TokenWalletApiTests(TestCase):
         SLIP_REVIEW_TOKEN_COST_PER_GAME=1,
         SLIP_REVIEW_RANDOMIZE_TOKEN_COST=5,
     )
-    def test_token_wallet_endpoint_creates_wallet_and_returns_policy(self):
+    def test_token_wallet_endpoint_creates_wallet_and_returns_balance_only(self):
         self.client.force_authenticate(user=self.user)
 
         response = self.client.get("/api/algo/tokens/")
@@ -460,20 +460,16 @@ class TokenWalletApiTests(TestCase):
             {
                 "free_tokens": 0,
                 "paid_tokens": 0,
-                "total_tokens": 0,
-                "last_free_refill_date": None,
             },
         )
-        self.assertEqual(payload["pricing"]["slip_review_token_cost_per_game"], 1)
-        self.assertEqual(payload["pricing"]["smart_randomize_token_cost"], 5)
-        self.assertEqual(payload["refill_policy"]["free_daily_cap"], 50)
-        self.assertEqual(payload["refill_policy"]["free_refill_threshold"], 10)
-        self.assertEqual(payload["recent_transactions"], [])
+        self.assertNotIn("pricing", payload)
+        self.assertNotIn("refill_policy", payload)
+        self.assertNotIn("recent_transactions", payload)
         self.assertTrue(TokenWallet.objects.filter(user=self.user).exists())
 
-    def test_token_wallet_endpoint_returns_recent_transactions(self):
+    def test_token_wallet_endpoint_ignores_transaction_history(self):
         wallet = TokenWallet.objects.create(user=self.user, free_tokens=20, paid_tokens=4)
-        older = TokenTransaction.objects.create(
+        TokenTransaction.objects.create(
             user=self.user,
             wallet=wallet,
             amount=20,
@@ -482,7 +478,7 @@ class TokenWalletApiTests(TestCase):
             reason=TokenTransaction.Reason.DAILY_FREE_REFILL,
             balance_after={"free_tokens": 20, "paid_tokens": 4, "total_tokens": 24},
         )
-        newer = TokenTransaction.objects.create(
+        TokenTransaction.objects.create(
             user=self.user,
             wallet=wallet,
             amount=-5,
@@ -501,19 +497,17 @@ class TokenWalletApiTests(TestCase):
         payload = response.json()
         self.assertEqual(payload["wallet"]["free_tokens"], 20)
         self.assertEqual(payload["wallet"]["paid_tokens"], 4)
-        self.assertEqual(len(payload["recent_transactions"]), 1)
-        self.assertEqual(payload["recent_transactions"][0]["id"], newer.id)
-        self.assertNotEqual(payload["recent_transactions"][0]["id"], older.id)
+        self.assertNotIn("recent_transactions", payload)
 
-    def test_token_transactions_endpoint_returns_current_user_ledger_only(self):
+    def test_token_purchases_endpoint_returns_purchase_history_only(self):
         other_user = get_user_model().objects.create_user(
             username="other-token-api-user",
             email="other-token-api-user@example.com",
             password="test-pass",
         )
         wallet = TokenWallet.objects.create(user=self.user, free_tokens=10, paid_tokens=0)
-        other_wallet = TokenWallet.objects.create(user=other_user, free_tokens=10, paid_tokens=0)
-        own_tx = TokenTransaction.objects.create(
+        TokenWallet.objects.create(user=other_user, free_tokens=10, paid_tokens=0)
+        TokenTransaction.objects.create(
             user=self.user,
             wallet=wallet,
             amount=10,
@@ -522,23 +516,49 @@ class TokenWalletApiTests(TestCase):
             reason=TokenTransaction.Reason.DAILY_FREE_REFILL,
             balance_after={"free_tokens": 10, "paid_tokens": 0, "total_tokens": 10},
         )
-        TokenTransaction.objects.create(
+        purchase = TokenPurchase.objects.create(
+            user=self.user,
+            package_id="tokens_240_ngn_990",
+            tokens=240,
+            amount=990,
+            amount_kobo=99000,
+            currency="NGN",
+            status=TokenPurchase.Status.PAID,
+        )
+        TokenPurchase.objects.create(
             user=other_user,
-            wallet=other_wallet,
-            amount=10,
-            free_tokens_delta=10,
-            token_bucket=TokenTransaction.TokenBucket.FREE,
-            reason=TokenTransaction.Reason.DAILY_FREE_REFILL,
-            balance_after={"free_tokens": 10, "paid_tokens": 0, "total_tokens": 10},
+            package_id="tokens_480_ngn_1980",
+            tokens=480,
+            amount=1980,
+            amount_kobo=198000,
+            currency="NGN",
+            status=TokenPurchase.Status.PAID,
         )
         self.client.force_authenticate(user=self.user)
 
-        response = self.client.get("/api/algo/tokens/transactions/")
+        response = self.client.get("/api/algo/tokens/purchases/")
 
         self.assertEqual(response.status_code, 200)
         payload = response.json()
         self.assertEqual(payload["count"], 1)
-        self.assertEqual(payload["transactions"][0]["id"], own_tx.id)
+        self.assertEqual(
+            payload["purchases"][0],
+            {
+                "id": purchase.id,
+                "date": purchase.created_at.isoformat(),
+                "tokens": 240,
+                "amount": 990,
+                "currency": "NGN",
+                "status": TokenPurchase.Status.PAID,
+            },
+        )
+
+    def test_token_transactions_endpoint_is_removed(self):
+        self.client.force_authenticate(user=self.user)
+
+        response = self.client.get("/api/algo/tokens/transactions/")
+
+        self.assertEqual(response.status_code, 404)
 
     @override_settings(
         TOKEN_PURCHASE_PACKAGES="240:990,480:1980,720:2970,960:3960,1200:4950",
@@ -565,14 +585,15 @@ class TokenWalletApiTests(TestCase):
             },
         )
         self.assertEqual(payload["packages"][-1]["id"], "tokens_1200_ngn_4950")
-        self.assertIn("pricing", payload)
-        self.assertIn("refill_policy", payload)
+        self.assertNotIn("pricing", payload)
+        self.assertNotIn("refill_policy", payload)
 
     @override_settings(
         TOKEN_PURCHASE_PACKAGES="240:990,480:1980",
         TOKEN_PURCHASE_CURRENCY="NGN",
         PAYFONTE_CLIENT_ID="client-id",
         PAYFONTE_CLIENT_SECRET="client-secret",
+        PAYFONTE_VIRTUAL_ACCOUNT_TTL_MINUTES=30,
     )
     @patch("apps.algo.views.payfonte_client")
     def test_token_purchase_endpoint_creates_pending_purchase(self, client_mock):
@@ -608,6 +629,11 @@ class TokenWalletApiTests(TestCase):
         self.assertEqual(payload["purchase"]["status"], TokenPurchase.Status.PENDING)
         self.assertEqual(payload["purchase"]["payment"]["provider_reference"], "PF-REF-1")
         self.assertEqual(payload["purchase"]["payment"]["bank_account"]["account_number"], "1234567890")
+        self.assertEqual(payload["purchase"]["payment"]["validity_minutes"], 30)
+        self.assertGreater(payload["purchase"]["payment"]["expires_in_seconds"], 0)
+        self.assertLessEqual(payload["purchase"]["payment"]["expires_in_seconds"], 1800)
+        self.assertIn("within 30 minutes", payload["purchase"]["payment"]["instructions"])
+        self.assertTrue(payload["purchase"]["payment"]["expires_at"])
         self.assertEqual(payload["package"]["id"], "tokens_480_ngn_1980")
         self.assertFalse(TokenTransaction.objects.exists())
         request_payload = client_mock.return_value.direct_charge.call_args.args[0]

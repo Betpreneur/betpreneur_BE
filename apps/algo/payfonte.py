@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 from typing import Any
 
 import requests
 from django.conf import settings
+from django.utils import timezone
 
 
 class PayfonteError(Exception):
@@ -123,6 +125,9 @@ def payfonte_payment_payload(purchase) -> dict[str, Any]:
     direct_charge = dict(payfonte.get("direct_charge") or {})
     data = dict(direct_charge.get("data") or {})
     account = _find_bank_account_payload(data)
+    validity_minutes = max(1, int(getattr(settings, "PAYFONTE_VIRTUAL_ACCOUNT_TTL_MINUTES", 30) or 30))
+    expires_at = account.get("expires_at") or _fallback_payment_expires_at(purchase, validity_minutes)
+    expires_in_seconds = _payment_expires_in_seconds(expires_at)
     return {
         "provider": "payfonte",
         "provider_reference": purchase.provider_reference,
@@ -135,17 +140,37 @@ def payfonte_payment_payload(purchase) -> dict[str, Any]:
         "session_id": data.get("sessionId") or data.get("session_id") or "",
         "payment_reference": data.get("reference") or purchase.provider_reference,
         "bank_account": account,
-        "instructions": _payment_instructions(account),
+        "expires_at": expires_at,
+        "expires_in_seconds": expires_in_seconds,
+        "validity_minutes": validity_minutes,
+        "instructions": _payment_instructions(account, validity_minutes),
     }
 
 
-def _payment_instructions(account: dict[str, Any]) -> str:
+def _payment_instructions(account: dict[str, Any], validity_minutes: int) -> str:
     if not account:
-        return "Transfer the exact amount to the virtual account shown by Payfonte, then tap verify."
+        return f"Transfer the exact amount to the virtual account shown within {validity_minutes} minutes, then tap verify."
     account_number = account.get("account_number") or "the account number"
     bank_name = account.get("bank_name") or "the bank shown"
     account_name = account.get("account_name") or "the account name shown"
-    return f"Transfer the exact amount to {account_number} at {bank_name}, account name {account_name}, then tap verify."
+    return f"Transfer the exact amount to {account_number} at {bank_name}, account name {account_name}, within {validity_minutes} minutes, then tap verify."
+
+
+def _fallback_payment_expires_at(purchase, validity_minutes: int) -> str:
+    created_at = purchase.created_at or timezone.now()
+    return (created_at + timedelta(minutes=validity_minutes)).isoformat()
+
+
+def _payment_expires_in_seconds(expires_at: str) -> int:
+    if not expires_at:
+        return 0
+    try:
+        parsed = datetime.fromisoformat(str(expires_at).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return 0
+    if timezone.is_naive(parsed):
+        parsed = timezone.make_aware(parsed, timezone.get_current_timezone())
+    return max(0, int((parsed - timezone.now()).total_seconds()))
 
 
 def _find_bank_account_payload(payload: dict[str, Any]) -> dict[str, Any]:

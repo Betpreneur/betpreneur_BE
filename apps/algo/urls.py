@@ -37,7 +37,6 @@ from .views import (
     TokenPurchaseAdminFailView,
     TokenPurchaseVerifyView,
     TokenPurchaseView,
-    TokenTransactionListView,
     TokenWalletView,
     TopPickView,
 )
@@ -68,7 +67,6 @@ urlpatterns = [
         TokenPurchaseAdminFailView.as_view(),
         name="algo-token-purchase-admin-fail",
     ),
-    path("tokens/transactions/", TokenTransactionListView.as_view(), name="algo-token-transactions"),
     path("tokens/admin/adjust/", TokenAdminAdjustmentView.as_view(), name="algo-token-admin-adjust"),
     path("picks/", DailyPicksView.as_view(), name="algo-picks"),
     path("picks/download/", DailyPicksDownloadView.as_view(), name="algo-picks-download"),

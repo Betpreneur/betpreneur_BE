@@ -141,7 +141,6 @@ from .serializers import (
     TokenPurchaseListResponseSerializer,
     TokenPurchaseSerializer,
     TokenPurchaseVerifyResponseSerializer,
-    TokenTransactionListResponseSerializer,
     TokenTransactionSerializer,
     TokenWalletResponseSerializer,
     TopPickResponseSerializer,
@@ -266,18 +265,12 @@ def _token_refill_policy_payload():
     }
 
 
-def _token_wallet_payload(user, *, transaction_limit=10):
+def _token_wallet_payload(user):
     wallet = token_wallet_service.get_or_create_wallet(user)
-    transactions = TokenTransaction.objects.filter(user=user).order_by("-created_at", "-id")[:transaction_limit]
     wallet_payload = token_wallet_snapshot(wallet)
-    wallet_payload["last_free_refill_date"] = (
-        wallet.last_free_refill_date.isoformat() if wallet.last_free_refill_date else None
-    )
+    wallet_payload.pop("total_tokens", None)
     return {
         "wallet": wallet_payload,
-        "pricing": _token_pricing_payload(),
-        "refill_policy": _token_refill_policy_payload(),
-        "recent_transactions": TokenTransactionSerializer(transactions, many=True).data,
     }
 
 
@@ -8323,19 +8316,13 @@ class TokenWalletView(APIView):
     @extend_schema(
         summary="Token wallet",
         description=(
-            "Authenticated user endpoint. Returns the current user's token balance, "
-            "the active slip-review token costs, the free-token refill policy, and recent ledger activity."
+            "Authenticated user endpoint. Returns the current user's free and paid token balances."
         ),
         tags=["Tokens"],
         responses={200: TokenWalletResponseSerializer},
     )
     def get(self, request):
-        try:
-            limit = int(request.query_params.get("transaction_limit", 10))
-        except (TypeError, ValueError):
-            limit = 10
-        limit = max(0, min(limit, 50))
-        return Response(_token_wallet_payload(request.user, transaction_limit=limit))
+        return Response(_token_wallet_payload(request.user))
 
 
 class TokenPackageListView(APIView):
@@ -8357,8 +8344,6 @@ class TokenPackageListView(APIView):
             {
                 "currency": str(getattr(settings, "TOKEN_PURCHASE_CURRENCY", "NGN") or "NGN").upper(),
                 "packages": packages,
-                "pricing": _token_pricing_payload(),
-                "refill_policy": _token_refill_policy_payload(),
             }
         )
 
@@ -8386,7 +8371,17 @@ class TokenPurchaseView(APIView):
         return Response(
             {
                 "count": len(purchases),
-                "purchases": TokenPurchaseSerializer(purchases, many=True).data,
+                "purchases": [
+                    {
+                        "id": purchase.id,
+                        "date": purchase.created_at.isoformat() if purchase.created_at else None,
+                        "tokens": int(purchase.tokens or 0),
+                        "amount": int(purchase.amount or 0),
+                        "currency": purchase.currency,
+                        "status": purchase.status,
+                    }
+                    for purchase in purchases
+                ],
             }
         )
 
@@ -8586,31 +8581,6 @@ class TokenPurchaseAdminFailView(APIView):
             return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
 
         return Response({"purchase": TokenPurchaseSerializer(purchase).data})
-
-
-class TokenTransactionListView(APIView):
-    permission_classes = [IsAuthenticated]
-    serializer_class = TokenTransactionListResponseSerializer
-
-    @extend_schema(
-        summary="Token transactions",
-        description="Authenticated user endpoint. Returns recent token ledger transactions for the current user.",
-        tags=["Tokens"],
-        responses={200: TokenTransactionListResponseSerializer},
-    )
-    def get(self, request):
-        try:
-            limit = int(request.query_params.get("limit", 50))
-        except (TypeError, ValueError):
-            limit = 50
-        limit = max(1, min(limit, 200))
-        transactions = TokenTransaction.objects.filter(user=request.user).order_by("-created_at", "-id")[:limit]
-        return Response(
-            {
-                "count": len(transactions),
-                "transactions": TokenTransactionSerializer(transactions, many=True).data,
-            }
-        )
 
 
 class TokenAdminAdjustmentView(APIView):

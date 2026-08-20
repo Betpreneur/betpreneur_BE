@@ -23,9 +23,6 @@ class TokenTransactionSerializer(serializers.ModelSerializer):
 
 class TokenWalletResponseSerializer(serializers.Serializer):
     wallet = serializers.DictField()
-    pricing = serializers.DictField()
-    refill_policy = serializers.DictField()
-    recent_transactions = TokenTransactionSerializer(many=True)
 
 
 class TokenPackageSerializer(serializers.Serializer):
@@ -116,11 +113,6 @@ class TokenPurchaseVerifyResponseSerializer(serializers.Serializer):
     transaction = TokenTransactionSerializer(required=False, allow_null=True)
     idempotent = serializers.BooleanField(default=False)
     payfonte_status = serializers.CharField()
-
-
-class TokenTransactionListResponseSerializer(serializers.Serializer):
-    count = serializers.IntegerField()
-    transactions = TokenTransactionSerializer(many=True)
 
 
 class TokenAdminAdjustmentRequestSerializer(serializers.Serializer):

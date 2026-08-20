@@ -61,6 +61,7 @@ services:
       PAYFONTE_BANK_TRANSFER_NETWORK: ${PAYFONTE_BANK_TRANSFER_NETWORK:-}
       PAYFONTE_WEBHOOK_URL: ${PAYFONTE_WEBHOOK_URL:-}
       PAYFONTE_TIMEOUT: ${PAYFONTE_TIMEOUT:-30}
+      PAYFONTE_VIRTUAL_ACCOUNT_TTL_MINUTES: ${PAYFONTE_VIRTUAL_ACCOUNT_TTL_MINUTES:-30}
     command: >
       sh -c "echo '[startup] running migrations' &&
       python manage.py migrate --noinput &&
@@ -126,6 +127,7 @@ services:
       PAYFONTE_BANK_TRANSFER_NETWORK: ${PAYFONTE_BANK_TRANSFER_NETWORK:-}
       PAYFONTE_WEBHOOK_URL: ${PAYFONTE_WEBHOOK_URL:-}
       PAYFONTE_TIMEOUT: ${PAYFONTE_TIMEOUT:-30}
+      PAYFONTE_VIRTUAL_ACCOUNT_TTL_MINUTES: ${PAYFONTE_VIRTUAL_ACCOUNT_TTL_MINUTES:-30}
     command: celery -A config worker --loglevel=info -Q ${CELERY_WORKER_QUEUES:-celery} --concurrency=${CELERY_WORKER_CONCURRENCY:-1} --max-tasks-per-child=1 --prefetch-multiplier=1
     volumes:
       - media:/home/appuser/media
@@ -297,6 +299,7 @@ services:
       PAYFONTE_BANK_TRANSFER_NETWORK: ${PAYFONTE_BANK_TRANSFER_NETWORK:-}
       PAYFONTE_WEBHOOK_URL: ${PAYFONTE_WEBHOOK_URL:-}
       PAYFONTE_TIMEOUT: ${PAYFONTE_TIMEOUT:-30}
+      PAYFONTE_VIRTUAL_ACCOUNT_TTL_MINUTES: ${PAYFONTE_VIRTUAL_ACCOUNT_TTL_MINUTES:-30}
     command: celery -A config worker --loglevel=info -Q ${SLIP_REVIEW_IMPORT_QUEUE:-slip_review_import} --concurrency=${SLIP_REVIEW_IMPORT_WORKER_CONCURRENCY:-2} --max-tasks-per-child=${SLIP_REVIEW_IMPORT_MAX_TASKS_PER_CHILD:-50} --prefetch-multiplier=1
     volumes:
       - media:/home/appuser/media
@@ -344,6 +347,7 @@ services:
       PAYFONTE_BANK_TRANSFER_NETWORK: ${PAYFONTE_BANK_TRANSFER_NETWORK:-}
       PAYFONTE_WEBHOOK_URL: ${PAYFONTE_WEBHOOK_URL:-}
       PAYFONTE_TIMEOUT: ${PAYFONTE_TIMEOUT:-30}
+      PAYFONTE_VIRTUAL_ACCOUNT_TTL_MINUTES: ${PAYFONTE_VIRTUAL_ACCOUNT_TTL_MINUTES:-30}
     command: celery -A config worker --loglevel=info -Q ${SLIP_REVIEW_LEG_QUEUE:-slip_review_leg} --concurrency=${SLIP_REVIEW_LEG_WORKER_CONCURRENCY:-8} --max-tasks-per-child=${SLIP_REVIEW_LEG_MAX_TASKS_PER_CHILD:-20} --prefetch-multiplier=1
     volumes:
       - media:/home/appuser/media
@@ -386,6 +390,7 @@ services:
       PAYFONTE_BANK_TRANSFER_NETWORK: ${PAYFONTE_BANK_TRANSFER_NETWORK:-}
       PAYFONTE_WEBHOOK_URL: ${PAYFONTE_WEBHOOK_URL:-}
       PAYFONTE_TIMEOUT: ${PAYFONTE_TIMEOUT:-30}
+      PAYFONTE_VIRTUAL_ACCOUNT_TTL_MINUTES: ${PAYFONTE_VIRTUAL_ACCOUNT_TTL_MINUTES:-30}
     command: celery -A config worker --loglevel=info -Q ${SLIP_REVIEW_FINALIZE_QUEUE:-slip_review_finalize} --concurrency=${SLIP_REVIEW_FINALIZE_WORKER_CONCURRENCY:-2} --max-tasks-per-child=${SLIP_REVIEW_FINALIZE_MAX_TASKS_PER_CHILD:-50} --prefetch-multiplier=1
     volumes:
       - media:/home/appuser/media
@@ -445,6 +450,7 @@ services:
       PAYFONTE_BANK_TRANSFER_NETWORK: ${PAYFONTE_BANK_TRANSFER_NETWORK:-}
       PAYFONTE_WEBHOOK_URL: ${PAYFONTE_WEBHOOK_URL:-}
       PAYFONTE_TIMEOUT: ${PAYFONTE_TIMEOUT:-30}
+      PAYFONTE_VIRTUAL_ACCOUNT_TTL_MINUTES: ${PAYFONTE_VIRTUAL_ACCOUNT_TTL_MINUTES:-30}
     command: celery -A config beat --loglevel=info --schedule=/tmp/celerybeat-schedule
 
 volumes:
