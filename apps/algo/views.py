@@ -319,11 +319,11 @@ def _verified_payfonte_amount_matches(purchase, data):
         raise ValueError("Verified Payfonte currency does not match this token purchase.")
 
 
-def _settle_payfonte_purchase(purchase, *, verification_data=None):
+def _settle_payfonte_purchase(purchase, *, verification_data=None, verification_reference=None):
     reference = purchase.provider_reference
     if not reference:
         raise ValueError("Token purchase has no Payfonte reference to verify.")
-    data = verification_data or payfonte_client().verify_payment(reference)
+    data = verification_data or payfonte_client().verify_payment(verification_reference or reference)
     status_value = str(data.get("status") or "").lower()
     metadata = {"payfonte": {"verification": {"data": data, "verified_at": timezone.now().isoformat()}}}
     if status_value == "success":
@@ -379,6 +379,35 @@ def _token_purchase_verify_payload(result):
         "idempotent": bool(result.get("idempotent")),
         "payfonte_status": result.get("payfonte_status") or "",
     }
+
+
+def _payfonte_webhook_references(payload, data):
+    candidates = [
+        data.get("externalReference"),
+        data.get("external_reference"),
+        data.get("externalReference".lower()),
+        payload.get("externalReference"),
+        payload.get("external_reference"),
+        data.get("reference"),
+        data.get("paymentReference"),
+        data.get("payment_reference"),
+        data.get("providerReference"),
+        payload.get("reference"),
+    ]
+    return [str(value).strip() for value in candidates if value]
+
+
+def _payfonte_transaction_reference(payload, data):
+    for value in (
+        data.get("reference"),
+        data.get("paymentReference"),
+        data.get("payment_reference"),
+        payload.get("reference"),
+    ):
+        if value:
+            return str(value).strip()
+    references = _payfonte_webhook_references(payload, data)
+    return references[0] if references else ""
 
 
 def _slip_review_token_cost(selection_count):
@@ -8514,31 +8543,35 @@ class PayfonteWebhookView(APIView):
     def post(self, request):
         payload = request.data if isinstance(request.data, dict) else {}
         data = payload.get("data") if isinstance(payload.get("data"), dict) else payload
-        reference = (
-            data.get("reference")
-            or data.get("externalReference")
-            or data.get("external_reference")
-            or data.get("providerReference")
-        )
-        if not reference:
+        references = _payfonte_webhook_references(payload, data)
+        if not references:
             return Response({"status": "ignored", "reason": "missing_reference"})
 
         purchase = (
-            TokenPurchase.objects.filter(provider="payfonte", provider_reference=str(reference))
+            TokenPurchase.objects.filter(provider="payfonte", provider_reference__in=references)
             .order_by("-created_at", "-id")
             .first()
         )
         if not purchase:
-            return Response({"status": "ignored", "reason": "purchase_not_found"})
+            metadata = data.get("metadata") if isinstance(data.get("metadata"), dict) else {}
+            purchase_id = metadata.get("purchaseId") or metadata.get("purchase_id")
+            if purchase_id:
+                purchase = TokenPurchase.objects.filter(provider="payfonte", id=purchase_id).first()
+        if not purchase:
+            return Response({"status": "ignored", "reason": "purchase_not_found", "references": references})
 
+        transaction_reference = _payfonte_transaction_reference(payload, data)
         try:
-            result = _settle_payfonte_purchase(purchase)
+            result = _settle_payfonte_purchase(purchase, verification_reference=transaction_reference)
         except PayfonteError as exc:
-            log.warning("Payfonte webhook verification failed reference=%s error=%s", reference, exc)
+            log.warning("Payfonte webhook verification failed references=%s error=%s", references, exc)
             return Response({"status": "retry", "detail": "verification_failed"}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
         except ValueError as exc:
-            log.warning("Payfonte webhook rejected reference=%s error=%s", reference, exc)
+            log.warning("Payfonte webhook rejected references=%s error=%s", references, exc)
             return Response({"status": "rejected", "detail": str(exc)}, status=status.HTTP_200_OK)
+        except Exception as exc:
+            log.exception("Payfonte webhook settlement failed references=%s", references)
+            return Response({"status": "retry", "detail": "settlement_failed"}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
 
         return Response(
             {
