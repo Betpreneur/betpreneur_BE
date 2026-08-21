@@ -9,6 +9,7 @@ from apps.algo.views import (
     _generated_market_names_for_family,
     _blocked_slip_recommendation_market,
     _market_can_skip_core_on_demand,
+    _market_profile_fit_score,
     _manual_verdict,
     _public_market_pick,
     _replacement_market_for_slip,
@@ -160,6 +161,12 @@ class UserPickAdvisoryTests(SimpleTestCase):
             "advisory_score": 68,
             "advisory_status": "playable",
             "market_taxonomy": {"family": "cards_total"},
+            "market_capability": {"data_quality": "medium"},
+            "advisory_evidence": {
+                "expected_total_cards": 3.8,
+                "line": 5.5,
+                "selection": "under",
+            },
         }
 
         verdict = _manual_verdict(selected, replacement)
@@ -219,9 +226,27 @@ class UserPickAdvisoryTests(SimpleTestCase):
             "market_taxonomy": {"family": "match_result", "side": "away"},
         }
         generated = [
-            {"market": "DC: 1X", "advisory_score": 78, "market_taxonomy": {"family": "double_chance", "side": "home_or_draw"}},
-            {"market": "DC: 12", "advisory_score": 76, "market_taxonomy": {"family": "double_chance", "side": "home_or_away"}},
-            {"market": "DC: X2", "advisory_score": 66, "market_taxonomy": {"family": "double_chance", "side": "draw_or_away"}},
+            {
+                "market": "DC: 1X",
+                "advisory_score": 78,
+                "market_taxonomy": {"family": "double_chance", "side": "home_or_draw"},
+                "market_capability": {"data_quality": "medium"},
+                "advisory_evidence": {"home_win_probability": 45, "draw_probability": 33},
+            },
+            {
+                "market": "DC: 12",
+                "advisory_score": 76,
+                "market_taxonomy": {"family": "double_chance", "side": "home_or_away"},
+                "market_capability": {"data_quality": "medium"},
+                "advisory_evidence": {"home_win_probability": 45, "away_win_probability": 31},
+            },
+            {
+                "market": "DC: X2",
+                "advisory_score": 66,
+                "market_taxonomy": {"family": "double_chance", "side": "draw_or_away"},
+                "market_capability": {"data_quality": "medium"},
+                "advisory_evidence": {"draw_probability": 33, "away_win_probability": 33},
+            },
         ]
 
         replacement = _replacement_market_for_slip({"markets": []}, selected_market=selected, generated_markets=generated)
@@ -236,8 +261,20 @@ class UserPickAdvisoryTests(SimpleTestCase):
             "market_taxonomy": {"family": "match_result", "side": "home"},
         }
         generated = [
-            {"market": "DC: X2", "advisory_score": 80, "market_taxonomy": {"family": "double_chance", "side": "draw_or_away"}},
-            {"market": "DC: 1X", "advisory_score": 65, "market_taxonomy": {"family": "double_chance", "side": "home_or_draw"}},
+            {
+                "market": "DC: X2",
+                "advisory_score": 80,
+                "market_taxonomy": {"family": "double_chance", "side": "draw_or_away"},
+                "market_capability": {"data_quality": "medium"},
+                "advisory_evidence": {"draw_probability": 34, "away_win_probability": 46},
+            },
+            {
+                "market": "DC: 1X",
+                "advisory_score": 65,
+                "market_taxonomy": {"family": "double_chance", "side": "home_or_draw"},
+                "market_capability": {"data_quality": "medium"},
+                "advisory_evidence": {"home_win_probability": 34, "draw_probability": 31},
+            },
         ]
 
         replacement = _replacement_market_for_slip({"markets": []}, selected_market=selected, generated_markets=generated)
@@ -270,6 +307,245 @@ class UserPickAdvisoryTests(SimpleTestCase):
 
         self.assertIsNone(replacement)
 
+    def test_result_pick_can_use_goal_market_broad_fallback_when_supported(self):
+        selected = {
+            "market": "Away Win",
+            "advisory_score": 29,
+            "advisory_status": "avoid",
+            "market_taxonomy": describe_market("Away Win").to_dict(),
+        }
+        generated = [
+            {
+                "market": "Over 2.5",
+                "advisory_score": 73,
+                "advisory_status": "playable",
+                "market_taxonomy": describe_market("Over 2.5").to_dict(),
+                "advisory_evidence": {
+                    "expected_goals": 3.2,
+                    "line": 2.5,
+                    "selection": "over",
+                },
+            }
+        ]
+
+        replacement = _replacement_market_for_slip(
+            {"markets": []},
+            selected_market=selected,
+            generated_markets=generated,
+            allow_safer_fallback=True,
+        )
+
+        self.assertEqual(replacement["market"], "Over 2.5")
+        self.assertEqual(replacement["recommendation_strength"], "safer_alternative")
+
+    def test_stage8_home_win_can_use_goal_market_when_goal_evidence_is_strong(self):
+        selected = {
+            "market": "Home Win",
+            "advisory_score": 31,
+            "advisory_status": "avoid",
+            "market_taxonomy": describe_market("Home Win").to_dict(),
+        }
+        generated = [
+            {
+                "market": "Over 2.5",
+                "advisory_score": 74,
+                "advisory_status": "playable",
+                "market_taxonomy": describe_market("Over 2.5").to_dict(),
+                "market_capability": {"data_quality": "medium"},
+                "advisory_evidence": {
+                    "expected_goals": 3.45,
+                    "line": 2.5,
+                    "selection": "over",
+                },
+            }
+        ]
+
+        replacement = _replacement_market_for_slip(
+            {"markets": []},
+            selected_market=selected,
+            generated_markets=generated,
+            allow_safer_fallback=True,
+        )
+
+        self.assertEqual(replacement["market"], "Over 2.5")
+
+    def test_stage8_home_win_can_use_corner_market_when_corner_evidence_is_strong(self):
+        selected = {
+            "market": "Home Win",
+            "advisory_score": 32,
+            "advisory_status": "avoid",
+            "market_taxonomy": describe_market("Home Win").to_dict(),
+        }
+        generated = [
+            {
+                "market": "Over 2.5",
+                "advisory_score": 62,
+                "advisory_status": "playable",
+                "market_taxonomy": describe_market("Over 2.5").to_dict(),
+                "market_capability": {"data_quality": "medium"},
+                "advisory_evidence": {
+                    "expected_goals": 2.7,
+                    "line": 2.5,
+                    "selection": "over",
+                },
+            },
+            {
+                "market": "Corners Over 8.5",
+                "advisory_score": 76,
+                "advisory_status": "playable",
+                "market_taxonomy": describe_market("Corners Over 8.5").to_dict(),
+                "market_capability": {"data_quality": "medium"},
+                "advisory_evidence": {
+                    "expected_total_corners": 11.2,
+                    "line": 8.5,
+                    "selection": "over",
+                },
+            },
+        ]
+
+        replacement = _replacement_market_for_slip(
+            {"markets": []},
+            selected_market=selected,
+            generated_markets=generated,
+            allow_safer_fallback=True,
+        )
+
+        self.assertEqual(replacement["market"], "Corners Over 8.5")
+
+    def test_stage8_home_win_goal_replacement_needs_fixture_specific_evidence(self):
+        selected = {
+            "market": "Home Win",
+            "advisory_score": 31,
+            "advisory_status": "avoid",
+            "market_taxonomy": describe_market("Home Win").to_dict(),
+        }
+        generated = [
+            {
+                "market": "Over 2.5",
+                "advisory_score": 74,
+                "advisory_status": "playable",
+                "market_taxonomy": describe_market("Over 2.5").to_dict(),
+                "market_capability": {"data_quality": "medium"},
+                "advisory_evidence": {
+                    "historical_accuracy": 58.4,
+                    "sample_size": 933,
+                    "similar_market_roi": 6.3,
+                },
+            }
+        ]
+
+        replacement = _replacement_market_for_slip(
+            {"markets": []},
+            selected_market=selected,
+            generated_markets=generated,
+            allow_safer_fallback=True,
+        )
+
+        self.assertIsNone(replacement)
+
+    def test_stage8_away_win_prefers_dnb_away_when_cross_family_is_only_close(self):
+        selected = {
+            "market": "Away Win",
+            "advisory_score": 29,
+            "advisory_status": "avoid",
+            "market_taxonomy": describe_market("Away Win").to_dict(),
+        }
+        generated = [
+            {
+                "market": "DNB Away",
+                "advisory_score": 66,
+                "advisory_status": "playable",
+                "market_taxonomy": describe_market("DNB Away").to_dict(),
+                "market_capability": {"data_quality": "medium"},
+                "advisory_evidence": {"away_win_probability": 43, "draw_probability": 23},
+            },
+            {
+                "market": "Over 2.5",
+                "advisory_score": 74,
+                "advisory_status": "playable",
+                "market_taxonomy": describe_market("Over 2.5").to_dict(),
+                "market_capability": {"data_quality": "medium"},
+                "advisory_evidence": {
+                    "expected_goals": 3.0,
+                    "line": 2.5,
+                    "selection": "over",
+                },
+            },
+        ]
+
+        replacement = _replacement_market_for_slip(
+            {"markets": []},
+            selected_market=selected,
+            generated_markets=generated,
+            allow_safer_fallback=True,
+        )
+
+        self.assertEqual(replacement["market"], "DNB Away")
+
+    def test_result_pick_generates_fixture_wide_modelled_candidates(self):
+        def evaluate_market(descriptor, **kwargs):
+            if descriptor.canonical not in {"Over 2.5", "Corners Over 8.5"}:
+                return {"available": False, "score": None}
+            return {
+                "available": True,
+                "score": 72,
+                "status": "playable",
+                "basis": "test_model",
+                "warnings": [],
+                "evidence": {"line": descriptor.line, "selection": descriptor.selection},
+            }
+
+        with patch("apps.algo.views.capability_for_descriptor", return_value={"data_quality": "medium"}), patch(
+            "apps.algo.views.statpal_market_advisory.evaluate_market", side_effect=evaluate_market
+        ), patch("apps.algo.views.statpal_market_advisory.reference_price", return_value={}):
+            generated = _generated_match_checker_markets(
+                describe_market("Away Win"),
+                game={},
+                statpal_context={
+                    "snapshots": {
+                        "detailed_stats": {
+                            "summary": {
+                                "home_corners": 5,
+                                "away_corners": 4,
+                            }
+                        }
+                    }
+                },
+            )
+
+        by_market = {market["market"]: market for market in generated}
+        self.assertIn("Over 2.5", by_market)
+        self.assertIn("Corners Over 8.5", by_market)
+        self.assertEqual(by_market["Over 2.5"]["generated_source"], "fixture_wide_market_pool")
+        self.assertEqual(by_market["Corners Over 8.5"]["generated_source"], "fixture_wide_market_pool")
+
+    def test_result_pick_can_use_thesis_preserving_result_repair(self):
+        selected = {
+            "market": "Away Win",
+            "advisory_score": 29,
+            "advisory_status": "avoid",
+            "market_taxonomy": describe_market("Away Win").to_dict(),
+        }
+        generated = [
+            {
+                "market": "DNB Away",
+                "advisory_score": 66,
+                "advisory_status": "playable",
+                "market_taxonomy": describe_market("DNB Away").to_dict(),
+                "market_capability": {"data_quality": "medium"},
+                "advisory_evidence": {"away_win_probability": 43, "draw_probability": 23},
+            }
+        ]
+
+        replacement = _replacement_market_for_slip(
+            {"markets": []},
+            selected_market=selected,
+            generated_markets=generated,
+            allow_safer_fallback=True,
+        )
+
+        self.assertEqual(replacement["market"], "DNB Away")
+
     def test_replacement_candidate_must_have_model_probability(self):
         selected = {
             "market": "Home Win",
@@ -297,6 +573,37 @@ class UserPickAdvisoryTests(SimpleTestCase):
 
         self.assertIsNone(replacement)
 
+    def test_analysed_weak_pick_uses_supported_fit_even_without_large_lift(self):
+        selected = {
+            "market": "Over 2.5",
+            "advisory_score": 54,
+            "advisory_status": "avoid",
+            "market_taxonomy": describe_market("Over 2.5").to_dict(),
+        }
+        generated = [
+            {
+                "market": "Over 1.5",
+                "advisory_score": 56,
+                "advisory_status": "playable",
+                "market_taxonomy": describe_market("Over 1.5").to_dict(),
+                "advisory_evidence": {
+                    "expected_goals": 2.4,
+                    "line": 1.5,
+                    "selection": "over",
+                },
+            }
+        ]
+
+        replacement = _replacement_market_for_slip(
+            {"markets": []},
+            selected_market=selected,
+            generated_markets=generated,
+            allow_safer_fallback=True,
+        )
+
+        self.assertEqual(replacement["market"], "Over 1.5")
+        self.assertEqual(replacement["recommendation_strength"], "best_fit_alternative")
+
     def test_replacement_never_recommends_easy_over_half_goal_market(self):
         selected = {
             "market": "Over 2.5",
@@ -316,6 +623,12 @@ class UserPickAdvisoryTests(SimpleTestCase):
                 "advisory_score": 70,
                 "advisory_status": "playable",
                 "market_taxonomy": {"family": "total_goals"},
+                "market_capability": {"data_quality": "medium"},
+                "advisory_evidence": {
+                    "expected_goals": 2.4,
+                    "line": 3.5,
+                    "selection": "under",
+                },
             },
         ]
         blocked = []
@@ -330,6 +643,111 @@ class UserPickAdvisoryTests(SimpleTestCase):
 
         self.assertEqual(replacement["market"], "Under 3.5")
         self.assertEqual(blocked, ["Over 0.5"])
+
+    def test_replacement_candidate_requires_strict_model_eligibility(self):
+        selected = {
+            "market": "Home Win",
+            "advisory_score": 42,
+            "advisory_status": "avoid",
+            "market_taxonomy": describe_market("Home Win").to_dict(),
+        }
+        generated = [
+            {
+                "market": "Over 2.5",
+                "advisory_score": None,
+                "market_taxonomy": describe_market("Over 2.5").to_dict(),
+                "market_capability": {"data_quality": "medium"},
+                "advisory_evidence": {"expected_goals": 3.1, "line": 2.5, "selection": "over"},
+            },
+            {
+                "market": "Over 3.5",
+                "advisory_score": 72,
+                "market_taxonomy": describe_market("Over 3.5").to_dict(),
+                "market_capability": {"data_quality": "poor"},
+                "advisory_evidence": {"expected_goals": 4.1, "line": 3.5, "selection": "over"},
+            },
+            {
+                "market": "GG / BTTS Yes",
+                "advisory_score": 70,
+                "market_taxonomy": describe_market("GG / BTTS Yes").to_dict(),
+                "market_capability": {"data_quality": "medium"},
+                "advisory_evidence": {},
+            },
+            {
+                "market": "Away Win",
+                "advisory_score": 69,
+                "advisory_warnings": ["result_model_market_disagreement"],
+                "market_taxonomy": describe_market("Away Win").to_dict(),
+                "market_capability": {"data_quality": "medium"},
+                "advisory_evidence": {"away_win_probability": 69},
+            },
+        ]
+
+        replacement = _replacement_market_for_slip(
+            {"markets": []},
+            selected_market=selected,
+            generated_markets=generated,
+            allow_safer_fallback=True,
+        )
+
+        self.assertIsNone(replacement)
+
+    def test_market_fit_scoring_uses_family_specific_profiles(self):
+        self.assertGreater(
+            _market_profile_fit_score(
+                {
+                    "market": "Over 2.5",
+                    "market_taxonomy": describe_market("Over 2.5").to_dict(),
+                    "advisory_evidence": {"expected_goals": 3.4, "line": 2.5, "selection": "over"},
+                }
+            ),
+            80,
+        )
+        self.assertLess(
+            _market_profile_fit_score(
+                {
+                    "market": "1H Over 1.5",
+                    "market_taxonomy": describe_market("1H Over 1.5").to_dict(),
+                    "advisory_evidence": {"first_half_expected_goals": 0.9, "line": 1.5, "selection": "over"},
+                }
+            ),
+            50,
+        )
+        self.assertGreater(
+            _market_profile_fit_score(
+                {
+                    "market": "Corners Over 8.5",
+                    "market_taxonomy": describe_market("Corners Over 8.5").to_dict(),
+                    "advisory_evidence": {"expected_total_corners": 11.0, "line": 8.5, "selection": "over"},
+                }
+            ),
+            70,
+        )
+        self.assertGreater(
+            _market_profile_fit_score(
+                {
+                    "market": "Cards Over 4.5",
+                    "market_taxonomy": describe_market("Cards Over 4.5").to_dict(),
+                    "advisory_evidence": {
+                        "expected_total_cards": 4.6,
+                        "referee_cards_per_game": 6.2,
+                        "line": 4.5,
+                        "selection": "over",
+                    },
+                }
+            ),
+            55,
+        )
+        self.assertEqual(
+            _market_profile_fit_score(
+                {
+                    "market": "DNB Away",
+                    "market_taxonomy": describe_market("DNB Away").to_dict(),
+                    "advisory_evidence": {"away_win_probability": 63, "draw_probability": 21},
+                }
+            ),
+            63,
+        )
 
     def test_generated_goal_alternatives_exclude_easy_over_half_goal_markets(self):
         total_names = set(_generated_market_names_for_family(describe_market("Over 2.5")))
@@ -417,8 +835,20 @@ class UserPickAdvisoryTests(SimpleTestCase):
             "market_taxonomy": {"family": "result_total_goals"},
             "market_capability": {"data_quality": "limited"},
         }
-        weak_upgrade = {"market": "Over 1.5", "advisory_score": 62, "advisory_status": "caution"}
-        strong_upgrade = {"market": "Over 1.5", "advisory_score": 68, "advisory_status": "playable"}
+        weak_upgrade = {
+            "market": "Over 1.5",
+            "advisory_score": 62,
+            "advisory_status": "caution",
+            "market_capability": {"data_quality": "medium"},
+            "advisory_evidence": {"expected_goals": 2.4, "line": 1.5, "selection": "over"},
+        }
+        strong_upgrade = {
+            "market": "Over 1.5",
+            "advisory_score": 68,
+            "advisory_status": "playable",
+            "market_capability": {"data_quality": "medium"},
+            "advisory_evidence": {"expected_goals": 2.9, "line": 1.5, "selection": "over"},
+        }
 
         weak_verdict = _manual_verdict(selected, weak_upgrade)
         strong_verdict = _manual_verdict(selected, strong_upgrade)
@@ -434,7 +864,13 @@ class UserPickAdvisoryTests(SimpleTestCase):
             "market_taxonomy": {"family": "player_goal"},
             "market_capability": {"data_quality": "limited"},
         }
-        broad_upgrade = {"market": "Over 1.5", "advisory_score": 68, "advisory_status": "playable"}
+        broad_upgrade = {
+            "market": "Over 1.5",
+            "advisory_score": 68,
+            "advisory_status": "playable",
+            "market_capability": {"data_quality": "medium"},
+            "advisory_evidence": {"expected_goals": 2.8, "line": 1.5, "selection": "over"},
+        }
 
         verdict = _manual_verdict(selected, broad_upgrade)
 
@@ -516,7 +952,16 @@ class UserPickAdvisoryTests(SimpleTestCase):
             "advisory_status": "avoid",
             "market_taxonomy": {"family": "result_total_goals"},
         }
-        generated = [{"market": "Over 1.5", "advisory_score": 70, "advisory_status": "playable", "market_taxonomy": {"family": "total_goals"}}]
+        generated = [
+            {
+                "market": "Over 1.5",
+                "advisory_score": 70,
+                "advisory_status": "playable",
+                "market_taxonomy": {"family": "total_goals"},
+                "market_capability": {"data_quality": "medium"},
+                "advisory_evidence": {"expected_goals": 2.7, "line": 1.5, "selection": "over"},
+            }
+        ]
 
         default_replacement = _replacement_market_for_slip({"markets": []}, selected_market=selected)
         fallback_replacement = _replacement_market_for_slip(
@@ -674,6 +1119,172 @@ class UserPickAdvisoryTests(SimpleTestCase):
 
         self.assertIn("Expected 8.634 corner events against a line of 7.5 for Over.", evidence)
         self.assertNotIn("Expected 8.634 corner events against a line of 6.5.", evidence)
+
+    def test_replacement_evidence_is_owned_by_recommended_market_family(self):
+        selection = {
+            "user_pick": {"market": "Home Win", "confidence_score": 42, "odds": 1.8},
+            "why": ["Expected goals: home 2.1, away 0.8."],
+            "evidence_payload": {"home_expected_goals": 2.1, "away_expected_goals": 0.8},
+            "home_recent_form": {"games": 5, "wins": 4, "draws": 1, "losses": 0},
+        }
+        corner_pick = _public_market_pick(
+            {
+                "market": "Corners Over 8.5",
+                "advisory_score": 71,
+                "odds": 1.55,
+                "advisory_evidence": {
+                    "expected_total_corners": 10.2,
+                    "line": 8.5,
+                    "selection": "over",
+                },
+            }
+        )
+
+        evidence = _stats_backed_evidence(
+            selection,
+            market_payload=corner_pick,
+            owned_market_only=True,
+        )
+        joined = " ".join(evidence)
+
+        self.assertIn("corner events", joined)
+        self.assertNotIn("Expected goals", joined)
+        self.assertNotIn("Home:", joined)
+
+    def test_goal_replacement_evidence_does_not_reuse_corner_reasons(self):
+        selection = {
+            "user_pick": {"market": "Corners Over 8.5", "confidence_score": 42, "odds": 1.8},
+            "why": ["Expected 10.2 corner events against a line of 8.5 for Over."],
+            "evidence_payload": {"expected_total_corners": 10.2, "line": 8.5, "selection": "over"},
+        }
+        goal_pick = _public_market_pick(
+            {
+                "market": "Over 2.5",
+                "advisory_score": 72,
+                "odds": 1.7,
+                "advisory_evidence": {
+                    "expected_goals": 3.2,
+                    "line": 2.5,
+                    "selection": "over",
+                },
+            }
+        )
+
+        evidence = _stats_backed_evidence(
+            selection,
+            market_payload=goal_pick,
+            owned_market_only=True,
+        )
+        joined = " ".join(evidence)
+
+        self.assertIn("Expected goals", joined)
+        self.assertNotIn("corner events", joined)
+
+    def test_ranking_prefers_same_family_repair_when_cross_family_is_only_close(self):
+        selected = {
+            "market": "Home Win",
+            "advisory_score": 36,
+            "advisory_status": "avoid",
+            "market_taxonomy": describe_market("Home Win").to_dict(),
+        }
+        generated = [
+            {
+                "market": "DC: 1X",
+                "advisory_score": 66,
+                "advisory_status": "playable",
+                "market_taxonomy": describe_market("DC: 1X").to_dict(),
+                "market_capability": {"data_quality": "medium"},
+                "advisory_evidence": {"home_win_probability": 35, "draw_probability": 31},
+            },
+            {
+                "market": "Over 2.5",
+                "advisory_score": 70,
+                "advisory_status": "playable",
+                "market_taxonomy": describe_market("Over 2.5").to_dict(),
+                "market_capability": {"data_quality": "medium"},
+                "advisory_evidence": {"expected_goals": 3.0, "line": 2.5, "selection": "over"},
+            },
+        ]
+
+        replacement = _replacement_market_for_slip(
+            {"markets": []},
+            selected_market=selected,
+            generated_markets=generated,
+            allow_safer_fallback=True,
+        )
+
+        self.assertEqual(replacement["market"], "DC: 1X")
+
+    def test_ranking_allows_cross_family_when_meaningfully_stronger(self):
+        selected = {
+            "market": "Home Win",
+            "advisory_score": 36,
+            "advisory_status": "avoid",
+            "market_taxonomy": describe_market("Home Win").to_dict(),
+        }
+        generated = [
+            {
+                "market": "DC: 1X",
+                "advisory_score": 60,
+                "advisory_status": "playable",
+                "market_taxonomy": describe_market("DC: 1X").to_dict(),
+                "market_capability": {"data_quality": "medium"},
+                "advisory_evidence": {"home_win_probability": 30, "draw_probability": 30},
+            },
+            {
+                "market": "Over 2.5",
+                "advisory_score": 78,
+                "advisory_status": "strong",
+                "market_taxonomy": describe_market("Over 2.5").to_dict(),
+                "market_capability": {"data_quality": "medium"},
+                "advisory_evidence": {"expected_goals": 4.2, "line": 2.5, "selection": "over"},
+            },
+        ]
+
+        replacement = _replacement_market_for_slip(
+            {"markets": []},
+            selected_market=selected,
+            generated_markets=generated,
+            allow_safer_fallback=True,
+        )
+
+        self.assertEqual(replacement["market"], "Over 2.5")
+        self.assertEqual(replacement["replacement_scope"], "broad_fallback")
+
+    def test_ranking_does_not_choose_broad_safe_market_on_base_probability_only(self):
+        selected = {
+            "market": "Over 2.5",
+            "advisory_score": 48,
+            "advisory_status": "avoid",
+            "market_taxonomy": describe_market("Over 2.5").to_dict(),
+        }
+        generated = [
+            {
+                "market": "Under 4.5",
+                "advisory_score": 82,
+                "advisory_status": "strong",
+                "market_taxonomy": describe_market("Under 4.5").to_dict(),
+                "market_capability": {"data_quality": "medium"},
+                "advisory_evidence": {"expected_goals": 4.4, "line": 4.5, "selection": "under"},
+            },
+            {
+                "market": "Over 1.5",
+                "advisory_score": 70,
+                "advisory_status": "playable",
+                "market_taxonomy": describe_market("Over 1.5").to_dict(),
+                "market_capability": {"data_quality": "medium"},
+                "advisory_evidence": {"expected_goals": 3.2, "line": 1.5, "selection": "over"},
+            },
+        ]
+
+        replacement = _replacement_market_for_slip(
+            {"markets": []},
+            selected_market=selected,
+            generated_markets=generated,
+            allow_safer_fallback=True,
+        )
+
+        self.assertEqual(replacement["market"], "Over 1.5")
 
     def test_corner_replacement_ranking_prefers_fit_and_similarity_before_probability(self):
         selected = {

@@ -80,7 +80,12 @@ def _sample_replace_result():
                 "historical_accuracy": 80.2,
                 "sample_size": 713,
                 "similar_market_roi": 8.4,
+                "expected_goals": 2.8,
+                "line": 1.5,
+                "selection": "over",
             },
+            "market_taxonomy": describe_market("Over 1.5").to_dict(),
+            "market_capability": {"data_quality": "strong"},
             "replacement_scope": "broad_fallback",
         },
         "market_taxonomy": {
@@ -568,6 +573,58 @@ class SlipReviewPublicContractTests(SimpleTestCase):
             ["Under 3.5 has stronger support from the goal profile."],
         )
 
+    def test_bettor_replace_response_uses_supported_pick_and_owned_why(self):
+        result = _sample_replace_result()
+        result["selected_market"]["advisory_evidence"] = {
+            "home_win_probability": 28,
+            "away_win_probability": 32,
+        }
+        result["replacement_market"]["market"] = "Over 2.5"
+        result["replacement_market"]["advisory_score"] = 72
+        result["replacement_market"]["advisory_evidence"] = {
+            "expected_goals": 3.3,
+            "line": 2.5,
+            "selection": "over",
+        }
+        result["replacement_market"]["market_taxonomy"] = describe_market("Over 2.5").to_dict()
+
+        payload = _build_bettor_public_payload(
+            SimpleNamespace(id=38, source="sportybet", status="completed"),
+            _manual_review_summary([result])["public"],
+            enhance=False,
+        )
+        game = payload["games"][0]
+
+        self.assertEqual(game["recommendation"]["action"], "replace")
+        self.assertEqual(game["recommendation"]["pick"]["market"], "Over 2.5")
+        joined = " ".join(game["recommendation"]["why"])
+        self.assertIn("Expected goals", joined)
+        self.assertNotIn("Result probabilities", joined)
+        self.assertEqual(payload["recommended_ticket"]["picks"][0]["action"], "replace")
+        self.assertEqual(payload["recommended_ticket"]["picks"][0]["market"], "Over 2.5")
+
+    def test_bettor_no_replacement_only_when_replacement_fails_eligibility(self):
+        result = _sample_replace_result()
+        result["replacement_market"] = {
+            "market": "Over 2.5",
+            "advisory_score": None,
+            "advisory_status": "needs_data",
+            "market_taxonomy": describe_market("Over 2.5").to_dict(),
+            "market_capability": {"data_quality": "medium"},
+            "advisory_evidence": {"expected_goals": 3.2, "line": 2.5, "selection": "over"},
+        }
+
+        payload = _build_bettor_public_payload(
+            SimpleNamespace(id=39, source="sportybet", status="completed"),
+            _manual_review_summary([result])["public"],
+            enhance=False,
+        )
+        game = payload["games"][0]
+
+        self.assertEqual(game["recommendation"]["action"], "no_replacement")
+        self.assertIsNone(game["recommendation"]["pick"])
+        self.assertEqual(payload["recommended_ticket"]["picks"][0]["action"], "no_replacement")
+
     def test_slip_review_debug_logging_exposes_decision_inputs(self):
         from apps.algo.views import _log_slip_review_debug
 
@@ -919,13 +976,17 @@ class SlipReviewPublicContractTests(SimpleTestCase):
         }
         weak_broad = {
             "market": "Corners Under 12.5",
-            "advisory_score": 55.9,
+            "advisory_score": 54.9,
             "market_taxonomy": describe_market("Corners Under 12.5").to_dict(),
+            "market_capability": {"data_quality": "medium"},
+            "advisory_evidence": {"expected_total_corners": 10.8, "line": 12.5, "selection": "under"},
         }
         strong_broad = {
             "market": "Cards Under 3.5",
             "advisory_score": 72.0,
             "market_taxonomy": describe_market("Cards Under 3.5").to_dict(),
+            "market_capability": {"data_quality": "medium"},
+            "advisory_evidence": {"expected_total_cards": 2.4, "line": 3.5, "selection": "under"},
         }
 
         self.assertIsNone(
