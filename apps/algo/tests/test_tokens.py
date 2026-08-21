@@ -460,6 +460,7 @@ class TokenWalletApiTests(TestCase):
             {
                 "free_tokens": 0,
                 "paid_tokens": 0,
+                "total_tokens": 0,
             },
         )
         self.assertNotIn("pricing", payload)
@@ -497,6 +498,7 @@ class TokenWalletApiTests(TestCase):
         payload = response.json()
         self.assertEqual(payload["wallet"]["free_tokens"], 20)
         self.assertEqual(payload["wallet"]["paid_tokens"], 4)
+        self.assertEqual(payload["wallet"]["total_tokens"], 24)
         self.assertNotIn("recent_transactions", payload)
 
     def test_token_purchases_endpoint_returns_purchase_history_only(self):

@@ -268,7 +268,6 @@ def _token_refill_policy_payload():
 def _token_wallet_payload(user):
     wallet = token_wallet_service.get_or_create_wallet(user)
     wallet_payload = token_wallet_snapshot(wallet)
-    wallet_payload.pop("total_tokens", None)
     return {
         "wallet": wallet_payload,
     }
