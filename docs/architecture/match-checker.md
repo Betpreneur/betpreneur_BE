@@ -483,6 +483,166 @@ picks the review had told the user to avoid; that filter is now an allowlist and
 is tied to the same 55 boundary `_match_checker_status` uses for `avoid`.
 See `apps/algo/tests/test_smart_randomize.py`.
 
+## 10c. ADR-006 — Team strength survives the season boundary, or the market declines
+
+**Problem.** Live reviews rated a Galatasaray away trip at 1.51 and an Al-Nassr away trip
+at 1.27 as *back the home side*, and no Home/Away Win ever cleared the playable threshold.
+Two different Saudi fixtures came back with byte-identical expected goals — 1.4748 home,
+1.2999 away — each labelled "derived from a fitted goal model".
+
+**Root cause.** Confirmed at source: current-season standings return `games_played: 0` for
+every team in August. `_shrink(x, 0)` returns exactly the prior, and the prior was a flat
+`1.0`, so every attack and defence factor collapsed to 1.0 and `expected_goals` reduced to
+the bare league baseline. Because the baseline carries home advantage, the home side was
+rated higher in **every fixture in the league**, however weak.
+
+`data_quality` could not catch it: `matches_observed` is a *league-wide* total, so twenty
+teams two games in clears the threshold while every individual factor is still 1.0. The
+fixtures were reported at `data_confidence: 75`.
+
+**Decision.**
+
+| | |
+|---|---|
+| Prior | Shrink toward **last season's fitted factors** instead of toward 1.0. `_shrink` already took a `prior` argument; nothing had ever passed one. |
+| Season choice | Walk candidate seasons newest-first and take the first with a real sample. The preceding season is not automatically right — England's 2025/2026 snapshot is frozen at 20 games while 2024/2025 has the full 38. |
+| Evidence | `TeamStrength.prior_matches` records what the prior was worth; `effective_matches = matches + prior_matches` is the evidence behind a team's numbers. |
+| Gate | Result-dependent families **decline** when either side has fewer than `MIN_TEAM_MATCHES_FOR_RESULT` effective matches. Symmetric families (totals, BTTS, odd/even) still run — a league-average total is a real estimate — but carry `league_average_team_strength` and reduced quality. |
+| Promoted teams | Absent from last season's table, so they keep the neutral prior and report zero evidence. They decline rather than borrow another club's strength. |
+
+**Result.** Everton vs Liverpool moved from a home-favoured league average to
+`home 27.8% / draw 29.3% / away 42.9%`. Arsenal vs Sunderland declines, because Sunderland
+were promoted and have no prior.
+
+**Cost.** One `SOCCER_LEAGUE_SEASONS` call covers every league, plus at most
+`PRIOR_SEASON_ATTEMPTS` standings calls for leagues needing a prior — well under 1% of the
+daily budget, and only on the nightly fit.
+
+**Rejected: pulling the score toward the bookmaker's price.** A short price genuinely is
+information, and a large gap is worth surfacing — it is, as `result_model_market_disagreement`.
+But using it to *raise* the score publishes the bookmaker's number as ours and disables
+disagreement on exactly the favourites a review exists to question. It also only reached
+short prices: of the five fixtures that prompted it, two cleared the threshold, one landed
+0.1 short, and one had no score to adjust. The gap was a symptom of undifferentiated team
+factors, and is fixed where it occurs.
+
+**Related.** For result markets the snapshot fallback now prefers StatPal's published 1X2
+percentages over a matrix built from unadjusted goals-for averages, which cannot account
+for the opposition faced.
+
+---
+
+
+## 10d. ADR-007 — Alternatives are ranked by edge, not by probability
+
+**Problem.** ADR-004 set out to stop the repair engine always recommending `Under 8.5
+Goals`, and it kept doing it. A live thirteen-leg slip came back with eight legs replaced,
+every replacement a double chance, under, or team-under, and the combined odds cut from
+**20.05 to 3.24**. That is not finding value, it is walking down the odds ladder.
+
+**Root cause.** `_rank_replacement_candidates` sorted on `advisory_score` — the raw
+probability — with EV only as a distant tiebreak, and `_replacement_is_meaningfully_better`
+required a raw-score lift. Raw probabilities are not comparable across families:
+
+| Market | Typical PL fixture |
+|---|---|
+| Under 4.5 | ~88% |
+| Over 1.5 | ~72% |
+| Double chance | ~57–72% |
+| Match result | ~29–41% |
+
+On one absolute scale the highest base rate always wins, whatever the fixture. A 1X2 leg
+could never beat a double chance on arithmetic alone — which is also why the thresholds
+(55 / 66 / 78) structurally condemn result markets.
+
+**Decision.** Rank by **edge over a league-average fixture**: the same market evaluated
+with the team strengths switched off. The reference comes from the fitted league itself,
+not a hand-written table of base rates, and costs no extra query — `FixtureRates` now
+carries `home_baseline`/`away_baseline`, so `reference_matrix()` is built from data
+already loaded.
+
+Everton vs Liverpool, real fitted numbers:
+
+| Market | Raw | Rank | Edge | Rank |
+|---|---|---|---|---|
+| Under 4.5 | 87.9% | **1** | −1.9 | 5 |
+| Over 1.5 | 74.7% | 2 | +2.8 | 3 |
+| DC: X2 | 72.2% | 3 | +13.0 | 2 |
+| DC: 12 | 70.7% | 4 | +1.1 | 4 |
+| DC: 1X | 57.1% | 5 | −14.1 | **7** |
+| Away Win | 42.9% | 6 | **+14.1** | **1** |
+
+Under 4.5 looks safest and is *below* what a typical fixture in that league returns.
+Away Win moves from next-to-last to first. Backing the weak home side not to lose — the
+recommendation that prompted the complaint — ranks last.
+
+**Constraints kept.** The absolute floor still applies: a market we would not stand behind
+on its own is never a replacement, however positive its edge. A `Correct Score 2-1` at 12%
+with +40 edge is still refused.
+
+**Markets with no reference** (counts, player props) fall to the bottom of the edge key
+rather than being treated as zero edge — otherwise an unmeasured market would outrank a
+measured negative one — and comparisons between two such markets fall back to raw scores.
+
+**Not addressed.** Ranking still ignores price, because generated alternatives frequently
+carry `odds: null`. Until an alternative can be priced, "better" means better than a
+typical fixture, not better value. Recommending an unpriced swap remains unfalsifiable
+advice and is the next thing to fix.
+
+---
+
+
+## 10e. ADR-008 — Alternatives carry a price, and value decides
+
+**Supersedes the open question in ADR-007.** That decision ranked on edge over a
+league-average fixture *because generated alternatives had no price*. They do now.
+
+**What was missing.** Nothing in the feed. `SOCCER_PREMATCH_ODDS` returns ~90 market types
+per fixture across 14 bookmakers — 1x2, double chance, draw no bet, totals, team totals,
+BTTS, correct score, corners, cards, goalscorers — and `normalize_prematch_odds` already
+parsed all three container shapes (`odd[]`, `total[]`, `handicap[]`). 87% of line entries
+are open, not suspended. What was missing was **consumption**: `_generated_match_checker_markets`
+hardcoded `"odds": None`, so every alternative was published unpriced.
+
+**Decision.**
+
+| | |
+|---|---|
+| Price | Alternatives are priced from the median across books via `reference_price`. |
+| Rank | By **expected value**, `p x odds - 1` — the objective ADR-004 specified. Edge (ADR-007) remains the fallback where no price exists. |
+| Replace | A swap must clear `MINIMUM_EV_LIFT` (0.03 per unit staked), not merely raise the probability. |
+| Consensus | De-vigged bookmaker probability is **reported**, never blended into the score. |
+
+EV settles the cross-family comparison on its own: an Under 4.5 at 88% into 1.10 returns
+**-0.032**; a 43% away win at 2.60 returns **+0.118**. Raw probability always preferred the
+first, which is how a 20.05 ticket became a 3.24 one.
+
+**Why consensus is reported and not used.** Bookmaker prices already contain team strength.
+Ranking on `model_p - consensus_p` would make this a de-vigging service that can never
+disagree with the market — the same circularity as the rejected score floor in ADR-006. Our
+probability stays ours; their price is used for what it is, the payout.
+
+**Two corrections found while wiring it up.**
+
+- *Double chance de-vig.* Its three outcomes each cover two of three results, so a fair book
+  sums to **2.0**, not 1.0. Dividing by the raw sum reported a 1.04 shot as 46%. `_outcome_units`
+  now scales it. Verified live: 1x2 de-vigs to 99.6 total, DC to 199.2, and `DC: 1X` (91.9)
+  matches Home (78.8) + Draw (14.0).
+- *Handicaps are refused, not priced.* `describe_market("Handicap -1 Home")` parses as line
+  `1` with the sign dropped, so a lookup can match the `+1` bucket and return **the opposite
+  bet's price**. That would feed a confident EV number for a wager the user never made. They
+  return no price until the descriptor carries a signed line.
+
+**Also fixed.** `_market_matches_descriptor` had no branch for `double_chance` or
+`draw_no_bet` at all — both fell through to `False` — and double-chance sides never mapped to
+StatPal's `Home/Draw` / `Draw/Away` / `Home/Away` naming.
+
+**Cost.** One call per league, and Match Checker only needs leagues with fixtures inside the
+3-day horizon, which the existing sync already knows.
+
+---
+
+
 ## 11. Async execution and cost
 
 Current: serial per-leg loop, one `AlgoRun` per leg, worker at `--concurrency=1`. A 20-leg slip

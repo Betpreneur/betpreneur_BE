@@ -232,6 +232,32 @@ def _mk(
     )
 
 
+# Words that can precede a stat keyword and still mean the match or a whole team.
+_TEAM_QUALIFIERS = {
+    "", "home", "away", "team", "home team", "away team", "total", "match", "full time",
+    "1st half", "2nd half", "first half", "second half", "the", "total team",
+}
+
+
+def _names_a_player_before(text: str, keywords: tuple[str, ...]) -> bool:
+    """
+    Whether a player is named ahead of a stat keyword.
+
+    "Shots On Target Over 8.5" is a match total; "Erling Haaland Shots On Target Over 1.5"
+    is a player prop. They were told apart only by the literal word "player", so a real
+    booking with a real name was read as a team market -- line 1.5 against team lines of
+    6.5 to 11.5 -- and the player's name was discarded.
+    """
+    for keyword in keywords:
+        index = text.find(keyword)
+        if index <= 0:
+            continue
+        prefix = " ".join(text[:index].split())
+        if prefix and prefix not in _TEAM_QUALIFIERS:
+            return True
+    return False
+
+
 def describe_market(value, *, market_name="", outcome_name="", specifier=""):
     raw = str(value or "").strip()
     market = str(market_name or "").strip()
@@ -391,7 +417,12 @@ def describe_market(value, *, market_name="", outcome_name="", specifier=""):
             return _mk(raw=raw or canonical, canonical=canonical, code=f"{family}_{team_side or 'total'}_{side}_{line}", family=family, category=category, side=side, team=team_side, selection=side, line=line, period=period, requires_card_stats=True)
         return _mk(raw=raw or combined, canonical=raw or combined, code="cards_market", family="cards", category="Cards", period=period, requires_card_stats=True)
 
-    if "shot" in text and "target" in text and not ("player" in text or "to score" in text):
+    if (
+        "shot" in text
+        and "target" in text
+        and not ("player" in text or "to score" in text)
+        and not _names_a_player_before(text, ("shots on target", "shot on target"))
+    ):
         side = _over_under_side(outcome or raw or text)
         team_side = "home" if "home" in text else "away" if "away" in text else ""
         family = "team_shots_on_target" if team_side or "team" in text else "shots_on_target_total"

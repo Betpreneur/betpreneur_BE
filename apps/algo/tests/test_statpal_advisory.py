@@ -52,7 +52,12 @@ class StatPalAdvisoryUnitTests(SimpleTestCase):
         self.assertEqual(result["evidence"]["line"], 0.5)
         self.assertEqual(result["evidence"]["player_market_family"], "player_goal")
         self.assertGreater(result["evidence"]["estimated_probability"], 10)
-        self.assertGreater(result["score"], 50)
+        # 5 goals in 33 appearances is 0.15 per game, so P(scores) is about 14%. The score
+        # used to be `40 + probability * 0.55`, which reported that as 53 -- a rescaling
+        # that made every player market look like a coin flip and broke expected value,
+        # which multiplies the score by the price. The score is the probability.
+        self.assertEqual(result["score"], result["evidence"]["estimated_probability"])
+        self.assertLess(result["score"], 20)
 
     def test_player_shots_market_uses_line(self):
         descriptor = describe_market("Florian Wirtz Shots Over 1.5")
@@ -475,6 +480,50 @@ class StatPalAdvisoryUnitTests(SimpleTestCase):
         self.assertEqual(result["basis"], "statpal_prediction_percentages")
         self.assertEqual(result["score"], 61.0)
         self.assertEqual(result["evidence"]["estimated_probability"], 61.0)
+
+    def test_short_priced_result_pick_reports_the_disagreement_without_rewriting_the_score(self):
+        descriptor = describe_market("Away Win")
+        fixture = {
+            "statpal_context": {
+                "available": True,
+                "snapshots": {
+                    "team_stats": {
+                        "summary": {
+                            "teams": [
+                                {
+                                    "fixture_side": "home",
+                                    "sample_size": 12,
+                                    "avg_goals_for": 1.45,
+                                    "avg_goals_against": 1.1,
+                                },
+                                {
+                                    "fixture_side": "away",
+                                    "sample_size": 12,
+                                    "avg_goals_for": 1.25,
+                                    "avg_goals_against": 1.0,
+                                },
+                            ]
+                        }
+                    }
+                },
+            }
+        }
+
+        result = statpal_market_advisory._score_matrix_fallback(
+            descriptor,
+            fixture=fixture,
+            provider_payload={"odds": "1.27"},
+        )
+
+        # The gap is surfaced, not corrected. Pulling the score up to the price would
+        # publish the bookmaker's number as ours and stop the review from ever
+        # disagreeing with the market on a favourite. The reason these result scores
+        # were wrong -- undifferentiated team factors -- is fixed in the fit itself.
+        self.assertTrue(result["available"])
+        self.assertTrue(result["evidence"]["result_model_market_disagreement"])
+        self.assertGreater(result["evidence"]["market_model_gap_points"], 25)
+        self.assertEqual(result["evidence"]["market_implied_probability"], 78.7)
+        self.assertIn("result_model_market_disagreement", result["warnings"])
 
     def test_snapshot_odds_payload_adds_positive_value_evidence(self):
         descriptor = describe_market("Over 2.5")

@@ -48,6 +48,16 @@ BASELINE_PRIOR_GAMES = 10
 MIN_GAMES_FOR_SPLIT = 20
 MIN_GAMES_FOR_LIMITED = 5
 
+# Evidence behind ONE team's factors, counting the prior season. `matches_observed` is a
+# league-wide total, so twenty teams two games in clears it comfortably while every
+# individual factor is still shrunk to ~1.0 -- which is how two different Saudi fixtures
+# came back with identical expected goals, presented as a fitted model. Result markets
+# are only meaningful once the model can actually tell the two sides apart.
+MIN_TEAM_MATCHES_FOR_RESULT = 8
+
+# A prior season needs a real sample of its own before it is worth carrying forward.
+MIN_GAMES_FOR_PRIOR = 40
+
 
 def _num(value, default=0.0) -> float:
     try:
@@ -75,6 +85,14 @@ class TeamFit:
     away_defence: float
     matches: int
     shots_per_game: float | None = None
+    # Matches behind the prior-season factors this fit was shrunk toward. Combined with
+    # `matches` it is the total evidence standing behind the numbers above.
+    prior_matches: int = 0
+    prior_season: str = ""
+
+    @property
+    def effective_matches(self) -> int:
+        return int(self.matches) + int(self.prior_matches)
 
 
 @dataclass(frozen=True)
@@ -89,6 +107,7 @@ class LeagueFit:
     matches_observed: int
     diagnostics: dict
     model_version: str = MODEL_VERSION
+    prior_season: str = ""
 
 
 def _team_rows(standings_payload) -> list[dict]:
@@ -106,6 +125,33 @@ def _team_rows(standings_payload) -> list[dict]:
     return rows
 
 
+def prior_index(fit: LeagueFit | None) -> dict[str, TeamFit]:
+    """
+    Index a previous-season fit for lookup by id and by normalised name.
+
+    Team ids are stable across seasons in StatPal, but a promoted side simply will not
+    appear -- those teams keep the neutral prior and are reported with the smaller
+    sample they actually have, rather than borrowing someone else's strength.
+    """
+    index: dict[str, TeamFit] = {}
+    for team in (fit.teams if fit else ()):
+        if team.team_id:
+            index[f"id:{team.team_id}"] = team
+        normalized = normalize_team_name(team.team_name)
+        if normalized:
+            index.setdefault(f"name:{normalized}", team)
+    return index
+
+
+def _prior_for(index: dict[str, TeamFit], team_id: str, team_name: str) -> TeamFit | None:
+    if not index:
+        return None
+    if team_id and f"id:{team_id}" in index:
+        return index[f"id:{team_id}"]
+    normalized = normalize_team_name(team_name)
+    return index.get(f"name:{normalized}") if normalized else None
+
+
 def fit_league_from_standings(
     standings_payload,
     *,
@@ -113,8 +159,16 @@ def fit_league_from_standings(
     league_name: str = "",
     season: str = "",
     shots_by_team: dict | None = None,
+    prior_fit: LeagueFit | None = None,
 ) -> LeagueFit:
-    """Fit attack/defence strengths from a StatPal standings response."""
+    """
+    Fit attack/defence strengths from a StatPal standings response.
+
+    `prior_fit` is the previous season's fit for the same league. Its factors replace the
+    flat 1.0 that shrinkage otherwise pulls toward, which is what makes the model usable
+    in August: with zero games played every factor used to come back as exactly 1.0, so
+    every fixture in a league produced the identical league-average scoreline.
+    """
     rows = _team_rows(standings_payload)
     shots_by_team = shots_by_team or {}
 
@@ -153,13 +207,32 @@ def fit_league_from_standings(
     home_baseline = _baseline(home_goals, home_games, FALLBACK_HOME_BASELINE)
     away_baseline = _baseline(away_goals, away_games, FALLBACK_AWAY_BASELINE)
 
+    priors = prior_index(prior_fit)
+    prior_season = prior_fit.season if prior_fit else ""
+
     teams = []
     for entry in parsed:
         hg, ag = entry["home_games"], entry["away_games"]
-        home_attack = _shrink(entry["home_scored"] / hg / home_baseline if hg else 1.0, hg)
-        home_defence = _shrink(entry["home_allowed"] / hg / away_baseline if hg else 1.0, hg)
-        away_attack = _shrink(entry["away_scored"] / ag / away_baseline if ag else 1.0, ag)
-        away_defence = _shrink(entry["away_allowed"] / ag / home_baseline if ag else 1.0, ag)
+        prior = _prior_for(priors, entry["team_id"], entry["team_name"])
+        # Shrink toward last season's strength rather than toward "average team". With no
+        # games played the factor becomes the prior; as the season builds, current form
+        # takes over at the same rate it always did.
+        home_attack = _shrink(
+            entry["home_scored"] / hg / home_baseline if hg else 1.0, hg,
+            prior=prior.home_attack if prior else 1.0,
+        )
+        home_defence = _shrink(
+            entry["home_allowed"] / hg / away_baseline if hg else 1.0, hg,
+            prior=prior.home_defence if prior else 1.0,
+        )
+        away_attack = _shrink(
+            entry["away_scored"] / ag / away_baseline if ag else 1.0, ag,
+            prior=prior.away_attack if prior else 1.0,
+        )
+        away_defence = _shrink(
+            entry["away_allowed"] / ag / home_baseline if ag else 1.0, ag,
+            prior=prior.away_defence if prior else 1.0,
+        )
         teams.append(
             TeamFit(
                 team_id=entry["team_id"],
@@ -170,6 +243,8 @@ def fit_league_from_standings(
                 away_defence=round(away_defence, 4),
                 matches=int(hg + ag),
                 shots_per_game=shots_by_team.get(entry["team_id"]),
+                prior_matches=int(prior.matches) if prior else 0,
+                prior_season=prior_season if prior else "",
             )
         )
 
@@ -195,11 +270,17 @@ def fit_league_from_standings(
         data_quality=quality,
         teams=tuple(teams),
         matches_observed=matches_observed,
+        prior_season=prior_season,
         diagnostics={
             "teams": len(teams),
             "home_games": int(home_games),
             "away_games": int(away_games),
             "shrinkage_matches": SHRINKAGE_MATCHES,
+            "prior_season": prior_season,
+            "teams_with_prior": sum(1 for team in teams if team.prior_matches),
+            "teams_differentiated": sum(
+                1 for team in teams if team.effective_matches >= MIN_TEAM_MATCHES_FOR_RESULT
+            ),
             # Recorded so the limitation is visible in the fit itself, not only in docs.
             "time_decay_applied": False,
         },
@@ -233,10 +314,13 @@ def normalize_team_name(value: str) -> str:
 
 
 __all__ = [
+    "MIN_GAMES_FOR_PRIOR",
+    "MIN_TEAM_MATCHES_FOR_RESULT",
     "MODEL_VERSION",
     "LeagueFit",
     "TeamFit",
     "expected_goals",
     "fit_league_from_standings",
     "normalize_team_name",
+    "prior_index",
 ]

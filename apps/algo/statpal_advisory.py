@@ -5,6 +5,7 @@ import statistics
 from dataclasses import asdict, dataclass
 from typing import Any
 
+from .evaluators.score_matrix_evaluator import RESULT_DEPENDENT_FAMILIES
 from .evaluators.registry import (
     COUNT_MODEL_ENGINE,
     HEURISTIC,
@@ -266,17 +267,32 @@ class StatPalMarketAdvisoryService:
 
         score, player_model_evidence, player_warnings = self._player_score(descriptor, evidence)
         evidence.update(player_model_evidence)
+        if "player_market_stat_missing" in player_warnings:
+            return StatPalAdvisory(
+                available=False,
+                score=None,
+                status="needs_data",
+                basis="player_market_stat_missing",
+                evidence=evidence,
+                warnings=list(dict.fromkeys(player_warnings)),
+                message=(
+                    f"{evidence.get('player_name') or 'This player'} has no recorded "
+                    f"{descriptor.category or 'stat'} history, so this market has not been judged."
+                ),
+            )
         warnings = []
         warnings.extend(player_warnings)
+        # A thin sample makes the estimate less certain; it does not make the outcome less
+        # likely. Sample size is reported as a warning and constrains `data_confidence`,
+        # rather than being subtracted from the probability (ADR-005).
         if appearances < 5:
             warnings.append("small_player_sample")
-            score -= 8
         if evidence["minutes_per_appearance"] and evidence["minutes_per_appearance"] < 55:
             warnings.append("low_minutes_sample")
-            score -= 5
+        # Rotation genuinely changes the chance of the event, so it stays on the estimate.
         if starts and appearances and starts / appearances < 0.45:
             warnings.append("rotation_risk")
-            score -= 5
+            score *= 0.85
         score, snapshot_evidence, snapshot_warnings = self._apply_snapshot_context(
             score,
             descriptor=descriptor,
@@ -539,6 +555,11 @@ class StatPalMarketAdvisoryService:
             fixture=fixture,
             provider_payload=provider_payload,
         )
+        payload = self._apply_result_market_consensus_guard(
+            payload,
+            descriptor=descriptor,
+            provider_payload=provider_payload,
+        )
         score = round(max(0, min(100, _num(payload.get("score"), score))), 1)
         return StatPalAdvisory(
             available=True,
@@ -621,6 +642,11 @@ class StatPalMarketAdvisoryService:
             fixture=fixture,
             provider_payload=provider_payload,
         )
+        payload = self._apply_result_market_consensus_guard(
+            payload,
+            descriptor=descriptor,
+            provider_payload=provider_payload,
+        )
         score = round(max(0, min(100, _num(payload.get("score"), probability))), 1)
         return StatPalAdvisory(
             available=True,
@@ -634,6 +660,20 @@ class StatPalMarketAdvisoryService:
 
     def _evaluate_score_matrix_market(self, descriptor: MarketDescriptor, *, fixture=None, provider_payload=None) -> StatPalAdvisory:
         home_expected, away_expected, evidence, warnings = self._expected_score_rates(fixture, period=descriptor.period)
+
+        # Which side wins depends on relative strength, and the snapshot rates behind this
+        # matrix are raw goals-for/against averages with no adjustment for the opposition
+        # faced. StatPal publishes a purpose-built 1X2 estimate; for result markets that is
+        # the better evidence, so it is preferred rather than used only as a last resort.
+        if descriptor.family in RESULT_DEPENDENT_FAMILIES:
+            prediction_first = self._prediction_percentage_fallback(
+                descriptor,
+                fixture=fixture,
+                provider_payload=provider_payload,
+            )
+            if prediction_first:
+                return prediction_first
+
         if home_expected <= 0 or away_expected <= 0:
             prediction_fallback = self._prediction_percentage_fallback(
                 descriptor,
@@ -693,6 +733,11 @@ class StatPalMarketAdvisoryService:
             payload,
             descriptor=descriptor,
             fixture=fixture,
+            provider_payload=provider_payload,
+        )
+        payload = self._apply_result_market_consensus_guard(
+            payload,
+            descriptor=descriptor,
             provider_payload=provider_payload,
         )
         score = round(max(0, min(100, _num(payload.get("score"), score))), 1)
@@ -1113,6 +1158,50 @@ class StatPalMarketAdvisoryService:
         result["warnings"] = list(dict.fromkeys(warnings))
         return result
 
+    @classmethod
+    def _apply_result_market_consensus_guard(
+        cls,
+        payload: dict[str, Any],
+        *,
+        descriptor: MarketDescriptor,
+        provider_payload: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        if descriptor.family not in {"match_result", "double_chance", "draw_no_bet"}:
+            return payload
+        if not payload.get("available"):
+            return payload
+        offered = cls._offered_odds(provider_payload or {})
+        if not offered or offered <= 1:
+            return payload
+        implied = round(max(0, min(100, 100 / offered)), 1)
+        score = _num(payload.get("score"), None)
+        if score is None:
+            return payload
+
+        result = dict(payload)
+        evidence = dict(result.get("evidence") or {})
+        evidence["market_implied_probability"] = implied
+        evidence["market_implied_odds"] = round(offered, 3)
+
+        # A very short price is real information and a large gap is worth surfacing --
+        # but as a disagreement, not as a correction. Pulling the score toward the
+        # implied probability publishes the bookmaker's number as ours and disables
+        # disagreement on exactly the favourites a review exists to question.
+        #
+        # The gap was a symptom: undifferentiated team factors made every fixture in a
+        # league score alike, so a strong away side looked no better than the home one.
+        # That is fixed where it happens, in the fit -- and where the model still cannot
+        # separate two teams it now declines instead of guessing, so there is no longer
+        # a wrong number here to talk down.
+        if offered <= 1.65 and score <= implied - 25:
+            evidence["result_model_market_disagreement"] = True
+            evidence["market_model_gap_points"] = round(implied - score, 1)
+            warnings = list(result.get("warnings") or [])
+            warnings.append("result_model_market_disagreement")
+            result["warnings"] = list(dict.fromkeys(warnings))
+        result["evidence"] = evidence
+        return result
+
     def _apply_snapshot_context(
         self,
         score: float,
@@ -1463,6 +1552,45 @@ class StatPalMarketAdvisoryService:
                     return parsed
         return None
 
+    def reference_price(self, descriptor: MarketDescriptor | None, *, fixture=None) -> dict[str, Any]:
+        """
+        The bookmaker price for a market, aggregated across books.
+
+        Public because a recommendation without a price is unfalsifiable advice: the
+        generated alternatives used to be published with `odds: null`, so "replace this
+        with a double chance" could not be checked, and the ranking had nothing but raw
+        probability to work with.
+        """
+        snapshots = (((fixture or {}).get("statpal_context") or {}).get("snapshots") or {})
+        payload = (snapshots.get("prematch_odds") or {}).get("payload") or {}
+        if not payload or not descriptor:
+            return {}
+        return self._statpal_reference_odds(descriptor, payload) or {}
+
+    @staticmethod
+    def devigged_probability(reference: dict[str, Any]) -> float | None:
+        """
+        The market's own probability with the bookmaker margin removed.
+
+        A price implies more than the true chance because the book prices its margin
+        into every outcome. Comparing our estimate against the raw implied number would
+        make us look permanently pessimistic, so the overround is divided out where the
+        complete set of outcomes is known.
+
+        This is reported for comparison only. It is never blended into our score: the
+        consensus already contains team strength, and deferring to it would leave the
+        review unable to disagree with the market -- which is the one thing it exists
+        to do.
+        """
+        odds = _num((reference or {}).get("odds"), None)
+        if not odds or odds <= 1:
+            return None
+        overround = _num((reference or {}).get("overround"), None)
+        implied = 100.0 / odds
+        if not overround or overround <= 0:
+            return round(min(100.0, implied), 1)
+        return round(min(100.0, implied / overround), 1)
+
     @classmethod
     def _statpal_reference_odds(cls, descriptor: MarketDescriptor | None, payload: dict[str, Any]) -> dict[str, Any]:
         if not descriptor:
@@ -1480,10 +1608,12 @@ class StatPalMarketAdvisoryService:
         line = _num(descriptor.line, None)
         outcome = cls._descriptor_outcome_name(descriptor)
         candidates = []
+        overrounds = []
         for bookmaker in market.get("bookmakers") or []:
             result = cls._odd_from_items(bookmaker.get("odds") or [], outcome)
             if result:
                 candidates.append(cls._reference_candidate(market, bookmaker, result, outcome))
+                overrounds.append(cls._overround(bookmaker.get("odds") or []))
             for bucket_name in ("totals", "handicaps"):
                 for bucket in bookmaker.get(bucket_name) or []:
                     bucket_line = _num(bucket.get("line"), None)
@@ -1492,7 +1622,43 @@ class StatPalMarketAdvisoryService:
                     result = cls._odd_from_items(bucket.get("odds") or [], outcome)
                     if result:
                         candidates.append(cls._reference_candidate(market, bookmaker, result, outcome))
-        return cls._aggregate_reference_candidates(candidates)
+                        # Each line is its own book: Over 2.5 and Under 2.5 together, not
+                        # every line in the market summed.
+                        overrounds.append(cls._overround(bucket.get("odds") or []))
+        return cls._aggregate_reference_candidates(
+            candidates, overrounds, units=cls._outcome_units(descriptor)
+        )
+
+    @staticmethod
+    def _outcome_units(descriptor: MarketDescriptor | None) -> float:
+        """
+        What a complete set of outcomes sums to before margin.
+
+        Normally 1.0 -- the outcomes are exclusive and exhaustive. Double chance is the
+        exception: each of its three outcomes covers two of the three results, so a fair
+        book sums to 2.0. Dividing by the raw sum there reported a 1.04 shot as 46%.
+        """
+        return 2.0 if (descriptor and descriptor.family == "double_chance") else 1.0
+
+    @staticmethod
+    def _overround(items) -> float | None:
+        """
+        Total implied probability across a market's outcomes -- the bookmaker's margin.
+
+        Returns None unless the set looks complete (at least two priced outcomes summing
+        above 1), because dividing by a partial book would understate the margin and
+        flatter our own numbers.
+        """
+        total = 0.0
+        priced = 0
+        for item in items or []:
+            odds = _num((item or {}).get("value"), None)
+            if odds and odds > 1:
+                total += 1.0 / odds
+                priced += 1
+        if priced < 2 or total <= 1.0:
+            return None
+        return total
 
     @staticmethod
     def _reference_candidate(market: dict[str, Any], bookmaker: dict[str, Any], odd: dict[str, Any], outcome: str) -> dict[str, Any]:
@@ -1507,7 +1673,7 @@ class StatPalMarketAdvisoryService:
         }
 
     @staticmethod
-    def _aggregate_reference_candidates(candidates: list[dict[str, Any]]) -> dict[str, Any]:
+    def _aggregate_reference_candidates(candidates: list[dict[str, Any]], overrounds=None, units: float = 1.0) -> dict[str, Any]:
         rows = [row for row in candidates if row and _num(row.get("odds"), None)]
         if not rows:
             return {}
@@ -1529,6 +1695,12 @@ class StatPalMarketAdvisoryService:
             "bookmaker": first.get("bookmaker") if len(rows) == 1 else f"median_of_{len(rows)}",
             "reference_method": "single_bookmaker" if len(rows) == 1 else "median_bookmaker_odds",
             "reliability": reliability,
+            "overround": (
+                round(float(statistics.median(clean_overrounds)) / (units or 1.0), 4)
+                if (clean_overrounds := [value for value in (overrounds or []) if value])
+                else None
+            ),
+            "outcome_units": units,
         }
 
     @staticmethod
@@ -1567,7 +1739,17 @@ class StatPalMarketAdvisoryService:
 
     @staticmethod
     def _descriptor_outcome_name(descriptor: MarketDescriptor) -> str:
-        if descriptor.family in {"match_result", "double_chance", "draw_no_bet", "asian_handicap", "handicap"}:
+        if descriptor.family == "double_chance":
+            # StatPal prices these as "Home/Draw", "Draw/Away", "Home/Away".
+            return {
+                "home_or_draw": "Home/Draw",
+                "draw_or_away": "Draw/Away",
+                "home_or_away": "Home/Away",
+                "1x": "Home/Draw",
+                "x2": "Draw/Away",
+                "12": "Home/Away",
+            }.get(str(descriptor.side or "").lower().replace("dc: ", ""), descriptor.selection or descriptor.side or "")
+        if descriptor.family in {"match_result", "draw_no_bet", "asian_handicap", "handicap"}:
             return {"home": "Home", "draw": "Draw", "away": "Away"}.get(descriptor.side, descriptor.selection or descriptor.side or "")
         if descriptor.family in {"total_goals", "team_total_goals", "corners_total", "team_corners", "cards_total", "team_cards", "booking_points"}:
             return (descriptor.selection or descriptor.side or "over").title()
@@ -1589,6 +1771,18 @@ class StatPalMarketAdvisoryService:
                 if not cls._team_matches(name, descriptor.team):
                     return False
             return "over under" in name or "total" in name or "goals" in name
+        if descriptor.family == "double_chance":
+            # "Corners. Double Chance" is a different market with the same shape.
+            return "double chance" in name and "corner" not in name and "card" not in name
+        if descriptor.family == "draw_no_bet":
+            return "draw no bet" in name or name in {"home away", "home/away"}
+        if descriptor.family in {"asian_handicap", "handicap"}:
+            # Deliberately unpriced. `describe_market` drops the sign -- "Handicap -1 Home"
+            # parses as line 1 -- so a lookup can match the +1 bucket and return the price
+            # of the opposite bet. A wrong price is worse than no price: it would feed a
+            # confident EV number for a wager the user did not make. Restore this once the
+            # descriptor carries a signed line.
+            return False
         if descriptor.family == "btts":
             return "both teams" in name or "btts" in name or "gg" in name or "ng" in name
         if descriptor.family in {"clean_sheet", "team_clean_sheet"}:
@@ -1659,20 +1853,20 @@ class StatPalMarketAdvisoryService:
         line = self._player_market_line(descriptor)
         expected = self._player_expected_metric(descriptor, evidence)
         probability = self._goal_line_probability(expected, line, descriptor.selection or descriptor.side or "over")
-        score = 40 + probability * 0.55
+        # The Poisson tail *is* the answer. It used to be rescaled as `40 + p * 0.55`,
+        # which compressed every player market into a 40-95 band: a striker's To Score and
+        # an outfielder's Saves Over 2.5 both came out at 38. That is not a probability,
+        # it breaks the ADR-005 contract that `advisory_score` is the modelled chance, and
+        # it corrupts expected value, which multiplies the score by the price.
+        score = probability
         warnings = []
         if expected <= 0:
+            # No recorded rate for this stat -- an outfield player has no saves, a
+            # defender may have no shots on target. Scoring 45 presented "we have nothing"
+            # as a middling chance. Declining is the honest answer.
             warnings.append("player_market_stat_missing")
-            score = 45
-        if descriptor.family == "player_goal":
-            score += min(8, evidence.get("shots_on_target_per_appearance", 0) * 10)
-        if descriptor.family == "player_shots":
-            score += min(6, evidence.get("shots_on_target_per_appearance", 0) * 4)
-        if descriptor.family in {"player_assist", "player_card", "player_saves"}:
-            score -= 2
         if abs(expected - line) < 0.25:
             warnings.append("thin_player_market_edge")
-            score -= 4
         if evidence.get("sample_appearances", 0) < 10:
             warnings.append("limited_player_sample")
         return score, {

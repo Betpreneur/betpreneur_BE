@@ -1036,6 +1036,7 @@ class LeagueScoreModel(models.Model):
     data_quality = models.CharField(max_length=20, choices=DataQuality.choices, default=DataQuality.POOR)
     teams_fitted = models.PositiveIntegerField(default=0)
     matches_observed = models.PositiveIntegerField(default=0)
+    prior_season = models.CharField(max_length=32, blank=True)
     diagnostics = models.JSONField(default=dict, blank=True)
     fitted_at = models.DateTimeField(auto_now=True)
 
@@ -1065,6 +1066,10 @@ class TeamStrength(models.Model):
     away_attack = models.FloatField(default=1.0)
     away_defence = models.FloatField(default=1.0)
     matches = models.PositiveIntegerField(default=0)
+    # Evidence carried over from the previous season's fit. `matches` alone is a
+    # current-season count, which is zero for every team in August.
+    prior_matches = models.PositiveIntegerField(default=0)
+    prior_season = models.CharField(max_length=32, blank=True)
     shots_per_game = models.FloatField(null=True, blank=True)
 
     class Meta:

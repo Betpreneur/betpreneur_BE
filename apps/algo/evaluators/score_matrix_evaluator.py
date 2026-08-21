@@ -15,6 +15,7 @@ redesign exists to remove.
 from __future__ import annotations
 
 from ..scoring import derive
+from ..scoring.fitting import MIN_TEAM_MATCHES_FOR_RESULT
 from ..scoring.service import score_model_service
 
 
@@ -118,6 +119,53 @@ def _outcome_probability(descriptor, matrix):
     return None, 0.0
 
 
+# Families whose answer turns on which side is stronger. With undifferentiated team
+# factors the model returns the same expected goals for every fixture in the league, so
+# home advantage alone would rate the home team higher in all of them -- which is how a
+# Galatasaray or Al-Nassr away trip came back as "back the home side". These decline
+# instead of publishing a league average as a fixture-specific read.
+#
+# Symmetric families (total_goals, btts, total_btts, odd_even) are left out on purpose: a
+# league-average total is a genuine estimate, it is simply not a sharp one, and the
+# reduced data quality already narrows what it is allowed to claim.
+RESULT_DEPENDENT_FAMILIES = frozenset({
+    "match_result",
+    "double_chance",
+    "draw_no_bet",
+    "result_btts",
+    "clean_sheet",
+    "result_total_goals",
+    "double_chance_btts",
+    "double_chance_total_goals",
+    "result_or_total_goals",
+    "result_or_btts",
+    "result_or_clean_sheet",
+    "team_total_goals",
+    "asian_handicap",
+    "handicap",
+    "first_to_score",
+})
+
+
+def _reference_and_edge(descriptor, probability, rates):
+    """
+    How much better than a typical fixture in this league this selection is.
+
+    A raw probability cannot be compared across market families: a double chance covers
+    two of three outcomes and so sits near 70% in almost every fixture, while a home win
+    sits near 40%. Ranked on the raw number the double chance wins every time, which is
+    how a slip of thirteen ended up with eight legs "improved" into double chances and
+    unders, and its odds cut from 20.05 to 3.24.
+
+    The reference is the same market evaluated with team strengths switched off, so it
+    is derived from the fitted league rather than a hand-written table of base rates.
+    """
+    reference, _push = _outcome_probability(descriptor, rates.reference_matrix())
+    if reference is None:
+        return None, None
+    return round(reference * 100, 1), round((probability - reference) * 100, 1)
+
+
 def evaluate(descriptor, *, fixture=None, **_ignored) -> dict:
     ids = _fixture_ids(fixture)
     rates = score_model_service.rates_for_fixture(**ids)
@@ -133,9 +181,31 @@ def evaluate(descriptor, *, fixture=None, **_ignored) -> dict:
                 "league_id": rates.league_id,
                 "matched_home_team": rates.matched_home,
                 "matched_away_team": rates.matched_away,
+                "home_team_matches": rates.home_matches,
+                "away_team_matches": rates.away_matches,
             },
             "warnings": ["no_fitted_score_model"],
             "message": "No fitted goal model is available for this fixture yet.",
+        }
+
+    if descriptor.family in RESULT_DEPENDENT_FAMILIES and not rates.differentiated:
+        return {
+            "available": False,
+            "score": None,
+            "status": "needs_data",
+            "basis": "score_matrix_undifferentiated_teams",
+            "evidence": {
+                "market_family": descriptor.family,
+                "league_id": rates.league_id,
+                "home_team_matches": rates.home_matches,
+                "away_team_matches": rates.away_matches,
+                "required_team_matches": MIN_TEAM_MATCHES_FOR_RESULT,
+            },
+            "warnings": ["insufficient_team_history"],
+            "message": (
+                "Not enough match history for these two teams yet to separate them, "
+                "so this market has not been judged."
+            ),
         }
 
     matrix = rates.matrix()
@@ -152,6 +222,7 @@ def evaluate(descriptor, *, fixture=None, **_ignored) -> dict:
         }
 
     expected_home, expected_away = matrix.expected_goals()
+    reference, edge = _reference_and_edge(descriptor, probability, rates)
     return {
         "available": True,
         "score": round(probability * 100, 1),
@@ -167,8 +238,16 @@ def evaluate(descriptor, *, fixture=None, **_ignored) -> dict:
             "model_version": rates.model_version,
             "data_quality": rates.data_quality,
             "push_probability": round(push, 6),
+            "home_team_matches": rates.home_matches,
+            "away_team_matches": rates.away_matches,
+            "teams_differentiated": rates.differentiated,
+            "league_reference_percent": reference,
+            "edge_points": edge,
         },
-        "warnings": [] if rates.data_quality in {"strong", "medium"} else ["thin_league_sample"],
+        "warnings": (
+            ([] if rates.data_quality in {"strong", "medium"} else ["thin_league_sample"])
+            + ([] if rates.differentiated else ["league_average_team_strength"])
+        ),
         "message": (
             f"Derived from a fitted goal model: {expected_home} expected home goals, "
             f"{expected_away} away."

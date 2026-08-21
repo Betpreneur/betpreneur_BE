@@ -3238,7 +3238,7 @@ def _generated_match_checker_markets(
         advisory = statpal_market_advisory.evaluate_market(
             descriptor,
             fixture=fixture,
-            provider_payload=provider_payload or {},
+            provider_payload={},
             statpal_payload=statpal_payload,
         )
         if not advisory.get("available") or _float_or_none(advisory.get("score")) is None:
@@ -3249,18 +3249,31 @@ def _generated_match_checker_markets(
             statpal_advisory=advisory,
             market_capability=capability,
         )
+        # Price the alternative. Recommending a swap into a market whose price we do not
+        # know is advice nobody can check, and it left the ranking with nothing but raw
+        # probability -- which always prefers whichever market has the highest base rate.
+        reference = statpal_market_advisory.reference_price(descriptor, fixture=fixture)
+        reference_odds = _float_or_none(reference.get("odds"))
         market.update(
             {
                 "market": descriptor.canonical or market_name,
                 "meaning": _public_market_meaning(descriptor.canonical or market_name),
                 "confidence": None,
                 "final_confidence": None,
-                "odds": None,
-                "odds_source": "estimated",
+                "odds": reference_odds,
+                "odds_source": "statpal_reference" if reference_odds else "unpriced",
+                "odds_reference": reference or None,
                 "generated": True,
                 "generated_source": "statpal_market_family",
             }
         )
+        market["ev"] = _market_expected_value(market)
+        consensus = statpal_market_advisory.devigged_probability(reference)
+        if consensus is not None:
+            evidence = dict(market.get("advisory_evidence") or {})
+            evidence["market_consensus_percent"] = consensus
+            evidence["bookmaker_count"] = reference.get("bookmaker_count")
+            market["advisory_evidence"] = evidence
         generated.append(market)
     return generated
 
@@ -3303,21 +3316,121 @@ def _replacement_scope(selected_market, candidate):
     return "broad_fallback"
 
 
+def _result_market_side(market):
+    taxonomy = (market or {}).get("market_taxonomy") or describe_market((market or {}).get("market")).to_dict()
+    return taxonomy.get("family") or "", taxonomy.get("side") or "", _float_or_none(taxonomy.get("line"))
+
+
+def _result_replacement_preserves_user_thesis(selected_market, replacement_market):
+    selected_family, selected_side, _ = _result_market_side(selected_market)
+    candidate_family, candidate_side, candidate_line = _result_market_side(replacement_market)
+    if selected_family != "match_result" or selected_side not in {"home", "away", "draw"}:
+        return True
+    if candidate_family not in {"match_result", "double_chance", "draw_no_bet", "asian_handicap", "handicap"}:
+        return True
+    if selected_side == "draw":
+        return candidate_family == "match_result" and candidate_side == "draw"
+    if candidate_family == "match_result":
+        return candidate_side == selected_side
+    if candidate_family == "double_chance":
+        return (
+            (selected_side == "home" and candidate_side == "home_or_draw")
+            or (selected_side == "away" and candidate_side == "draw_or_away")
+        )
+    if candidate_family == "draw_no_bet":
+        return candidate_side == selected_side
+    if candidate_family in {"asian_handicap", "handicap"}:
+        return candidate_side == selected_side and (candidate_line is None or candidate_line >= 0)
+    return True
+
+
+# Groups where a cross-family swap is never an answer. If we cannot price a player, corner
+# or card pick, the honest outcome is "review" or "remove" -- not a goals market wearing the
+# same slot. Offering Over 1.5 in place of "Haaland To Score" answers a question the user
+# did not ask, and the odds it carries are not the odds they wanted.
+SPECIALIST_REPLACEMENT_GROUPS = frozenset({"player", "corners", "cards", "shots_on_target", "unknown"})
+
+
 def _allows_broad_replacement(selected_market):
-    group = _market_family_group(selected_market)
-    return group not in {"unknown"}
+    """
+    Whether this pick may be replaced by a market from a different family.
+
+    Previously `group not in {"unknown"}`, which allowed it for everything -- the guard
+    existed in name only, and only the candidate-selection path enforced anything. The
+    verdict path let a player pick be "improved" into a goals total.
+    """
+    return _market_family_group(selected_market) not in SPECIALIST_REPLACEMENT_GROUPS
+
+
+def _market_edge(market):
+    """
+    Points by which this market beats a league-average fixture, or None.
+
+    Raw probabilities are not comparable across families: a double chance covers two of
+    three outcomes and sits near 70% almost everywhere, an Under 4.5 near 88%, a home win
+    near 40%. Ranking on the raw number therefore prefers whichever market has the highest
+    base rate, regardless of whether this fixture is any good for it -- which is how a
+    thirteen-leg slip came back with eight legs "improved" into double chances and unders
+    and its odds cut from 20.05 to 3.24.
+    """
+    evidence = (market or {}).get("advisory_evidence") or {}
+    edge = _float_or_none(evidence.get("edge_points"))
+    if edge is None:
+        statpal = (market or {}).get("statpal_advisory") or {}
+        edge = _float_or_none(((statpal.get("evidence") or {})).get("edge_points"))
+    return edge
+
+
+# Per unit staked. A replacement has to be meaningfully better value, not merely better
+# by a rounding error, before the user is told to change their slip.
+MINIMUM_EV_LIFT = 0.03
+
+
+def _market_expected_value(market):
+    """
+    Return per unit staked: `p x odds - 1`.
+
+    This is the objective ADR-004 asked for and could not have until alternatives were
+    priced. It settles the cross-family comparison on its own: an Under 4.5 at 88% into
+    1.10 returns -0.032, while a 43% away win at 2.60 returns +0.118. Probability alone
+    always preferred the first.
+    """
+    odds = _float_or_none((market or {}).get("odds"))
+    if not odds or odds <= 1:
+        return None
+    probability = _float_or_none((market or {}).get("advisory_score"))
+    if probability is None:
+        probability = _float_or_none((market or {}).get("display_score"))
+    if probability is None:
+        return None
+    return round((probability / 100.0) * odds - 1, 4)
 
 
 def _rank_replacement_candidates(candidates):
-    return sorted(
-        candidates,
-        key=lambda market: (
+    """
+    Rank by edge over the league-average fixture, not by raw probability.
+
+    Markets with no reference (counts, player props) keep their old ordering by falling
+    to the bottom of the edge key rather than being treated as zero-edge, which would let
+    an unmeasured market outrank a measured negative one.
+    """
+    def key(market):
+        ev = _float_or_none(market.get("ev"))
+        if ev is None:
+            ev = _market_expected_value(market)
+        edge = _market_edge(market)
+        return (
+            # Value first, where the alternative carries a price.
+            ev is not None,
+            ev if ev is not None else 0,
+            # Otherwise how far above a league-average fixture it sits.
+            edge is not None,
+            edge if edge is not None else 0,
             market.get("advisory_score") or 0,
             market.get("final_confidence") or market.get("confidence") or 0,
-            _float_or_none(market.get("ev")) or -1,
-        ),
-        reverse=True,
-    )
+        )
+
+    return sorted(candidates, key=key, reverse=True)
 
 
 def _blocked_slip_recommendation_market(market):
@@ -3336,13 +3449,40 @@ def _replacement_is_meaningfully_better(selected_market, replacement_market):
         return bool(replacement_market)
     if _market_matches(selected_market.get("market"), replacement_market.get("market")):
         return False
+    if not _result_replacement_preserves_user_thesis(selected_market, replacement_market):
+        return False
 
     selected_score = _float_or_none(selected_market.get("advisory_score")) or float(selected_market.get("display_score") or 0)
     replacement_score = _float_or_none(replacement_market.get("advisory_score")) or float(replacement_market.get("display_score") or 0)
     scope = replacement_market.get("replacement_scope") or _replacement_scope(selected_market, replacement_market)
     minimum_score = 58 if scope == "comparable_market" else 60
     minimum_lift = 4 if scope == "comparable_market" else 6
-    return replacement_score >= minimum_score and replacement_score >= selected_score + minimum_lift
+
+    # The absolute floor stays: a market we would not stand behind on its own is never a
+    # replacement, however well it compares.
+    if replacement_score < minimum_score:
+        return False
+
+    selected_ev = _float_or_none(selected_market.get("ev"))
+    if selected_ev is None:
+        selected_ev = _market_expected_value(selected_market)
+    replacement_ev = _float_or_none(replacement_market.get("ev"))
+    if replacement_ev is None:
+        replacement_ev = _market_expected_value(replacement_market)
+    if selected_ev is not None and replacement_ev is not None:
+        # Both priced: compare what the bettor actually receives. A swap that raises the
+        # probability while collapsing the price is not an improvement, which is what
+        # turned a 20.05 ticket into a 3.24 one.
+        return replacement_ev >= selected_ev + MINIMUM_EV_LIFT
+
+    selected_edge = _market_edge(selected_market)
+    replacement_edge = _market_edge(replacement_market)
+    if selected_edge is not None and replacement_edge is not None:
+        # Unpriced, but both measured against the same league: compare like with like.
+        return replacement_edge >= selected_edge + minimum_lift
+
+    # No shared reference (counts, player props): fall back to the raw comparison.
+    return replacement_score >= selected_score + minimum_lift
 
 
 def _replacement_market_for_slip(

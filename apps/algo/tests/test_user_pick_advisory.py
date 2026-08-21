@@ -210,6 +210,39 @@ class UserPickAdvisoryTests(SimpleTestCase):
         self.assertEqual(replacement["market"], "Over 1.5")
         self.assertEqual(replacement["replacement_scope"], "comparable_market")
 
+    def test_result_replacement_preserves_selected_team_thesis(self):
+        selected = {
+            "market": "Away Win",
+            "advisory_score": 35,
+            "advisory_status": "avoid",
+            "market_taxonomy": {"family": "match_result", "side": "away"},
+        }
+        generated = [
+            {"market": "DC: 1X", "advisory_score": 78, "market_taxonomy": {"family": "double_chance", "side": "home_or_draw"}},
+            {"market": "DC: 12", "advisory_score": 76, "market_taxonomy": {"family": "double_chance", "side": "home_or_away"}},
+            {"market": "DC: X2", "advisory_score": 66, "market_taxonomy": {"family": "double_chance", "side": "draw_or_away"}},
+        ]
+
+        replacement = _replacement_market_for_slip({"markets": []}, selected_market=selected, generated_markets=generated)
+
+        self.assertEqual(replacement["market"], "DC: X2")
+
+    def test_result_replacement_does_not_flip_home_win_to_x2(self):
+        selected = {
+            "market": "Home Win",
+            "advisory_score": 35,
+            "advisory_status": "avoid",
+            "market_taxonomy": {"family": "match_result", "side": "home"},
+        }
+        generated = [
+            {"market": "DC: X2", "advisory_score": 80, "market_taxonomy": {"family": "double_chance", "side": "draw_or_away"}},
+            {"market": "DC: 1X", "advisory_score": 65, "market_taxonomy": {"family": "double_chance", "side": "home_or_draw"}},
+        ]
+
+        replacement = _replacement_market_for_slip({"markets": []}, selected_market=selected, generated_markets=generated)
+
+        self.assertEqual(replacement["market"], "DC: 1X")
+
     def test_replacement_never_recommends_easy_over_half_goal_market(self):
         selected = {
             "market": "Over 2.5",
@@ -404,10 +437,17 @@ class UserPickAdvisoryTests(SimpleTestCase):
                 (),
                 {
                     "usable": True,
+                    # Both sides have real history, so result markets are derivable.
+                    "differentiated": True,
+                    "home_matches": 20,
+                    "away_matches": 20,
                     "data_quality": "medium",
                     "league_id": "league-1",
                     "model_version": "test",
                     "matrix": lambda self: matrix,
+                    # Reference fixture for the edge calculation: the same league with
+                    # team strengths switched off.
+                    "reference_matrix": lambda self: matrix,
                 },
             )()
             generated = _generated_match_checker_markets(descriptor, game=game, statpal_context={})
