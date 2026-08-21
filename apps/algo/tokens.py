@@ -231,15 +231,20 @@ class TokenWalletService:
         with transaction.atomic():
             purchase = (
                 TokenPurchase.objects.select_for_update()
-                .select_related("user", "credited_transaction")
+                .select_related("user")
                 .get(pk=purchase_id)
             )
             wallet = self._locked_wallet(purchase.user)
             if purchase.status == TokenPurchase.Status.PAID:
+                credited_transaction = None
+                if purchase.credited_transaction_id:
+                    credited_transaction = TokenTransaction.objects.filter(
+                        pk=purchase.credited_transaction_id
+                    ).first()
                 return TokenPurchaseResult(
                     purchase=purchase,
                     wallet=wallet,
-                    transaction=purchase.credited_transaction,
+                    transaction=credited_transaction,
                     idempotent=True,
                 )
             if purchase.status != TokenPurchase.Status.PENDING:

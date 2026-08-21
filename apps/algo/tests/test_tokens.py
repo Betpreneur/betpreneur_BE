@@ -857,6 +857,45 @@ class TokenWalletApiTests(TestCase):
 
     @override_settings(TOKEN_PURCHASE_PACKAGES="240:990", TOKEN_PURCHASE_CURRENCY="NGN")
     @patch("apps.algo.views.payfonte_client")
+    def test_payfonte_webhook_retries_verification_with_external_reference(self, client_mock):
+        service = TokenWalletService()
+        purchase = service.create_token_purchase(self.user, package_id="tokens_240_ngn_990")
+        service.attach_purchase_payment(purchase, provider="payfonte", provider_reference="BP-TOK-6-a945b214")
+        client_mock.return_value.verify_payment.side_effect = [
+            PayfonteError("not found"),
+            {
+                "reference": "DDC20260820223050CQCJL",
+                "externalReference": "BP-TOK-6-a945b214",
+                "status": "success",
+                "amount": 99000,
+                "currency": "NGN",
+            },
+        ]
+
+        response = self.client.post(
+            "/api/algo/tokens/payfonte/webhook/",
+            {
+                "reference": "DDC20260820223050CQCJL",
+                "data": {
+                    "reference": "DDC20260820223050CQCJL",
+                    "externalReference": "BP-TOK-6-a945b214",
+                    "status": "success",
+                },
+            },
+            format="json",
+        )
+
+        purchase.refresh_from_db()
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["status"], "processed")
+        self.assertEqual(purchase.status, TokenPurchase.Status.PAID)
+        self.assertEqual(
+            [call.args[0] for call in client_mock.return_value.verify_payment.call_args_list],
+            ["DDC20260820223050CQCJL", "BP-TOK-6-a945b214"],
+        )
+
+    @override_settings(TOKEN_PURCHASE_PACKAGES="240:990", TOKEN_PURCHASE_CURRENCY="NGN")
+    @patch("apps.algo.views.payfonte_client")
     def test_payfonte_webhook_returns_retry_when_verification_fails(self, client_mock):
         service = TokenWalletService()
         purchase = service.create_token_purchase(self.user, package_id="tokens_240_ngn_990")

@@ -410,6 +410,20 @@ def _payfonte_transaction_reference(payload, data):
     return references[0] if references else ""
 
 
+def _unique_payfonte_references(*values):
+    seen = set()
+    references = []
+    for value in values:
+        if not value:
+            continue
+        reference = str(value).strip()
+        if not reference or reference in seen:
+            continue
+        seen.add(reference)
+        references.append(reference)
+    return references
+
+
 def _slip_review_token_cost(selection_count):
     return max(0, int(selection_count or 0)) * int(getattr(settings, "SLIP_REVIEW_TOKEN_COST_PER_GAME", 1))
 
@@ -8560,9 +8574,28 @@ class PayfonteWebhookView(APIView):
         if not purchase:
             return Response({"status": "ignored", "reason": "purchase_not_found", "references": references})
 
-        transaction_reference = _payfonte_transaction_reference(payload, data)
+        verification_references = _unique_payfonte_references(
+            _payfonte_transaction_reference(payload, data),
+            purchase.provider_reference,
+            *references,
+        )
+        last_payfonte_error = None
         try:
-            result = _settle_payfonte_purchase(purchase, verification_reference=transaction_reference)
+            result = None
+            for verification_reference in verification_references:
+                try:
+                    result = _settle_payfonte_purchase(purchase, verification_reference=verification_reference)
+                    break
+                except PayfonteError as exc:
+                    last_payfonte_error = exc
+                    log.warning(
+                        "Payfonte webhook verification attempt failed purchase=%s verification_reference=%s error=%s",
+                        purchase.id,
+                        verification_reference,
+                        exc,
+                    )
+            if result is None:
+                raise last_payfonte_error or PayfonteError("verification_failed")
         except PayfonteError as exc:
             log.warning("Payfonte webhook verification failed references=%s error=%s", references, exc)
             return Response({"status": "retry", "detail": "verification_failed"}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
