@@ -17,7 +17,7 @@ from django.contrib.auth import get_user_model
 from django.db import IntegrityError
 from django.http import HttpResponse, HttpResponseNotModified
 from django.shortcuts import get_object_or_404
-from django.db.models import Count, Q, Sum
+from django.db.models import Count, Prefetch, Q, Sum
 from django.utils import timezone
 from drf_spectacular.types import OpenApiTypes
 from drf_spectacular.utils import OpenApiExample, extend_schema, extend_schema_view
@@ -473,6 +473,7 @@ def _reserve_slip_review_tokens(review, selection_count):
     submitted_payload = dict(review.submitted_payload or {})
     submitted_payload["token_reservation_id"] = result.reservation.id
     submitted_payload["token_cost"] = token_cost
+    submitted_payload["selection_count"] = int(selection_count or 0)
     review.submitted_payload = _json_safe(submitted_payload)
     _store_slip_review_billing(
         review,
@@ -486,21 +487,40 @@ def _reserve_slip_review_tokens(review, selection_count):
     return result
 
 
+def _slip_review_billable_selection_count(review):
+    summary = review.summary or {}
+    if summary.get("analysed_count") is not None:
+        return max(0, int(summary.get("analysed_count") or 0))
+    return max(0, int((review.submitted_payload or {}).get("selection_count") or review.selections.count() or 0))
+
+
 def _consume_slip_review_token_reservation(review):
     reservation_id = (review.submitted_payload or {}).get("token_reservation_id")
     if not reservation_id:
         return None
+    submitted_payload = review.submitted_payload or {}
+    reserved_count = int(submitted_payload.get("selection_count") or review.selections.count() or 0)
+    billable_count = _slip_review_billable_selection_count(review)
+    reserved_tokens = _slip_review_token_cost(reserved_count)
+    charged_tokens = _slip_review_token_cost(billable_count)
+    refunded_tokens = max(0, reserved_tokens - charged_tokens)
     try:
-        result = token_wallet_service.consume_reservation(int(reservation_id))
-        _store_slip_review_billing(
+        result = token_wallet_service.consume_reservation_amount(int(reservation_id), charged_tokens)
+        billing = _slip_review_billing_payload(
             review,
-            _slip_review_billing_payload(
-                review,
-                selection_count=(review.submitted_payload or {}).get("selection_count") or review.selections.count(),
-                reservation=result.reservation,
-                status_value="consumed",
-            ),
+            selection_count=reserved_count,
+            reservation=result.reservation,
+            status_value="consumed",
         )
+        billing.update(
+            {
+                "billable_games": billable_count,
+                "charged_tokens": charged_tokens,
+                "refunded_tokens": refunded_tokens,
+                "non_billable_games": max(0, reserved_count - billable_count),
+            }
+        )
+        _store_slip_review_billing(review, billing)
         return result
     except Exception:
         # Do not fail a delivered review over a billing hiccup -- but do not hide it
@@ -518,9 +538,13 @@ def _consume_slip_review_token_reservation(review):
             {
                 **_slip_review_billing_payload(
                     review,
-                    selection_count=(review.submitted_payload or {}).get("selection_count") or review.selections.count(),
+                    selection_count=reserved_count,
                     status_value="consume_failed",
                 ),
+                "billable_games": billable_count,
+                "charged_tokens": charged_tokens,
+                "refunded_tokens": refunded_tokens,
+                "non_billable_games": max(0, reserved_count - billable_count),
                 "reconciliation_pending": True,
             },
         )
@@ -6580,6 +6604,15 @@ def _compact_ai_pick_from_selection(selection):
     }
 
 
+def _slip_review_booking_code(review):
+    payload = review.submitted_payload or {}
+    for key in ("provider_code", "share_code", "booking_code", "code"):
+        value = payload.get(key)
+        if value:
+            return str(value)
+    return ""
+
+
 def _compact_slip_review_list_payload(review, *, include_picks=True, pick_limit=None, use_summary=True):
     summary = (review.summary or {}) if use_summary else {}
     public_payload = summary.get("bettor_public") or {}
@@ -6622,10 +6655,14 @@ def _compact_slip_review_list_payload(review, *, include_picks=True, pick_limit=
             for game in selected_games
         ]
     elif include_picks:
-        selections_qs = review.selections.all().order_by("order", "id")
-        if pick_limit is not None:
-            selections_qs = selections_qs[:pick_limit]
-        selections = list(selections_qs)
+        selections = list(getattr(review, "preview_selections", []))
+        if not selections:
+            selections_qs = review.selections.all().order_by("order", "id")
+            if pick_limit is not None:
+                selections_qs = selections_qs[:pick_limit]
+            selections = list(selections_qs)
+        elif pick_limit is not None:
+            selections = selections[:pick_limit]
         if not number_of_games:
             number_of_games = len(selections)
         if pick_limit is not None and number_of_games:
@@ -6649,6 +6686,7 @@ def _compact_slip_review_list_payload(review, *, include_picks=True, pick_limit=
         "number_of_games": int(number_of_games or 0),
         "status": _public_slip_review_status(review.status),
         "source": review.source,
+        "booking_code": _slip_review_booking_code(review),
         "title": review.title,
         "created_at": review.created_at.isoformat() if review.created_at else None,
         "updated_at": review.updated_at.isoformat() if review.updated_at else None,
@@ -8721,18 +8759,19 @@ class SlipReviewListView(APIView):
             limit = 20
         limit = max(1, min(limit, 100))
         view_mode = (request.query_params.get("view") or "compact").strip().lower()
-        include_picks = view_mode in {"full", "legacy"} or str(
+        explicit_include_picks = str(
             request.query_params.get("include_picks", "")
         ).strip().lower() in {"1", "true", "yes"}
+        include_picks = view_mode in {"compact", "full", "legacy"} or explicit_include_picks
         try:
-            pick_limit = int(request.query_params.get("pick_limit", 0))
+            pick_limit = int(request.query_params.get("pick_limit", 2))
         except (TypeError, ValueError):
-            pick_limit = 0
+            pick_limit = 2
         pick_limit = max(0, min(pick_limit, 20))
         if include_picks and pick_limit == 0:
-            pick_limit = None
+            include_picks = False
 
-        selected_fields = ["id", "source", "status", "title", "created_at", "updated_at"]
+        selected_fields = ["id", "source", "status", "title", "submitted_payload", "created_at", "updated_at"]
         use_summary = include_picks and pick_limit is None
         if use_summary:
             selected_fields.append("summary")
@@ -8744,6 +8783,25 @@ class SlipReviewListView(APIView):
         )
         if include_picks and pick_limit is None:
             reviews_qs = reviews_qs.prefetch_related("selections")
+        elif include_picks:
+            reviews_qs = reviews_qs.prefetch_related(
+                Prefetch(
+                    "selections",
+                    queryset=SlipSelection.objects.only(
+                        "id",
+                        "review_id",
+                        "order",
+                        "submitted_match",
+                        "submitted_market",
+                        "odds",
+                        "status",
+                        "verdict",
+                        "advisory_score",
+                        "analysis_payload",
+                    ).order_by("order", "id"),
+                    to_attr="preview_selections",
+                )
+            )
         reviews = list(reviews_qs[:limit])
         return Response(
             {

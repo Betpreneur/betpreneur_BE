@@ -1395,6 +1395,7 @@ class SlipReviewPayloadDbTests(TestCase):
             source=SlipReview.Source.SPORTYBET,
             status=SlipReview.Status.COMPLETED,
             title="SportyBet review",
+            submitted_payload={"provider_code": "ABC123"},
             summary={},
         )
         SlipSelection.objects.create(
@@ -1430,6 +1431,7 @@ class SlipReviewPayloadDbTests(TestCase):
             source=SlipReview.Source.SPORTYBET,
             status=SlipReview.Status.COMPLETED,
             title="SportyBet review",
+            submitted_payload={"provider_code": "ABC123"},
             summary={},
         )
         for index in range(5):
@@ -1450,7 +1452,11 @@ class SlipReviewPayloadDbTests(TestCase):
         self.assertEqual(response.status_code, 200)
         item = response.json()["reviews"][0]
         self.assertEqual(item["number_of_games"], 5)
-        self.assertEqual(item["picks"], [])
+        self.assertEqual(item["booking_code"], "ABC123")
+        self.assertEqual(item["picks_returned"], 2)
+        self.assertTrue(item["has_more_picks"])
+        self.assertEqual(len(item["picks"]), 2)
+        self.assertEqual(item["picks"][0]["match"], "Game 1")
         self.assertIn("created_at", item)
         self.assertNotIn("summary", item)
         self.assertNotIn("intelligence", item)
@@ -1485,6 +1491,35 @@ class SlipReviewPayloadDbTests(TestCase):
         self.assertEqual(item["picks_returned"], 2)
         self.assertTrue(item["has_more_picks"])
         self.assertEqual(item["picks"][0]["match"], "Game 1")
+
+    def test_slip_review_list_can_disable_pick_preview(self):
+        user = get_user_model().objects.create_user(username="compact-list-no-preview")
+        review = SlipReview.objects.create(
+            user=user,
+            source=SlipReview.Source.SPORTYBET,
+            status=SlipReview.Status.COMPLETED,
+            title="SportyBet review",
+            submitted_payload={"code": "ZERO01"},
+            summary={},
+        )
+        SlipSelection.objects.create(
+            review=review,
+            order=1,
+            submitted_match="Game 1",
+            submitted_market="Home Win",
+            status="analysed",
+            verdict="keep",
+            odds="1.80",
+        )
+
+        client = APIClient()
+        client.force_authenticate(user=user)
+        response = client.get("/api/algo/slip-reviews/", {"pick_limit": 0})
+
+        self.assertEqual(response.status_code, 200)
+        item = response.json()["reviews"][0]
+        self.assertEqual(item["booking_code"], "ZERO01")
+        self.assertEqual(item["picks"], [])
 
     def test_stale_recovery_finalizes_from_persisted_completed_legs(self):
         user = get_user_model().objects.create_user(username="stale-finalize")

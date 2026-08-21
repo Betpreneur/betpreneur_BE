@@ -248,6 +248,27 @@ class TokenWalletServiceTests(TestCase):
         self.assertEqual(result.transaction.amount, 0)
         self.assertEqual(result.transaction.reason, TokenTransaction.Reason.SLIP_REVIEW_CONSUME)
 
+    def test_consume_reservation_amount_refunds_unbilled_tokens(self):
+        wallet = TokenWallet.objects.create(user=self.user, free_tokens=6, paid_tokens=10)
+        reserved = self.service.reserve_tokens(self.user, 9, reference_type="slip_review", reference_id="partial")
+        wallet.refresh_from_db()
+        self.assertEqual(wallet.free_tokens, 0)
+        self.assertEqual(wallet.paid_tokens, 7)
+
+        result = self.service.consume_reservation_amount(reserved.reservation, 7)
+
+        wallet.refresh_from_db()
+        result.reservation.refresh_from_db()
+        self.assertEqual(wallet.free_tokens, 0)
+        self.assertEqual(wallet.paid_tokens, 9)
+        self.assertEqual(result.reservation.status, TokenReservation.Status.CONSUMED)
+        release_tx = TokenTransaction.objects.get(reason=TokenTransaction.Reason.SLIP_REVIEW_RELEASE)
+        consume_tx = TokenTransaction.objects.get(reason=TokenTransaction.Reason.SLIP_REVIEW_CONSUME)
+        self.assertEqual(release_tx.amount, 2)
+        self.assertEqual(release_tx.metadata["reason"], "non_billable_review_legs")
+        self.assertEqual(consume_tx.metadata["charged_tokens"], 7)
+        self.assertEqual(consume_tx.metadata["refunded_tokens"], 2)
+
     def test_release_reservation_restores_tokens_and_writes_transaction(self):
         wallet = TokenWallet.objects.create(user=self.user, free_tokens=2, paid_tokens=10)
         reserved = self.service.reserve_tokens(self.user, 6, reference_type="slip_review", reference_id="6")
@@ -1202,6 +1223,32 @@ class SlipReviewTokenBillingTests(TestCase):
         self.assertEqual(result.transaction.amount, 0)
         self.assertEqual(TokenTransaction.objects.filter(reason=TokenTransaction.Reason.SLIP_REVIEW_RESERVE).count(), 1)
 
+    def test_slip_review_does_not_charge_games_that_need_review(self):
+        wallet = TokenWallet.objects.create(user=self.user, free_tokens=5, paid_tokens=0)
+        review = self._review()
+        reservation = TokenWalletService().reserve_tokens(
+            self.user,
+            3,
+            reference_type="slip_review",
+            reference_id=str(review.id),
+        ).reservation
+        review.submitted_payload = {"token_reservation_id": reservation.id, "selection_count": 3}
+        review.summary = {"analysed_count": 1, "not_assessed_count": 2}
+        review.save(update_fields=["submitted_payload", "summary", "updated_at"])
+
+        result = _consume_slip_review_token_reservation(review)
+
+        wallet.refresh_from_db()
+        reservation.refresh_from_db()
+        self.assertEqual(wallet.free_tokens, 4)
+        self.assertEqual(reservation.status, TokenReservation.Status.CONSUMED)
+        self.assertEqual(review.summary["billing"]["token_cost"], 3)
+        self.assertEqual(review.summary["billing"]["billable_games"], 1)
+        self.assertEqual(review.summary["billing"]["charged_tokens"], 1)
+        self.assertEqual(review.summary["billing"]["refunded_tokens"], 2)
+        self.assertEqual(review.summary["billing"]["non_billable_games"], 2)
+        self.assertEqual(result.transaction.metadata["charged_tokens"], 1)
+
 
 class StaleReservationReconciliationTests(TestCase):
     """
@@ -1267,6 +1314,23 @@ class StaleReservationReconciliationTests(TestCase):
         reservation.refresh_from_db()
         self.assertEqual(reservation.status, TokenReservation.Status.CONSUMED)
         self.assertEqual(TokenWallet.objects.get(user=self.user).total_tokens, 7)
+
+    def test_stale_delivered_review_only_recognises_analysed_legs(self):
+        review = self._review(SlipReview.Status.PARTIAL)
+        review.summary = {"analysed_count": 1, "not_assessed_count": 2}
+        review.save(update_fields=["summary"])
+        reservation = self._stale_reservation(review)
+
+        report = self.service.expire_stale_reservations()
+
+        reservation.refresh_from_db()
+        wallet = TokenWallet.objects.get(user=self.user)
+        self.assertEqual(reservation.status, TokenReservation.Status.CONSUMED)
+        self.assertEqual(report["consumed"], 1)
+        self.assertEqual(report["tokens_recognised"], 1)
+        self.assertEqual(wallet.total_tokens, 9)
+        release_tx = TokenTransaction.objects.get(reason=TokenTransaction.Reason.SLIP_REVIEW_RELEASE)
+        self.assertEqual(release_tx.amount, 2)
 
     def test_failed_review_is_still_refunded(self):
         review = self._review(SlipReview.Status.FAILED)
@@ -1334,11 +1398,12 @@ class StaleReservationReconciliationTests(TestCase):
         review.submitted_payload = {
             **review.submitted_payload,
             "token_reservation_id": reservation.id,
+            "selection_count": 3,
         }
         review.save(update_fields=["submitted_payload"])
 
         with patch(
-            "apps.algo.views.token_wallet_service.consume_reservation",
+            "apps.algo.views.token_wallet_service.consume_reservation_amount",
             side_effect=RuntimeError("database went away"),
         ):
             self.assertIsNone(_consume_slip_review_token_reservation(review))

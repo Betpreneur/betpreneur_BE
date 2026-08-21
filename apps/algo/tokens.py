@@ -626,6 +626,69 @@ class TokenWalletService:
             )
             return TokenOperationResult(wallet=wallet, transaction=tx, reservation=reservation)
 
+    def consume_reservation_amount(self, reservation: TokenReservation | int, amount: int) -> TokenOperationResult:
+        amount = max(0, int(amount or 0))
+        with transaction.atomic():
+            reservation = self._locked_reservation(reservation)
+            wallet = TokenWallet.objects.select_for_update().get(pk=reservation.wallet_id)
+            if reservation.status == TokenReservation.Status.CONSUMED:
+                return TokenOperationResult(wallet=wallet, reservation=reservation)
+            if reservation.status != TokenReservation.Status.RESERVED:
+                raise ValueError(f"Cannot consume token reservation with status={reservation.status!r}.")
+
+            reserved_free = int(reservation.free_tokens_reserved or 0)
+            reserved_paid = int(reservation.paid_tokens_reserved or 0)
+            reserved_total = reserved_free + reserved_paid
+            consumed_total = min(amount, reserved_total)
+            consumed_free = min(reserved_free, consumed_total)
+            consumed_paid = consumed_total - consumed_free
+            refunded_free = reserved_free - consumed_free
+            refunded_paid = reserved_paid - consumed_paid
+            refunded_total = refunded_free + refunded_paid
+
+            if refunded_total:
+                wallet.free_tokens += refunded_free
+                wallet.paid_tokens += refunded_paid
+                wallet.save(update_fields=["free_tokens", "paid_tokens", "updated_at"])
+                self._create_transaction(
+                    user=reservation.user,
+                    wallet=wallet,
+                    amount=refunded_total,
+                    free_delta=refunded_free,
+                    paid_delta=refunded_paid,
+                    reason=TokenTransaction.Reason.SLIP_REVIEW_RELEASE,
+                    reference_type=reservation.reference_type,
+                    reference_id=reservation.reference_id,
+                    metadata={
+                        "reservation_id": reservation.id,
+                        "reason": "non_billable_review_legs",
+                        "reserved_tokens": reserved_total,
+                        "charged_tokens": consumed_total,
+                        "refunded_tokens": refunded_total,
+                    },
+                )
+
+            reservation.status = TokenReservation.Status.CONSUMED
+            reservation.consumed_at = timezone.now()
+            reservation.save(update_fields=["status", "consumed_at", "updated_at"])
+            tx = self._create_transaction(
+                user=reservation.user,
+                wallet=wallet,
+                amount=0,
+                free_delta=0,
+                paid_delta=0,
+                reason=TokenTransaction.Reason.SLIP_REVIEW_CONSUME,
+                reference_type=reservation.reference_type,
+                reference_id=reservation.reference_id,
+                metadata={
+                    "reservation_id": reservation.id,
+                    "reserved_tokens": reserved_total,
+                    "charged_tokens": consumed_total,
+                    "refunded_tokens": refunded_total,
+                },
+            )
+            return TokenOperationResult(wallet=wallet, transaction=tx, reservation=reservation)
+
     def release_reservation(self, reservation: TokenReservation | int) -> TokenOperationResult:
         with transaction.atomic():
             reservation = self._locked_reservation(reservation)
@@ -723,6 +786,20 @@ class TokenWalletService:
             return "in_flight"
         return "undeliverable"
 
+    def _slip_review_billable_tokens_for_reservation(self, reservation: TokenReservation) -> int:
+        try:
+            summary = (
+                SlipReview.objects.filter(pk=int(reservation.reference_id))
+                .values_list("summary", flat=True)
+                .first()
+            ) or {}
+        except (TypeError, ValueError):
+            return int(reservation.amount or 0)
+        if summary.get("analysed_count") is None:
+            return int(reservation.amount or 0)
+        cost_per_game = int(getattr(settings, "SLIP_REVIEW_TOKEN_COST_PER_GAME", 1) or 1)
+        return max(0, int(summary.get("analysed_count") or 0) * cost_per_game)
+
     def expire_stale_reservations(self, *, now=None, limit: int | None = None) -> dict[str, Any]:
         now = now or timezone.now()
         queryset = (
@@ -750,16 +827,18 @@ class TokenWalletService:
                 if delivery == "delivered":
                     # The user has the review. Close the escrow as revenue, not as a
                     # refund. Reaching here means the consume at the call site failed.
-                    result = self.consume_reservation(reservation_id)
+                    billable_tokens = self._slip_review_billable_tokens_for_reservation(reservation)
+                    result = self.consume_reservation_amount(reservation_id, billable_tokens)
                     if result.transaction:
                         consumed += 1
-                        tokens_recognised += int(reservation.amount or 0)
+                        recognised_tokens = min(int(billable_tokens or 0), int(reservation.amount or 0))
+                        tokens_recognised += recognised_tokens
                         log.warning(
                             "Reconciled a stale reservation for a delivered slip review "
                             "reservation=%s review=%s tokens=%s -- consume at the call site failed",
                             reservation_id,
                             reservation.reference_id,
-                            reservation.amount,
+                            recognised_tokens,
                         )
                     continue
                 result = self.expire_reservation(reservation_id)
