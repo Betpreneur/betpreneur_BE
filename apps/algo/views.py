@@ -6930,6 +6930,51 @@ def _slip_selection_payload(selection):
     return payload
 
 
+def _completed_slip_selection_payloads(review):
+    selections = list(getattr(review, "_prefetched_objects_cache", {}).get("selections") or [])
+    if not selections:
+        selections = list(review.selections.all().order_by("order", "id"))
+    completed = []
+    for selection in selections:
+        payload = _slip_selection_payload(selection)
+        if _selection_has_analysis(payload):
+            completed.append(payload)
+    return completed
+
+
+def _active_slip_review_public_payload(review, *, summary, progress, latest_event_id):
+    completed_payloads = _completed_slip_selection_payloads(review)
+    if not completed_payloads:
+        return {
+            "id": review.id,
+            "source": review.source,
+            "status": _public_slip_review_status(review.status),
+            "created_at": review.created_at,
+            "updated_at": review.updated_at,
+            "progress": _public_slip_review_progress(progress),
+            "latest_event_id": latest_event_id,
+        }
+
+    partial_summary = _manual_review_summary(completed_payloads)
+    payload = _build_bettor_public_payload(
+        review,
+        partial_summary.get("public") or {},
+        enhance=False,
+    )
+    payload["status"] = _public_slip_review_status(review.status)
+    payload["progress"] = _public_slip_review_progress(progress)
+    payload["latest_event_id"] = latest_event_id
+    payload["created_at"] = review.created_at
+    payload["updated_at"] = review.updated_at
+    payload["partial"] = True
+    payload["completed_games"] = len(completed_payloads)
+    total = int((progress or {}).get("total") or 0)
+    if total:
+        payload.setdefault("ticket", {})["total_games"] = total
+    payload = _with_smart_randomize(payload)
+    return payload
+
+
 def _compact_ai_pick_from_selection(selection):
     payload = selection.analysis_payload or {}
     replacement = payload.get("replacement_market") or {}
@@ -7073,15 +7118,12 @@ def _slip_review_payload(review, *, include_selections=True, public_only=False):
                 message=f"Slip review is {review.status}.",
             )
             return _api_response_payload(
-                {
-                    "id": review.id,
-                    "source": review.source,
-                    "status": _public_slip_review_status(review.status),
-                    "created_at": review.created_at,
-                    "updated_at": review.updated_at,
-                    "progress": _public_slip_review_progress(progress),
-                    "latest_event_id": latest_event_id,
-                }
+                _active_slip_review_public_payload(
+                    review,
+                    summary=summary,
+                    progress=progress,
+                    latest_event_id=latest_event_id,
+                )
             )
         bettor_payload = summary.get("bettor_public") or _build_bettor_public_payload(
             review,

@@ -634,6 +634,65 @@ class SlipReviewPublicContractTests(SimpleTestCase):
         self.assertFalse(ticket_pick["included_in_estimate"])
         self.assertIsNone(ticket_pick["confidence_score"])
 
+    def test_public_detail_payload_includes_completed_games_while_analysing(self):
+        completed = _sample_replace_result()
+        pending = {
+            "match": "Pending FC vs Waiting FC",
+            "submitted_market": "Home Win",
+            "status": "queued",
+            "verdict": "",
+            "message": "Waiting for analysis.",
+        }
+        now = timezone.now()
+        review = SimpleNamespace(
+            id=36,
+            source="sportybet",
+            status=SlipReview.Status.ANALYSING,
+            title="Sportybet review",
+            summary={
+                "progress": {
+                    "phase": "analysing_legs",
+                    "total": 2,
+                    "completed": 1,
+                    "percent": 50,
+                    "message": "Analysed 1 of 2 selections.",
+                }
+            },
+            created_at=now,
+            updated_at=now,
+            _prefetched_objects_cache={
+                "selections": [
+                    SimpleNamespace(
+                        analysis_payload=completed,
+                        submitted_match=completed["match"],
+                        submitted_market=completed["submitted_market"],
+                        status=completed["status"],
+                        verdict=completed["verdict"],
+                        message=completed["message"],
+                    ),
+                    SimpleNamespace(
+                        analysis_payload=pending,
+                        submitted_match=pending["match"],
+                        submitted_market=pending["submitted_market"],
+                        status=pending["status"],
+                        verdict=pending["verdict"],
+                        message=pending["message"],
+                    ),
+                ]
+            },
+        )
+
+        payload = _slip_review_payload(review, include_selections=True, public_only=True)
+
+        self.assertEqual(payload["status"], "analysing")
+        self.assertTrue(payload["partial"])
+        self.assertEqual(payload["progress"]["completed"], 1)
+        self.assertEqual(payload["progress"]["total"], 2)
+        self.assertEqual(payload["completed_games"], 1)
+        self.assertEqual(payload["ticket"]["total_games"], 2)
+        self.assertEqual(len(payload["games"]), 1)
+        self.assertEqual(payload["games"][0]["match"], completed["match"])
+
     def test_bettor_public_payload_displays_tiny_success_percent(self):
         review = SimpleNamespace(id=38, source="sportybet", status="completed")
         payload = _build_bettor_public_payload(
