@@ -3145,10 +3145,13 @@ def _generated_market_names_for_family(descriptor):
     family = descriptor.family
     raw_subject = descriptor.subject or descriptor.player or descriptor.raw
     if family in {"corners_total", "team_corners", "corners"}:
+        period_prefix = "1H " if descriptor.period == "first_half" else "2H " if descriptor.period == "second_half" else ""
         if descriptor.team in {"home", "away"}:
             prefix = "Home Team Corners" if descriptor.team == "home" else "Away Team Corners"
-            return [f"{prefix} {side.title()} {line}" for line in ("2.5", "3.5", "4.5", "5.5", "6.5") for side in ("over", "under")]
-        return [f"Corners {side.title()} {line}" for line in ("7.5", "8.5", "9.5", "10.5", "11.5") for side in ("over", "under")]
+            lines = ("0.5", "1.5", "2.5", "3.5", "4.5") if descriptor.period else ("2.5", "3.5", "4.5", "5.5", "6.5")
+            return [f"{period_prefix}{prefix} {side.title()} {line}" for line in lines for side in ("over", "under")]
+        lines = ("1.5", "2.5", "3.5", "4.5", "5.5") if descriptor.period else ("6.5", "7.5", "8.5", "9.5", "10.5", "11.5")
+        return [f"{period_prefix}Corners {side.title()} {line}" for line in lines for side in ("over", "under")]
     if family in {"cards_total", "team_cards", "cards"}:
         if descriptor.team in {"home", "away"}:
             prefix = "Home Team Cards" if descriptor.team == "home" else "Away Team Cards"
@@ -3344,6 +3347,29 @@ def _result_replacement_preserves_user_thesis(selected_market, replacement_marke
     return True
 
 
+def _line_replacement_preserves_user_thesis(selected_market, replacement_market):
+    selected = (selected_market or {}).get("market_taxonomy") or describe_market((selected_market or {}).get("market")).to_dict()
+    candidate = (replacement_market or {}).get("market_taxonomy") or describe_market((replacement_market or {}).get("market")).to_dict()
+    selected_family = selected.get("family") or ""
+    candidate_family = candidate.get("family") or ""
+    selected_group = _market_family_group(selected_market)
+    candidate_group = _market_family_group(replacement_market)
+    guarded_groups = {"corners"}
+    if selected_group not in guarded_groups or candidate_group != selected_group:
+        return True
+    if selected_family != candidate_family:
+        return False
+    if (selected.get("period") or "") != (candidate.get("period") or ""):
+        return False
+    if (selected.get("team") or "") != (candidate.get("team") or ""):
+        return False
+    selected_side = selected.get("selection") or selected.get("side") or ""
+    candidate_side = candidate.get("selection") or candidate.get("side") or ""
+    if selected_side and candidate_side and selected_side != candidate_side:
+        return False
+    return True
+
+
 # Groups where a cross-family swap is never an answer. If we cannot price a player, corner
 # or card pick, the honest outcome is "review" or "remove" -- not a goals market wearing the
 # same slot. Offering Over 1.5 in place of "Haaland To Score" answers a question the user
@@ -3381,6 +3407,85 @@ def _market_edge(market):
     return edge
 
 
+def _market_profile_fit_score(market):
+    """
+    How well the candidate matches the fixture shape behind its own model evidence.
+
+    Probability alone rewards broad markets. A market with an 11.5 corner under can have
+    a high hit rate in almost every fixture, but that does not mean it is the market this
+    fixture is specifically pointing toward. This score answers the first question:
+    "does the profile actually lean toward this side of this line?"
+    """
+    evidence = (market or {}).get("advisory_evidence") or {}
+    statpal = evidence.get("statpal") if isinstance(evidence.get("statpal"), dict) else {}
+    taxonomy = (market or {}).get("market_taxonomy") or describe_market((market or {}).get("market")).to_dict()
+    family = taxonomy.get("family") or ""
+    side = str(taxonomy.get("selection") or taxonomy.get("side") or "").lower()
+    line = _float_or_none(taxonomy.get("line"))
+    for payload in (evidence, statpal):
+        if line is None:
+            line = _float_or_none(payload.get("line"))
+        expected = None
+        if family in {"corners_total", "team_corners"}:
+            expected = _float_or_none(payload.get("expected_total_corners") or payload.get("expected_corners"))
+            scale = 10.0
+        elif family in {"cards_total", "team_cards", "booking_points"}:
+            expected = _float_or_none(
+                payload.get("expected_total_cards")
+                or payload.get("expected_cards")
+                or payload.get("expected_booking_points")
+            )
+            scale = 4.0
+        elif family in {"shots_on_target_total", "team_shots_on_target"}:
+            expected = _float_or_none(
+                payload.get("expected_shots_on_target")
+                or payload.get("expected_total_shots_on_target")
+            )
+            scale = 8.0
+        elif family in {"total_goals", "team_total_goals"}:
+            expected = _float_or_none(
+                payload.get("expected_goals")
+                or payload.get("expected_total_goals")
+                or payload.get("expected_total")
+            )
+            scale = 2.5
+        else:
+            continue
+        if expected is None or line is None or not side:
+            continue
+        margin = expected - line if side == "over" else line - expected
+        # 50 is neutral. A line supported by the fixture profile moves toward 100; a
+        # line contradicted by the profile moves toward 0. The market probability still
+        # ranks within this, but broad markets no longer win just because they are broad.
+        return round(max(0, min(100, 50 + (margin / max(scale, 0.1)) * 100)), 1)
+    return None
+
+
+def _market_similarity_score(selected_market, candidate):
+    if not selected_market or not candidate:
+        return 0
+    selected = (selected_market or {}).get("market_taxonomy") or describe_market((selected_market or {}).get("market")).to_dict()
+    replacement = (candidate or {}).get("market_taxonomy") or describe_market((candidate or {}).get("market")).to_dict()
+    score = 0
+    if _market_family_group(selected_market) == _market_family_group(candidate):
+        score += 30
+    if (selected.get("family") or "") == (replacement.get("family") or ""):
+        score += 25
+    if (selected.get("period") or "") == (replacement.get("period") or ""):
+        score += 15
+    if (selected.get("team") or "") == (replacement.get("team") or ""):
+        score += 10
+    selected_side = selected.get("selection") or selected.get("side") or ""
+    replacement_side = replacement.get("selection") or replacement.get("side") or ""
+    if selected_side and selected_side == replacement_side:
+        score += 15
+    selected_line = _float_or_none(selected.get("line"))
+    replacement_line = _float_or_none(replacement.get("line"))
+    if selected_line is not None and replacement_line is not None:
+        score += max(0, 20 - min(20, abs(selected_line - replacement_line) * 8))
+    return round(max(0, min(100, score)), 1)
+
+
 # Per unit staked. A replacement has to be meaningfully better value, not merely better
 # by a rounding error, before the user is told to change their slip.
 MINIMUM_EV_LIFT = 0.03
@@ -3406,7 +3511,7 @@ def _market_expected_value(market):
     return round((probability / 100.0) * odds - 1, 4)
 
 
-def _rank_replacement_candidates(candidates):
+def _rank_replacement_candidates(candidates, *, selected_market=None):
     """
     Rank by edge over the league-average fixture, not by raw probability.
 
@@ -3419,6 +3524,24 @@ def _rank_replacement_candidates(candidates):
         if ev is None:
             ev = _market_expected_value(market)
         edge = _market_edge(market)
+        fit = _market_profile_fit_score(market)
+        similarity = _market_similarity_score(selected_market, market) if selected_market else None
+        if selected_market:
+            return (
+                # First: preserve the user's thesis, then rank markets that fit the
+                # fixture. Otherwise every replacement drifts to the broadest safe line.
+                similarity is not None,
+                similarity if similarity is not None else 0,
+                fit is not None,
+                fit if fit is not None else 0,
+                # Then value/edge/probability.
+                ev is not None,
+                ev if ev is not None else 0,
+                edge is not None,
+                edge if edge is not None else 0,
+                market.get("advisory_score") or 0,
+                market.get("final_confidence") or market.get("confidence") or 0,
+            )
         return (
             # Value first, where the alternative carries a price.
             ev is not None,
@@ -3450,6 +3573,8 @@ def _replacement_is_meaningfully_better(selected_market, replacement_market):
     if _market_matches(selected_market.get("market"), replacement_market.get("market")):
         return False
     if not _result_replacement_preserves_user_thesis(selected_market, replacement_market):
+        return False
+    if not _line_replacement_preserves_user_thesis(selected_market, replacement_market):
         return False
 
     selected_score = _float_or_none(selected_market.get("advisory_score")) or float(selected_market.get("display_score") or 0)
@@ -3514,13 +3639,21 @@ def _replacement_market_for_slip(
     if selected_market:
         selected_name = selected_market.get("market")
         markets = [market for market in markets if not _market_matches(selected_name, market.get("market"))]
-    candidates = [market for market in markets if (market.get("advisory_score") or 0) >= 55]
+    candidates = [
+        market
+        for market in markets
+        if _market_was_assessed(market) and (_float_or_none(market.get("advisory_score")) or 0) >= 55
+    ]
     if not candidates:
         return None
     if selected_market:
         allowed = []
+        selected_group = _market_family_group(selected_market)
+        conflict_blocks_broad = _market_model_conflicted(selected_market) and selected_group == "result"
         for market in candidates:
             scope = _replacement_scope(selected_market, market)
+            if scope == "broad_fallback" and conflict_blocks_broad:
+                continue
             if scope == "broad_fallback" and (not allow_safer_fallback or not _allows_broad_replacement(selected_market)):
                 continue
             market["replacement_scope"] = scope
@@ -3528,7 +3661,10 @@ def _replacement_market_for_slip(
                 allowed.append(market)
         if not allowed:
             return None
-        replacement = _rank_replacement_candidates(allowed)[0]
+        comparable = [market for market in allowed if market.get("replacement_scope") == "comparable_market"]
+        if comparable:
+            allowed = comparable
+        replacement = _rank_replacement_candidates(allowed, selected_market=selected_market)[0]
         if replacement.get("replacement_scope") == "broad_fallback":
             replacement["recommendation_strength"] = "safer_alternative"
         return replacement
@@ -3902,6 +4038,17 @@ def _market_was_assessed(selected_market) -> bool:
     """
     market = selected_market or {}
     return any(_float_or_none(market.get(key)) is not None for key in _ASSESSMENT_SCORE_KEYS)
+
+
+def _market_model_conflicted(market) -> bool:
+    warnings = set((market or {}).get("advisory_warnings") or [])
+    evidence = (market or {}).get("advisory_evidence") or {}
+    statpal = evidence.get("statpal") if isinstance(evidence.get("statpal"), dict) else {}
+    return (
+        "result_model_market_disagreement" in warnings
+        or bool(evidence.get("result_model_market_disagreement"))
+        or bool(statpal.get("result_model_market_disagreement"))
+    )
 
 
 def _manual_verdict(selected_market, replacement_market):
@@ -4353,7 +4500,7 @@ def _public_market_pick(market, *, fallback_market="", fallback_odds=None):
     odds_status = "estimated" if str(odds_source).lower() == "estimated" else "verified" if market else ""
     score = _float_or_none((market or {}).get("advisory_score"))
     market_name = (market or {}).get("market") or fallback_market
-    return {
+    payload = {
         "market": market_name,
         "label": market_name,
         "meaning": (market or {}).get("meaning") or _public_market_meaning(market_name),
@@ -4366,6 +4513,9 @@ def _public_market_pick(market, *, fallback_market="", fallback_odds=None):
         "status": _match_checker_status(score),
         "odds_status": odds_status,
     }
+    if market:
+        payload["advisory_evidence"] = (market or {}).get("advisory_evidence") or {}
+    return payload
 
 
 def _public_recommendation_strength(pick):
@@ -4583,6 +4733,7 @@ def _selection_card(item):
         "submitted_market": item.get("submitted_market"),
         "verdict": item.get("verdict"),
         "recommended_action": action,
+        "no_replacement_available": bool(item.get("no_replacement_available")),
         "status": item.get("status"),
         "score": item.get("selection_score"),
         "submitted_pick_score": item.get("selection_score"),
@@ -4622,6 +4773,7 @@ def _without_remove_recommendation(item):
         )
     else:
         copy["verdict"] = "caution"
+        copy["no_replacement_available"] = True
         copy["message"] = (
             copy.get("message")
             or "This selection is high risk, but no stronger backed replacement was found for this game."
@@ -4642,6 +4794,7 @@ def _without_blocked_replacement_recommendation(item):
     if copy.get("verdict") == "replace":
         copy["verdict"] = "caution"
         copy["better_market_available"] = False
+        copy["no_replacement_available"] = True
         copy["message"] = (
             "This selection is risky, but no stronger backed replacement was found for this game."
         )
@@ -4713,6 +4866,7 @@ def _public_selection_card(item):
         "statpal_snapshot_coverage_percent": statpal_coverage.get("coverage_percent") if statpal_coverage else statpal_plan.get("coverage_percent"),
         "provider_merge": (item.get("matched_fixture") or {}).get("provider_merge") or item.get("provider_merge") or {},
         "blocked_recommendation_markets": item.get("blocked_recommendation_markets") or [],
+        "no_replacement_available": bool(item.get("no_replacement_available")),
         "has_technical_details": True,
     }
     leg_assessment = assess_leg(item)
@@ -5032,9 +5186,11 @@ def _public_ticket_label(score):
 
 
 def _simple_pick_verdict(selection):
-    verdict = ((selection or {}).get("verdict") or {}).get("code") or ""
+    raw_verdict = (selection or {}).get("verdict") or {}
+    verdict = raw_verdict.get("code") if isinstance(raw_verdict, dict) else raw_verdict
+    verdict = str(verdict or "").strip().lower()
     confidence = _float_or_none(((selection or {}).get("user_pick") or {}).get("confidence_score"))
-    if verdict == "replace":
+    if verdict in {"replace", "remove"}:
         return "risky"
     if verdict == "keep":
         return "keep"
@@ -5126,6 +5282,37 @@ def _goal_model_line_from_evidence(evidence):
     return ""
 
 
+def _count_model_line_from_evidence(evidence):
+    evidence = evidence or {}
+    statpal = evidence.get("statpal") if isinstance(evidence.get("statpal"), dict) else {}
+    for payload in (evidence, statpal):
+        line = _float_or_none(payload.get("line"))
+        side = str(payload.get("selection") or payload.get("side") or "").strip().title()
+        if not side:
+            side = "Over"
+        corners = _float_or_none(
+            payload.get("expected_total_corners")
+            or payload.get("expected_corners")
+        )
+        if corners is not None and line is not None:
+            return f"Expected {round(corners, 3)} corner events against a line of {line} for {side}."
+        cards = _float_or_none(
+            payload.get("expected_total_cards")
+            or payload.get("expected_cards")
+            or payload.get("expected_booking_points")
+        )
+        if cards is not None and line is not None:
+            unit = "booking points" if payload.get("market_family") == "booking_points" else "cards"
+            return f"Expected {round(cards, 3)} {unit} against a line of {line} for {side}."
+        shots = _float_or_none(
+            payload.get("expected_shots_on_target")
+            or payload.get("expected_total_shots_on_target")
+        )
+        if shots is not None and line is not None:
+            return f"Expected {round(shots, 3)} shots on target against a line of {line} for {side}."
+    return ""
+
+
 def _period_or_family_line(selection, market_payload=None):
     market_payload = market_payload or {}
     user_pick = (selection or {}).get("user_pick") or {}
@@ -5185,19 +5372,26 @@ def _stats_backed_evidence(selection, *, market_payload=None, include_context=Tr
         or (selection or {}).get("evidence_payload")
         or {}
     )
+    count_line = _count_model_line_from_evidence(selected_evidence)
+    if count_line:
+        evidence.append(count_line)
     goal_line = _goal_model_line_from_evidence(selected_evidence)
     if goal_line:
         evidence.append(goal_line)
 
-    raw_evidence = list((selection or {}).get("evidence") or (selection or {}).get("why") or [])
-    for item in raw_evidence:
-        text = _clean_public_slip_evidence_text(item)
-        lowered = text.lower()
-        if not text:
-            continue
-        if "statpal reference" in lowered or "your price is" in lowered or "reference price" in lowered:
-            continue
-        evidence.append(text)
+    user_market = ((selection or {}).get("user_pick") or {}).get("market")
+    payload_market = market_payload.get("market")
+    include_selected_raw_evidence = not payload_market or _market_matches(user_market, payload_market)
+    if include_selected_raw_evidence:
+        raw_evidence = list((selection or {}).get("evidence") or (selection or {}).get("why") or [])
+        for item in raw_evidence:
+            text = _clean_public_slip_evidence_text(item)
+            lowered = text.lower()
+            if not text:
+                continue
+            if "statpal reference" in lowered or "your price is" in lowered or "reference price" in lowered:
+                continue
+            evidence.append(text)
 
     period_line = _period_or_family_line(selection, market_payload)
     if period_line:
@@ -5299,26 +5493,38 @@ def _bettor_recommendation(selection):
     recommendation = (selection or {}).get("recommendation") or {}
     user_pick = (selection or {}).get("user_pick") or {}
     ai_pick = (selection or {}).get("ai_pick") or {}
+    simple_verdict = _simple_pick_verdict(selection)
     action = recommendation.get("action") or "review"
-    if action == "replace" and ai_pick.get("available"):
+    ai_score = _public_score(ai_pick.get("confidence_score"))
+    if action == "replace" and ai_pick.get("available") and ai_score is not None:
         pick = {
             "market": ai_pick.get("market"),
             "odds": ai_pick.get("odds"),
-            "confidence_score": _public_score(ai_pick.get("confidence_score")),
+            "confidence_score": ai_score,
             "confidence_label": _public_confidence_label(ai_pick.get("confidence_score")),
             "data_confidence_score": _public_score(ai_pick.get("data_confidence_score")),
         }
-    elif action in {"keep", "caution"} or _simple_pick_verdict(selection) in {"keep", "caution"}:
-        action = "keep" if _simple_pick_verdict(selection) == "keep" else "caution"
-        pick = {
-            "market": user_pick.get("market"),
-            "odds": user_pick.get("odds"),
-            "confidence_score": _public_score(user_pick.get("confidence_score")),
-            "confidence_label": _public_confidence_label(user_pick.get("confidence_score")),
-            "data_confidence_score": _public_score(user_pick.get("data_confidence_score")),
-        }
+    elif action in {"keep", "caution"} or simple_verdict in {"keep", "caution"}:
+        action = "keep" if simple_verdict == "keep" else "caution"
+        user_score = _public_score(user_pick.get("confidence_score"))
+        if user_score is not None and user_score >= SMART_RANDOMIZE_MIN_CONFIDENCE:
+            pick = {
+                "market": user_pick.get("market"),
+                "odds": user_pick.get("odds"),
+                "confidence_score": user_score,
+                "confidence_label": _public_confidence_label(user_pick.get("confidence_score")),
+                "data_confidence_score": _public_score(user_pick.get("data_confidence_score")),
+            }
+        else:
+            pick = None
     else:
         pick = None
+    if pick is None:
+        technical_ref = (selection or {}).get("technical_ref") or {}
+        if technical_ref.get("no_replacement_available") or simple_verdict == "risky":
+            action = "no_replacement"
+        elif simple_verdict == "review":
+            action = "review"
     why = _stats_backed_evidence(
         selection,
         market_payload=(selection or {}).get("ai_pick") or user_pick,
@@ -5333,6 +5539,8 @@ def _bettor_recommendation(selection):
             why = ["Your original selection already fits the statistical profile of the match."]
         elif action == "caution":
             why = ["There is not enough evidence for a stronger replacement to be recommended confidently."]
+        elif action == "no_replacement":
+            why = ["The original pick is risky, but no statistically supported replacement was found."]
         else:
             why = ["No confident recommendation is available from the current match data."]
     return {"action": action, "pick": pick, "why": why}
@@ -5572,11 +5780,7 @@ def _build_bettor_public_payload(review, technical_public, *, enhance=False):
         recommendation = _bettor_recommendation(selection)
         positive_evidence, risk_evidence = _split_bettor_evidence(selection)
         match = selection.get("match") or ""
-        selected_pick = recommendation.get("pick") or {
-            "market": user_pick.get("market"),
-            "confidence_score": _public_score(user_pick.get("confidence_score")),
-            "confidence_label": _public_confidence_label(user_pick.get("confidence_score")),
-        }
+        selected_pick = recommendation.get("pick")
         changed = recommendation.get("action") == "replace"
         games.append(
             {
@@ -5602,19 +5806,31 @@ def _build_bettor_public_payload(review, technical_public, *, enhance=False):
                 "recommendation": recommendation,
             }
         )
-        recommended_picks.append(
-            {
-                "match": match,
-                "market": (selected_pick or {}).get("market") or user_pick.get("market"),
-                "confidence_score": (selected_pick or {}).get("confidence_score")
-                or _public_score(user_pick.get("confidence_score")),
-                "confidence_label": (selected_pick or {}).get("confidence_label")
-                or _public_confidence_label(user_pick.get("confidence_score")),
-                "action": recommendation.get("action"),
-                "included_in_estimate": user_pick.get("confidence_score") is not None,
-                "changed": changed,
-            }
-        )
+        if selected_pick:
+            recommended_picks.append(
+                {
+                    "match": match,
+                    "market": (selected_pick or {}).get("market"),
+                    "confidence_score": (selected_pick or {}).get("confidence_score"),
+                    "confidence_label": (selected_pick or {}).get("confidence_label"),
+                    "action": recommendation.get("action"),
+                    "included_in_estimate": (selected_pick or {}).get("confidence_score") is not None,
+                    "changed": changed,
+                }
+            )
+        else:
+            simple_verdict = _simple_pick_verdict(selection)
+            recommended_picks.append(
+                {
+                    "match": match,
+                    "market": user_pick.get("market"),
+                    "confidence_score": None,
+                    "confidence_label": "Unknown",
+                    "action": "no_replacement" if simple_verdict == "risky" else "review" if simple_verdict == "review" else recommendation.get("action"),
+                    "included_in_estimate": False,
+                    "changed": False,
+                }
+            )
 
     changes = int(improvement.get("picks_changed") or 0)
     high_risk_count = int(breakdown.get("high_risk") or 0)

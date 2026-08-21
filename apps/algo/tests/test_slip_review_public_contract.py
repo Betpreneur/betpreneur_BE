@@ -614,6 +614,26 @@ class SlipReviewPublicContractTests(SimpleTestCase):
         self.assertNotIn("reason_codes", game)
         self.assertEqual(payload["recommended_ticket"]["picks"][0]["match"], game["match"])
 
+    def test_risky_selection_without_supported_replacement_has_no_ai_pick(self):
+        result = _sample_replace_result()
+        result["verdict"] = "remove"
+        result["replacement_market"] = None
+        result["selected_market"]["advisory_score"] = 27
+        result["selected_market"]["advisory_status"] = "avoid"
+        result["message"] = "This selection is weak on the match evidence."
+        summary = _manual_review_summary([result])
+        review = SimpleNamespace(id=35, source="sportybet", status="completed")
+
+        payload = _build_bettor_public_payload(review, summary["public"], enhance=False)
+
+        game = payload["games"][0]
+        self.assertIsNone(game["recommendation"]["pick"])
+        self.assertEqual(game["recommendation"]["action"], "no_replacement")
+        ticket_pick = payload["recommended_ticket"]["picks"][0]
+        self.assertEqual(ticket_pick["action"], "no_replacement")
+        self.assertFalse(ticket_pick["included_in_estimate"])
+        self.assertIsNone(ticket_pick["confidence_score"])
+
     def test_bettor_public_payload_displays_tiny_success_percent(self):
         review = SimpleNamespace(id=38, source="sportybet", status="completed")
         payload = _build_bettor_public_payload(

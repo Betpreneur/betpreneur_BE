@@ -12,6 +12,7 @@ from apps.algo.views import (
     _manual_verdict,
     _public_market_pick,
     _replacement_market_for_slip,
+    _stats_backed_evidence,
     _submitted_market_payload,
     _with_statpal_advisory,
     _with_market_capability,
@@ -242,6 +243,59 @@ class UserPickAdvisoryTests(SimpleTestCase):
         replacement = _replacement_market_for_slip({"markets": []}, selected_market=selected, generated_markets=generated)
 
         self.assertEqual(replacement["market"], "DC: 1X")
+
+    def test_conflicted_result_model_does_not_use_broad_goal_fallback(self):
+        selected = {
+            "market": "Home Win",
+            "advisory_score": 27,
+            "advisory_status": "avoid",
+            "advisory_warnings": ["result_model_market_disagreement"],
+            "market_taxonomy": {"family": "match_result", "side": "home"},
+        }
+        generated = [
+            {
+                "market": "Over 2.5",
+                "advisory_score": 73,
+                "advisory_status": "playable",
+                "market_taxonomy": {"family": "total_goals", "side": "over", "selection": "over", "line": "2.5"},
+            }
+        ]
+
+        replacement = _replacement_market_for_slip(
+            {"markets": []},
+            selected_market=selected,
+            generated_markets=generated,
+            allow_safer_fallback=True,
+        )
+
+        self.assertIsNone(replacement)
+
+    def test_replacement_candidate_must_have_model_probability(self):
+        selected = {
+            "market": "Home Win",
+            "advisory_score": 40,
+            "advisory_status": "avoid",
+            "market_taxonomy": {"family": "match_result", "side": "home"},
+        }
+        generated = [
+            {
+                "market": "Over 2.5",
+                "advisory_score": None,
+                "final_confidence": None,
+                "confidence": None,
+                "advisory_status": "playable",
+                "market_taxonomy": {"family": "total_goals"},
+            }
+        ]
+
+        replacement = _replacement_market_for_slip(
+            {"markets": []},
+            selected_market=selected,
+            generated_markets=generated,
+            allow_safer_fallback=True,
+        )
+
+        self.assertIsNone(replacement)
 
     def test_replacement_never_recommends_easy_over_half_goal_market(self):
         selected = {
@@ -524,6 +578,145 @@ class UserPickAdvisoryTests(SimpleTestCase):
         self.assertIn("Test Forward Shots Over 1.5", generated_names)
         self.assertIn("Test Forward Shots On Target Over 1.5", generated_names)
         self.assertNotIn("Test Forward Shots On Target Over 0.5", generated_names)
+
+    def test_corner_over_pick_is_not_replaced_by_corner_under(self):
+        selected = {
+            "market": "Corners Over 6.5",
+            "advisory_score": 64,
+            "advisory_status": "avoid",
+            "market_taxonomy": describe_market("Corners Over 6.5").to_dict(),
+            "market_capability": {"data_quality": "medium"},
+        }
+        generated = [
+            {
+                "market": "Corners Under 11.5",
+                "advisory_score": 75,
+                "advisory_status": "playable",
+                "market_taxonomy": describe_market("Corners Under 11.5").to_dict(),
+            }
+        ]
+
+        replacement = _replacement_market_for_slip(
+            {"markets": []},
+            selected_market=selected,
+            generated_markets=generated,
+        )
+
+        self.assertIsNone(replacement)
+
+    def test_first_half_corner_pick_is_not_replaced_by_full_match_corner(self):
+        selected = {
+            "market": "1H Corners Over 3.5",
+            "advisory_score": 30,
+            "advisory_status": "avoid",
+            "market_taxonomy": describe_market("1H Corners Over 3.5").to_dict(),
+            "market_capability": {"data_quality": "medium"},
+        }
+        generated = [
+            {
+                "market": "Corners Over 7.5",
+                "advisory_score": 75,
+                "advisory_status": "playable",
+                "market_taxonomy": describe_market("Corners Over 7.5").to_dict(),
+            }
+        ]
+
+        replacement = _replacement_market_for_slip(
+            {"markets": []},
+            selected_market=selected,
+            generated_markets=generated,
+        )
+
+        self.assertIsNone(replacement)
+
+    def test_first_half_corner_generation_keeps_first_half_period(self):
+        names = set(_generated_market_names_for_family(describe_market("1H Corners Over 3.5")))
+
+        self.assertIn("1H Corners Over 2.5", names)
+        self.assertIn("1H Corners Under 4.5", names)
+        self.assertNotIn("Corners Under 11.5", names)
+
+    def test_replacement_reason_uses_replacement_corner_line(self):
+        user_pick = _public_market_pick(
+            {
+                "market": "Corners Over 6.5",
+                "advisory_score": 64,
+                "odds": 1.24,
+                "advisory_evidence": {
+                    "expected_total_corners": 8.634,
+                    "line": 6.5,
+                    "selection": "over",
+                    "market_family": "corners_total",
+                },
+            }
+        )
+        ai_pick = _public_market_pick(
+            {
+                "market": "Corners Over 7.5",
+                "advisory_score": 70,
+                "odds": None,
+                "advisory_evidence": {
+                    "expected_total_corners": 8.634,
+                    "line": 7.5,
+                    "selection": "over",
+                    "market_family": "corners_total",
+                },
+            }
+        )
+
+        evidence = _stats_backed_evidence(
+            {
+                "user_pick": user_pick,
+                "why": ["Expected 8.634 corner events against a line of 6.5."],
+            },
+            market_payload=ai_pick,
+        )
+
+        self.assertIn("Expected 8.634 corner events against a line of 7.5 for Over.", evidence)
+        self.assertNotIn("Expected 8.634 corner events against a line of 6.5.", evidence)
+
+    def test_corner_replacement_ranking_prefers_fit_and_similarity_before_probability(self):
+        selected = {
+            "market": "Corners Over 8.5",
+            "advisory_score": 62,
+            "advisory_status": "avoid",
+            "market_taxonomy": describe_market("Corners Over 8.5").to_dict(),
+            "market_capability": {"data_quality": "medium"},
+        }
+        generated = [
+            {
+                "market": "Corners Over 6.5",
+                "advisory_score": 82,
+                "advisory_status": "playable",
+                "market_taxonomy": describe_market("Corners Over 6.5").to_dict(),
+                "advisory_evidence": {
+                    "expected_total_corners": 10.1,
+                    "line": 6.5,
+                    "selection": "over",
+                    "market_family": "corners_total",
+                },
+            },
+            {
+                "market": "Corners Over 7.5",
+                "advisory_score": 70,
+                "advisory_status": "playable",
+                "market_taxonomy": describe_market("Corners Over 7.5").to_dict(),
+                "advisory_evidence": {
+                    "expected_total_corners": 10.1,
+                    "line": 7.5,
+                    "selection": "over",
+                    "market_family": "corners_total",
+                },
+            },
+        ]
+
+        replacement = _replacement_market_for_slip(
+            {"markets": []},
+            selected_market=selected,
+            generated_markets=generated,
+        )
+
+        self.assertEqual(replacement["market"], "Corners Over 7.5")
 
 
 class GeneratedCardsAlternativeTests(TestCase):
