@@ -32,16 +32,18 @@ from .models import (
     StrategyReview,
     TeamAliasMap,
 )
-from .recommendation_policy import (
+from .picks.recommendation_policy import (
     assess_calibration_trust,
     assess_league_market_trust,
     assess_recommendation,
 )
 from .council import CAUTION, REJECT, council_review
-from .market_taxonomy import describe_market
-from .normalize.bridge import descriptor_from_canonical
-from .normalize.canonical import Resolution as MarketResolution
-from .normalize.sportybet import resolve as resolve_sportybet_market
+from .markets.api import (
+    Resolution as MarketResolution,
+    describe_market,
+    descriptor_from_canonical,
+    resolve_sportybet_market,
+)
 
 
 log = logging.getLogger(__name__)
@@ -217,8 +219,8 @@ class FixtureSearchService:
         therefore covers every date we care about, and carries StatPal's own team ids,
         which are what the corner and card rate profiles need to resolve.
         """
-        from .statpal import StatPalConfigurationError, StatPalError
-        from .statpal_provider import StatPalDailyMatchProvider, normalize_daily_matches
+        from .market_data.api import StatPalConfigurationError, StatPalError
+        from .market_data.statpal_provider import StatPalDailyMatchProvider, normalize_daily_matches
 
         start_date = start_date or timezone.localdate()
         days = min(int(days or self.DEFAULT_DAYS), self.MAX_DAYS)
@@ -258,8 +260,8 @@ class FixtureSearchService:
         Cost is one request per league — around a thousand — which is a couple of
         percent of the daily quota, so this runs on a schedule rather than per review.
         """
-        from .statpal import StatPalClient, StatPalConfigurationError, StatPalError
-        from .statpal_provider import normalize_daily_matches, normalize_leagues
+        from .market_data.statpal import StatPalClient, StatPalConfigurationError, StatPalError
+        from .market_data.statpal_provider import normalize_daily_matches, normalize_leagues
 
         start_date = start_date or timezone.localdate()
         horizon = start_date + timedelta(days=max(0, int(days)))
@@ -319,7 +321,7 @@ class FixtureSearchService:
         total = 0
         errors = list(statpal_result.get("errors") or [])
 
-        from .grindalgo import algo_runner
+        from .picks.grindalgo import algo_runner
 
         extra_env = {}
         if unrestricted:
@@ -342,8 +344,8 @@ class FixtureSearchService:
         return {"synced": total, "errors": errors}
 
     def sync_statpal_daily(self, *, target_date):
-        from .statpal import StatPalConfigurationError, StatPalError
-        from .statpal_provider import StatPalDailyMatchProvider
+        from .market_data.api import StatPalConfigurationError, StatPalError
+        from .market_data.statpal_provider import StatPalDailyMatchProvider
 
         try:
             fixtures = StatPalDailyMatchProvider().fixtures_for_date(target_date)
@@ -480,7 +482,7 @@ class FixtureSearchService:
         attempts = []
         total = 0
         provider_match_ids = []
-        from .grindalgo import algo_runner
+        from .picks.grindalgo import algo_runner
 
         with temporary_env(self.runner_service._runner_env({"APS_TRACK_ALL_LEAGUES": "True", "APS_MAX_FIXTURES": "0"})):
             for offset in range(days + 1):
@@ -636,7 +638,7 @@ class FixtureSearchService:
         fixture_id = str(fixture_id or "").strip()
         if not fixture_id:
             return {"synced": 0, "errors": ["fixture_id_required"]}
-        from .grindalgo import algo_runner
+        from .picks.grindalgo import algo_runner
 
         errors = []
         with temporary_env(self.runner_service._runner_env({"APS_TRACK_ALL_LEAGUES": "True", "APS_MAX_FIXTURES": "0"})):
@@ -2008,7 +2010,7 @@ class AlgoRunnerService:
         return item
 
     def _sync_api_football_enrichment_cache(self, target_date):
-        from .grindalgo import algo_runner
+        from .picks.grindalgo import algo_runner
 
         try:
             with temporary_env(self._runner_env({"APS_TRACK_ALL_LEAGUES": "True", "APS_MAX_FIXTURES": "0"})):
@@ -2027,7 +2029,7 @@ class AlgoRunnerService:
         return [self._cached_fixture_runner_payload(row) for row in rows]
 
     def _daily_runner_fixtures(self, target_date):
-        from .grindalgo import algo_runner
+        from .picks.grindalgo import algo_runner
 
         statpal_errors = []
         if self._statpal_primary_daily_enabled():
@@ -2070,7 +2072,7 @@ class AlgoRunnerService:
             return fixture
 
         from .models import StatPalFixtureSnapshot
-        from .statpal_snapshots import statpal_snapshot_service
+        from .market_data.api import statpal_snapshot_service
 
         try:
             refresh = statpal_snapshot_service.refresh_fixture_snapshots(
@@ -2351,7 +2353,7 @@ class AlgoRunnerService:
         if not getattr(settings, "SLIP_REVIEW_MARKET_CACHE_WRITE_ENABLED", True):
             return {"enabled": False, "cached": 0}
         try:
-            from .slip_review_market_cache import SlipReviewMarketCacheWriter
+            from .slip_review.api import SlipReviewMarketCacheWriter
 
             payload = dict(fixture or {})
             payload.setdefault("match_date", algo_run.target_date)
@@ -2386,7 +2388,7 @@ class AlgoRunnerService:
         source_payload = fixture.get("source_payload") if isinstance(fixture.get("source_payload"), dict) else {}
         fixture_payload = {**source_payload, **fixture}
         try:
-            from .statpal_daily_build import StatPalDailyBuildService
+            from .market_data.api import StatPalDailyBuildService
 
             coverage = StatPalDailyBuildService().coverage_for_fixture(
                 fixture_payload,
@@ -2421,7 +2423,7 @@ class AlgoRunnerService:
         }
 
     def _market_statpal_diagnostics(self, market, statpal_context):
-        from .market_capabilities import MarketCapabilityService
+        from .markets.capabilities import MarketCapabilityService
 
         capability = MarketCapabilityService().assess(
             market.get("market", ""),
@@ -2717,7 +2719,7 @@ class AlgoRunnerService:
         family = route.get("family") or insights.get("market_family")
         if family:
             return str(family)
-        from .daily_market_catalog import daily_evaluation_route
+        from .picks.daily_market_catalog import daily_evaluation_route
 
         return str(daily_evaluation_route(prediction.market).get("family") or "unknown")
 
@@ -3087,7 +3089,7 @@ class AlgoRunnerService:
                 if prediction:
                     payloads.append(self._selected_pick_payload_from_prediction(prediction, tier, bankroll))
 
-        from .grindalgo import algo_runner
+        from .picks.grindalgo import algo_runner
 
         reason_candidates = [self._candidate_dict_for_reasoning(payload) for payload in payloads]
         for payload, candidate in zip(payloads, reason_candidates):
@@ -3155,7 +3157,7 @@ class AlgoRunnerService:
         if not picks:
             return {"run_id": algo_run.id, "updated": 0, "total": 0}
 
-        from .grindalgo import algo_runner
+        from .picks.grindalgo import algo_runner
 
         candidates = []
         for pick in picks:
@@ -3271,7 +3273,7 @@ class AlgoRunnerService:
         })
         try:
             with temporary_env(env):
-                from .grindalgo import algo_runner
+                from .picks.grindalgo import algo_runner
 
                 bankroll = algo_runner.get_bankroll(None)
                 fixture_bundle = self._daily_runner_fixtures(algo_run.target_date)
@@ -3374,7 +3376,7 @@ class AlgoRunnerService:
 
         try:
             with temporary_env(self._pipeline_env(algo_run)):
-                from .grindalgo import algo_runner
+                from .picks.grindalgo import algo_runner
 
                 algo_runner.clear_runtime_caches()
                 source_payload = dict(fixture.source_payload or {})
@@ -3556,8 +3558,8 @@ class AlgoRunnerService:
                 "ALGO_PERFORMANCE_PROFILE": json.dumps(performance_profile),
                 "ALGO_STRATEGY_PROFILE": json.dumps(strategy_profile),
             })):
-                from .grindalgo import algo_runner
-                from .slip_review_market_cache import SlipReviewMarketCacheWriter
+                from .picks.grindalgo import algo_runner
+                from .slip_review.api import SlipReviewMarketCacheWriter
 
                 algo_runner.clear_runtime_caches()
                 source_payload = self._cached_fixture_runner_payload(cached)
@@ -3832,7 +3834,7 @@ class AlgoRunnerService:
 
         try:
             with temporary_env(env):
-                from .grindalgo import algo_runner
+                from .picks.grindalgo import algo_runner
 
                 algo_runner.clear_runtime_caches()
                 algo_runner.log_memory("staged_start")
@@ -4813,7 +4815,7 @@ class AlgoRunnerService:
         })
         try:
             with temporary_env(env):
-                from .grindalgo.algo_runner import run_daily_algo
+                from .picks.grindalgo.algo_runner import run_daily_algo
 
                 result = run_daily_algo()
 
@@ -4972,7 +4974,7 @@ class AlgoRunnerService:
         if to_date is not None:
             env["AUDITOR_TO"] = to_date.isoformat()
         with temporary_env(env):
-            from .grindalgo.auditor_runner import run_auditor
+            from .settlement.api import run_auditor
 
             return run_auditor()
 

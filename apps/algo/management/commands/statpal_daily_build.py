@@ -4,7 +4,7 @@ from datetime import datetime
 from django.core.management.base import BaseCommand, CommandError
 from django.utils import timezone
 
-from apps.algo.statpal_daily_build import DEFAULT_BUILD_DAYS, StatPalDailyBuildService
+from apps.algo.market_data.api import DEFAULT_BUILD_DAYS, StatPalDailyBuildService
 
 
 class Command(BaseCommand):

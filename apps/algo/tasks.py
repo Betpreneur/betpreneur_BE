@@ -8,7 +8,7 @@ from django.core.exceptions import ObjectDoesNotExist
 from django.conf import settings
 from django.utils import timezone
 
-from .services import algo_runner_service
+from .picks.api import algo_runner_service
 
 log = logging.getLogger(__name__)
 
@@ -194,7 +194,7 @@ def recover_stale_slip_reviews(self, stale_after_seconds=None, limit=25):
 
 @shared_task(bind=True, ignore_result=False)
 def refill_daily_free_tokens(self, run_date=None, limit=None):
-    from .tokens import token_wallet_service
+    from .wallet.api import token_wallet_service
 
     parsed_date = date.fromisoformat(run_date) if run_date else None
     return token_wallet_service.refill_daily_free_tokens(run_date=parsed_date, limit=limit)
@@ -202,7 +202,7 @@ def refill_daily_free_tokens(self, run_date=None, limit=None):
 
 @shared_task(bind=True, ignore_result=False)
 def expire_token_reservations(self, limit=200):
-    from .tokens import token_wallet_service
+    from .wallet.api import token_wallet_service
 
     return token_wallet_service.expire_stale_reservations(limit=limit)
 
@@ -231,7 +231,7 @@ def sync_fixture_horizon(self, days=3, league_ids=None):
     Doing it on a schedule keeps fixture resolution to a cache lookup, instead of the
     per-leg provider sync that used to dominate a slip review.
     """
-    from .services import FixtureSearchService
+    from .market_data.api import FixtureSearchService
 
     return FixtureSearchService().sync_statpal_horizon(days=days, league_ids=league_ids)
 
@@ -252,7 +252,7 @@ def build_statpal_daily_cache(self, start_date=None, days=3, include_optional=Fa
     horizon: it fetches the daily match universe, then refreshes fixture, league,
     team, H2H, odds, lineup, injury, weather, and prediction snapshots for analysis.
     """
-    from .statpal_daily_build import StatPalDailyBuildService
+    from .market_data.api import StatPalDailyBuildService
 
     parsed_start = date.fromisoformat(start_date) if start_date else None
     try:
@@ -415,8 +415,8 @@ def fit_score_models(self, league_ids=None):
     logged and skipped rather than aborting the run — one bad league must not leave
     every other league stale.
     """
-    from .scoring.service import score_model_service
-    from .statpal import StatPalClient
+    from .scoring.api import score_model_service
+    from .market_data.statpal import StatPalClient
 
     client = StatPalClient()
     if league_ids:

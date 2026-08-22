@@ -1,0 +1,2 @@
+"""Pure market identity domain."""
+

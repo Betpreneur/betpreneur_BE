@@ -1,6 +1,6 @@
 from django.core.management.base import BaseCommand, CommandError
 
-from apps.algo.services import algo_runner_service
+from apps.algo.picks.api import algo_runner_service
 
 
 class Command(BaseCommand):

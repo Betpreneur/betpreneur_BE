@@ -59,8 +59,8 @@ class StatPalSnapshotApiTests(TestCase):
 
     def test_fixture_context_can_refresh_without_forcing(self):
         self.client.force_authenticate(self.user)
-        with patch("apps.algo.views.statpal_snapshot_service.refresh_fixture_snapshots") as refresh:
-            with patch("apps.algo.views.statpal_snapshot_service.fixture_context") as context:
+        with patch("apps.algo.api.market_data_views.statpal_snapshot_service.refresh_fixture_snapshots") as refresh:
+            with patch("apps.algo.api.market_data_views.statpal_snapshot_service.fixture_context") as context:
                 refresh.return_value = {
                     "attempted": [],
                     "refreshed": [],
@@ -93,8 +93,8 @@ class StatPalSnapshotApiTests(TestCase):
 
     def test_admin_refresh_endpoint_returns_context(self):
         self.client.force_authenticate(self.admin)
-        with patch("apps.algo.views.statpal_snapshot_service.refresh_fixture_snapshots") as refresh:
-            with patch("apps.algo.views.statpal_snapshot_service.fixture_context") as context:
+        with patch("apps.algo.api.market_data_views.statpal_snapshot_service.refresh_fixture_snapshots") as refresh:
+            with patch("apps.algo.api.market_data_views.statpal_snapshot_service.fixture_context") as context:
                 refresh.return_value = {
                     "attempted": ["lineups"],
                     "refreshed": [{"snapshot_type": "lineups", "snapshot_id": 1}],

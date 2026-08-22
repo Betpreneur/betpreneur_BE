@@ -2,7 +2,7 @@ import json
 
 from django.core.management.base import BaseCommand, CommandError
 
-from apps.algo.statpal import StatPalClient, StatPalError
+from apps.algo.market_data.api import StatPalClient, StatPalError
 
 
 class Command(BaseCommand):

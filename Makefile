@@ -8,7 +8,7 @@ YELLOW = \033[0;33m
 BLUE = \033[0;34m
 NC = \033[0m # No Color
 
-.PHONY: help build up down logs restart migrate createsuperuser shell prod dev clean
+.PHONY: help build up down logs restart migrate createsuperuser shell prod dev clean test-boundaries
 
 # ------------------------------
 # Help
@@ -28,6 +28,7 @@ help:
 	@echo "  $(GREEN)make prod$(NC)            Start production mode"
 	@echo "  $(GREEN)make dev$(NC)             Start development mode"
 	@echo "  $(GREEN)make clean$(NC)           Clean up containers and volumes"
+	@echo "  $(GREEN)make test-boundaries$(NC) Run modular monolith import-boundary checks"
 
 # ------------------------------
 # Docker Compose Shortcuts
@@ -70,6 +71,9 @@ collectstatic:
 
 test:
 	docker compose exec backend python manage.py test
+
+test-boundaries:
+	python -m unittest apps.algo.tests.test_module_boundaries
 
 # ------------------------------
 # Development

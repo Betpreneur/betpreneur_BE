@@ -4,7 +4,7 @@ import logging
 from channels.db import database_sync_to_async
 from channels.generic.websocket import AsyncJsonWebsocketConsumer
 
-from . import slip_review_redis
+from .slip_review import api as slip_review_redis
 from .models import SlipReview, SlipReviewEvent
 
 

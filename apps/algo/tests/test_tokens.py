@@ -618,7 +618,7 @@ class TokenWalletApiTests(TestCase):
         PAYFONTE_CLIENT_SECRET="client-secret",
         PAYFONTE_VIRTUAL_ACCOUNT_TTL_MINUTES=30,
     )
-    @patch("apps.algo.views.payfonte_client")
+    @patch("apps.algo.api.token_views.payfonte_client")
     def test_token_purchase_endpoint_creates_pending_purchase(self, client_mock):
         client_mock.return_value.direct_charge.return_value = {
             "reference": "PF-REF-1",
@@ -683,7 +683,7 @@ class TokenWalletApiTests(TestCase):
         PAYFONTE_CLIENT_ID="client-id",
         PAYFONTE_CLIENT_SECRET="client-secret",
     )
-    @patch("apps.algo.views.payfonte_client")
+    @patch("apps.algo.api.token_views.payfonte_client")
     def test_token_purchase_endpoint_marks_purchase_failed_when_payfonte_fails(self, client_mock):
         client_mock.return_value.direct_charge.side_effect = PayfonteError("provider unavailable")
         self.client.force_authenticate(user=self.user)
@@ -719,7 +719,7 @@ class TokenWalletApiTests(TestCase):
         self.assertEqual(payload["purchases"][0]["id"], own.id)
 
     @override_settings(TOKEN_PURCHASE_PACKAGES="240:990", TOKEN_PURCHASE_CURRENCY="NGN")
-    @patch("apps.algo.views.payfonte_client")
+    @patch("apps.algo.api.token_views.payfonte_client")
     def test_token_purchase_verify_credits_paid_tokens_after_payfonte_success(self, client_mock):
         service = TokenWalletService()
         purchase = service.create_token_purchase(self.user, package_id="tokens_240_ngn_990")
@@ -751,7 +751,7 @@ class TokenWalletApiTests(TestCase):
         self.assertEqual(response.json()["payfonte_status"], "success")
 
     @override_settings(TOKEN_PURCHASE_PACKAGES="240:990", TOKEN_PURCHASE_CURRENCY="NGN")
-    @patch("apps.algo.views.payfonte_client")
+    @patch("apps.algo.api.token_views.payfonte_client")
     def test_token_purchase_verify_keeps_purchase_pending_when_payfonte_is_pending(self, client_mock):
         service = TokenWalletService()
         purchase = service.create_token_purchase(self.user, package_id="tokens_240_ngn_990")
@@ -773,7 +773,7 @@ class TokenWalletApiTests(TestCase):
         self.assertEqual(TokenTransaction.objects.count(), 0)
 
     @override_settings(TOKEN_PURCHASE_PACKAGES="240:990", TOKEN_PURCHASE_CURRENCY="NGN")
-    @patch("apps.algo.views.payfonte_client")
+    @patch("apps.algo.api.token_views.payfonte_client")
     def test_token_purchase_verify_fails_purchase_when_payfonte_fails(self, client_mock):
         service = TokenWalletService()
         purchase = service.create_token_purchase(self.user, package_id="tokens_240_ngn_990")
@@ -795,7 +795,7 @@ class TokenWalletApiTests(TestCase):
         self.assertEqual(TokenTransaction.objects.count(), 0)
 
     @override_settings(TOKEN_PURCHASE_PACKAGES="240:990", TOKEN_PURCHASE_CURRENCY="NGN")
-    @patch("apps.algo.views.payfonte_client")
+    @patch("apps.algo.api.token_views.payfonte_client")
     def test_token_purchase_verify_rejects_amount_mismatch(self, client_mock):
         service = TokenWalletService()
         purchase = service.create_token_purchase(self.user, package_id="tokens_240_ngn_990")
@@ -816,7 +816,7 @@ class TokenWalletApiTests(TestCase):
         self.assertEqual(TokenTransaction.objects.count(), 0)
 
     @override_settings(TOKEN_PURCHASE_PACKAGES="240:990", TOKEN_PURCHASE_CURRENCY="NGN")
-    @patch("apps.algo.views.payfonte_client")
+    @patch("apps.algo.api.token_views.payfonte_client")
     def test_payfonte_webhook_verifies_before_crediting_tokens(self, client_mock):
         service = TokenWalletService()
         purchase = service.create_token_purchase(self.user, package_id="tokens_240_ngn_990")
@@ -842,7 +842,7 @@ class TokenWalletApiTests(TestCase):
         self.assertEqual(TokenTransaction.objects.count(), 1)
 
     @override_settings(TOKEN_PURCHASE_PACKAGES="240:990", TOKEN_PURCHASE_CURRENCY="NGN")
-    @patch("apps.algo.views.payfonte_client")
+    @patch("apps.algo.api.token_views.payfonte_client")
     def test_payfonte_webhook_matches_external_reference_and_verifies_transaction_reference(self, client_mock):
         service = TokenWalletService()
         purchase = service.create_token_purchase(self.user, package_id="tokens_240_ngn_990")
@@ -879,7 +879,7 @@ class TokenWalletApiTests(TestCase):
         client_mock.return_value.verify_payment.assert_called_once_with("DDC20260820223050CQCJL")
 
     @override_settings(TOKEN_PURCHASE_PACKAGES="240:990", TOKEN_PURCHASE_CURRENCY="NGN")
-    @patch("apps.algo.views.payfonte_client")
+    @patch("apps.algo.api.token_views.payfonte_client")
     def test_payfonte_webhook_retries_verification_with_external_reference(self, client_mock):
         service = TokenWalletService()
         purchase = service.create_token_purchase(self.user, package_id="tokens_240_ngn_990")
@@ -918,7 +918,7 @@ class TokenWalletApiTests(TestCase):
         )
 
     @override_settings(TOKEN_PURCHASE_PACKAGES="240:990", TOKEN_PURCHASE_CURRENCY="NGN")
-    @patch("apps.algo.views.payfonte_client")
+    @patch("apps.algo.api.token_views.payfonte_client")
     def test_payfonte_webhook_returns_retry_when_verification_fails(self, client_mock):
         service = TokenWalletService()
         purchase = service.create_token_purchase(self.user, package_id="tokens_240_ngn_990")
@@ -1403,7 +1403,7 @@ class StaleReservationReconciliationTests(TestCase):
         review.save(update_fields=["submitted_payload"])
 
         with patch(
-            "apps.algo.views.token_wallet_service.consume_reservation_amount",
+            "apps.algo.slip_review.billing.token_wallet_service.consume_reservation_amount",
             side_effect=RuntimeError("database went away"),
         ):
             self.assertIsNone(_consume_slip_review_token_reservation(review))

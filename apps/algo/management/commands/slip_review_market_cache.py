@@ -5,7 +5,7 @@ from django.db.models import Count, Max, Min
 from django.utils import timezone
 
 from apps.algo.models import SlipReviewMarketCache
-from apps.algo.services import algo_runner_service
+from apps.algo.picks.api import algo_runner_service
 from apps.algo.tasks import build_slip_review_market_cache, cleanup_slip_review_market_cache
 
 

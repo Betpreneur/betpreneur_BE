@@ -64,7 +64,7 @@ class TokenPurchaseSerializer(serializers.ModelSerializer):
     def get_payment(self, obj):
         if obj.provider != "payfonte":
             return None
-        from .payfonte import payfonte_payment_payload
+        from .wallet.api import payfonte_payment_payload
 
         return payfonte_payment_payload(obj)
 

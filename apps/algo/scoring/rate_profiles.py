@@ -107,7 +107,7 @@ class TeamRateProfileService:
     @property
     def client(self):
         if self._client is None:
-            from ..statpal import StatPalClient
+            from ..market_data.api import StatPalClient
 
             self._client = StatPalClient()
         return self._client

@@ -86,7 +86,7 @@ class FixtureRates:
 
 class ScoreModelService:
     def _fetch_standings(self, league_id, season=""):
-        from ..statpal import StatPalClient
+        from ..market_data.api import StatPalClient
 
         return StatPalClient().soccer_endpoint(
             "SOCCER_LEAGUE_STANDINGS",

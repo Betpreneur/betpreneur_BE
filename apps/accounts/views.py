@@ -155,7 +155,7 @@ def _grant_signup_tokens(user):
     below the threshold up to the same cap -- so it is logged loudly and swallowed rather
     than surfaced as a verification error.
     """
-    from apps.algo.tokens import token_wallet_service
+    from apps.algo.wallet.api import token_wallet_service
 
     try:
         return token_wallet_service.grant_signup_tokens(user).to_dict()

@@ -3,8 +3,7 @@ import json
 from django.core.management.base import BaseCommand, CommandError
 
 from apps.algo.models import StatPalFixtureSnapshot
-from apps.algo.statpal import StatPalClient, StatPalError
-from apps.algo.statpal_snapshots import statpal_snapshot_service
+from apps.algo.market_data.api import StatPalClient, StatPalError, statpal_snapshot_service
 
 
 class Command(BaseCommand):

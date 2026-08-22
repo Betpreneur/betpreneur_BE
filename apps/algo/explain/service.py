@@ -51,7 +51,7 @@ def _llm_enabled() -> bool:
 def _rephrase(text: str, evidence) -> str | None:
     """Ask the configured model to rephrase. Returns None if unavailable or it errors."""
     try:
-        from ..grindalgo.gemini_analyst import rephrase_explanation
+        from ..picks.grindalgo.gemini_analyst import rephrase_explanation
     except Exception:
         return None
     try:

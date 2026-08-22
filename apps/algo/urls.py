@@ -1,35 +1,42 @@
 from django.urls import include, path
 from rest_framework.routers import DefaultRouter
 
-from .views import (
-    AlgoRunViewSet,
+from .api.admin_views import AlgoRunViewSet, MaintenanceRunView, TaskStatusView
+from .api.games_views import (
     BackGameView,
     BackedGamesView,
-    BetanoSlipImportView,
-    DailyPicksDownloadView,
-    DailyPicksView,
     FixtureSearchView,
     GameDetailView,
     GamesView,
-    MaintenanceRunView,
-    ManualSlipReviewView,
+)
+from .api.market_data_views import (
     MarketHealthView,
-    PickDetailView,
-    PublicRecordView,
-    PublicSummaryView,
-    SlipReviewDetailView,
-    SlipReviewEventsView,
-    SlipReviewListView,
-    SlipReviewRandomizeView,
-    SlipReviewStreamTokenView,
-    SlipRepairView,
-    SlipReviewOptionsView,
-    SlipReviewRecapView,
-    SportyBetSlipImportView,
     StatPalFixtureContextView,
     StatPalFixtureRefreshView,
     StatPalReadinessView,
-    TaskStatusView,
+)
+from .api.picks_views import (
+    DailyPicksDownloadView,
+    DailyPicksView,
+    PickDetailView,
+    PublicRecordView,
+    PublicSummaryView,
+    TopPickView,
+)
+from .api.slip_review_views import (
+    BetanoSlipImportView,
+    ManualSlipReviewView,
+    SlipRepairView,
+    SlipReviewDetailView,
+    SlipReviewEventsView,
+    SlipReviewListView,
+    SlipReviewOptionsView,
+    SlipReviewRandomizeView,
+    SlipReviewRecapView,
+    SlipReviewStreamTokenView,
+    SportyBetSlipImportView,
+)
+from .api.token_views import (
     PayfonteWebhookView,
     TokenAdminAdjustmentView,
     TokenPackageListView,
@@ -38,7 +45,6 @@ from .views import (
     TokenPurchaseVerifyView,
     TokenPurchaseView,
     TokenWalletView,
-    TopPickView,
 )
 
 
