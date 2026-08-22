@@ -430,6 +430,80 @@ class UserPickAdvisoryTests(SimpleTestCase):
 
         self.assertEqual(replacement["market"], "Corners Over 8.5")
 
+    def test_overall_corner_recommendation_does_not_use_unbookable_low_line(self):
+        selected = {
+            "market": "Home Win",
+            "advisory_score": 28,
+            "advisory_status": "avoid",
+            "market_taxonomy": describe_market("Home Win").to_dict(),
+        }
+        generated = [
+            {
+                "market": "Corners Over 2.5",
+                "advisory_score": 89,
+                "advisory_status": "strong",
+                "market_taxonomy": describe_market("Corners Over 2.5").to_dict(),
+                "market_capability": {"data_quality": "medium"},
+                "advisory_evidence": {
+                    "expected_total_corners": 5.2,
+                    "line": 2.5,
+                    "selection": "over",
+                },
+            },
+            {
+                "market": "Corners Over 7.5",
+                "advisory_score": 72,
+                "advisory_status": "playable",
+                "market_taxonomy": describe_market("Corners Over 7.5").to_dict(),
+                "market_capability": {"data_quality": "medium"},
+                "advisory_evidence": {
+                    "expected_total_corners": 9.4,
+                    "line": 7.5,
+                    "selection": "over",
+                },
+            },
+        ]
+
+        replacement = _replacement_market_for_slip(
+            {"markets": []},
+            selected_market=selected,
+            generated_markets=generated,
+            allow_safer_fallback=True,
+        )
+
+        self.assertEqual(replacement["market"], "Corners Over 7.5")
+
+    def test_team_corner_recommendation_can_use_low_line_when_team_is_explicit(self):
+        selected = {
+            "market": "Home Win",
+            "advisory_score": 28,
+            "advisory_status": "avoid",
+            "market_taxonomy": describe_market("Home Win").to_dict(),
+        }
+        generated = [
+            {
+                "market": "Home Team Corners Over 2.5",
+                "advisory_score": 78,
+                "advisory_status": "strong",
+                "market_taxonomy": describe_market("Home Team Corners Over 2.5").to_dict(),
+                "market_capability": {"data_quality": "medium"},
+                "advisory_evidence": {
+                    "home_expected_corners": 5.2,
+                    "line": 2.5,
+                    "selection": "over",
+                },
+            }
+        ]
+
+        replacement = _replacement_market_for_slip(
+            {"markets": []},
+            selected_market=selected,
+            generated_markets=generated,
+            allow_safer_fallback=True,
+        )
+
+        self.assertEqual(replacement["market"], "Home Team Corners Over 2.5")
+
     def test_stage8_home_win_goal_replacement_needs_fixture_specific_evidence(self):
         selected = {
             "market": "Home Win",
@@ -966,6 +1040,14 @@ class UserPickAdvisoryTests(SimpleTestCase):
         self.assertTrue(_blocked_slip_recommendation_market({"market": "Over 0.5"}))
         self.assertTrue(_blocked_slip_recommendation_market({"market": "1H Over 0.5"}))
         self.assertFalse(_blocked_slip_recommendation_market({"market": "AH Home +0.5"}))
+
+    def test_generated_match_corner_markets_start_at_bookable_over_lines(self):
+        names = set(_generated_market_names_for_family(describe_market("Corners Over 8.5")))
+
+        self.assertNotIn("Corners Over 2.5", names)
+        self.assertNotIn("Corners Over 6.5", names)
+        self.assertIn("Corners Over 7.5", names)
+        self.assertIn("Corners Over 8.5", names)
 
     def test_replacement_does_not_broad_replace_decent_specialist_pick(self):
         selected = {

@@ -3145,12 +3145,14 @@ def _generated_market_names_for_family(descriptor):
     family = descriptor.family
     raw_subject = descriptor.subject or descriptor.player or descriptor.raw
     if family in {"corners_total", "team_corners", "corners"}:
-        period_prefix = "1H " if descriptor.period == "first_half" else "2H " if descriptor.period == "second_half" else ""
+        period = descriptor.period or "match"
+        is_period_market = period in {"first_half", "second_half"}
+        period_prefix = "1H " if period == "first_half" else "2H " if period == "second_half" else ""
         if descriptor.team in {"home", "away"}:
             prefix = "Home Team Corners" if descriptor.team == "home" else "Away Team Corners"
-            lines = ("0.5", "1.5", "2.5", "3.5", "4.5") if descriptor.period else ("2.5", "3.5", "4.5", "5.5", "6.5")
+            lines = ("0.5", "1.5", "2.5", "3.5", "4.5") if is_period_market else ("2.5", "3.5", "4.5", "5.5", "6.5")
             return [f"{period_prefix}{prefix} {side.title()} {line}" for line in lines for side in ("over", "under")]
-        lines = ("1.5", "2.5", "3.5", "4.5", "5.5") if descriptor.period else ("6.5", "7.5", "8.5", "9.5", "10.5", "11.5")
+        lines = ("1.5", "2.5", "3.5", "4.5", "5.5") if is_period_market else ("7.5", "8.5", "9.5", "10.5", "11.5")
         return [f"{period_prefix}Corners {side.title()} {line}" for line in lines for side in ("over", "under")]
     if family in {"cards_total", "team_cards", "cards"}:
         if descriptor.team in {"home", "away"}:
@@ -3516,6 +3518,18 @@ def _broad_fallback_candidate_allowed(selected_market, candidate):
         if candidate_group == "corners" and line is not None and line >= 10.5:
             return False
     return True
+
+
+def _bookmaker_recommendation_market_available(market):
+    taxonomy = (market or {}).get("market_taxonomy") or describe_market((market or {}).get("market")).to_dict()
+    family = taxonomy.get("family") or ""
+    side = str(taxonomy.get("selection") or taxonomy.get("side") or "").lower()
+    line = _float_or_none(taxonomy.get("line"))
+    period = taxonomy.get("period") or "match"
+    team = taxonomy.get("team") or ""
+    if family == "corners_total" and period == "match" and side == "over" and line is not None and line < 7.5:
+        return False
+    return not (family == "corners_total" and line is not None and line < 7.5 and not team)
 
 
 # Groups where a cross-family swap is never an answer. If we cannot price a player, corner
@@ -3927,6 +3941,8 @@ def _market_model_sanity_passes(market):
 
 def _replacement_candidate_is_eligible(market):
     if not market or _blocked_slip_recommendation_market(market):
+        return False
+    if not _bookmaker_recommendation_market_available(market):
         return False
     probability = _float_or_none(market.get("advisory_score"))
     if probability is None:
