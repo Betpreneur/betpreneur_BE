@@ -19,6 +19,7 @@ push is never quietly counted as a loss.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import lru_cache
 
 from .dixon_coles import ScoreMatrix
 
@@ -76,6 +77,99 @@ def double_chance(matrix: ScoreMatrix, side: str) -> float:
     if side in {"home_or_away", "12"}:
         return matrix.sum_where(lambda home, away: home != away)
     return 0.0
+
+
+@lru_cache(maxsize=None)
+def _lead_hit_probability(home_goals: int, away_goals: int, *, team: str, lead: int) -> float:
+    """
+    P(team reaches `lead` at some point), conditional on the final score.
+
+    With only a pre-match score matrix we do not know the actual goal timeline. The
+    least-inventive approximation is to treat all orderings of the final home/away
+    goals as equally likely, then count the sequences where the selected side ever
+    opens the requested lead.
+    """
+    if lead <= 0:
+        return 1.0
+    if team not in {"home", "away"}:
+        return 0.0
+    if home_goals < 0 or away_goals < 0:
+        return 0.0
+
+    @lru_cache(maxsize=None)
+    def walk(home_remaining: int, away_remaining: int, current_diff: int) -> tuple[int, int]:
+        if (team == "home" and current_diff >= lead) or (team == "away" and -current_diff >= lead):
+            return 1, 1
+        if home_remaining == 0 and away_remaining == 0:
+            return 0, 1
+
+        hit = total = 0
+        if home_remaining:
+            child_hit, child_total = walk(home_remaining - 1, away_remaining, current_diff + 1)
+            hit += child_hit
+            total += child_total
+        if away_remaining:
+            child_hit, child_total = walk(home_remaining, away_remaining - 1, current_diff - 1)
+            hit += child_hit
+            total += child_total
+        return hit, total
+
+    hit, total = walk(int(home_goals), int(away_goals), 0)
+    return round(hit / total, 6) if total else 0.0
+
+
+def result_early_payout(matrix: ScoreMatrix, side: str, lead: int = 1) -> float:
+    """Result market with 1UP/2UP early-payout protection."""
+    side = str(side or "").lower()
+    if side == "draw":
+        return draw(matrix)
+    if side not in {"home", "away"}:
+        return 0.0
+
+    total = 0.0
+    for home_goals, row in enumerate(matrix.grid):
+        for away_goals, mass in enumerate(row):
+            final_wins = home_goals > away_goals if side == "home" else away_goals > home_goals
+            if final_wins:
+                total += mass
+            else:
+                total += mass * _lead_hit_probability(home_goals, away_goals, team=side, lead=int(lead or 1))
+    return min(1.0, max(0.0, total))
+
+
+def double_chance_early_payout(matrix: ScoreMatrix, side: str, lead: int = 1) -> float:
+    """Double-chance market with SportyBet-style 1UP early-payout protection."""
+    side = str(side or "").lower()
+
+    def final_matches(home: int, away: int) -> bool:
+        if side in {"home_or_draw", "1x"}:
+            return home >= away
+        if side in {"draw_or_away", "x2"}:
+            return home <= away
+        if side in {"home_or_away", "12"}:
+            return home != away
+        return False
+
+    protected_teams = {
+        "home_or_draw": ("home",),
+        "1x": ("home",),
+        "draw_or_away": ("away",),
+        "x2": ("away",),
+        "home_or_away": ("home", "away"),
+        "12": ("home", "away"),
+    }.get(side, ())
+
+    total = 0.0
+    for home_goals, row in enumerate(matrix.grid):
+        for away_goals, mass in enumerate(row):
+            if final_matches(home_goals, away_goals):
+                total += mass
+                continue
+            no_hit_probability = 1.0
+            for team in protected_teams:
+                no_hit_probability *= 1.0 - _lead_hit_probability(home_goals, away_goals, team=team, lead=int(lead or 1))
+            total += mass * (1.0 - no_hit_probability)
+    return min(1.0, max(0.0, total))
 
 
 def draw_no_bet(matrix: ScoreMatrix, side: str) -> MarketOutcome:

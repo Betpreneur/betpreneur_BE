@@ -26,6 +26,18 @@ def _line(descriptor) -> float | None:
         return None
 
 
+def _early_payout_lead(descriptor) -> int | None:
+    text = " ".join(
+        str(value or "")
+        for value in (getattr(descriptor, "canonical", ""), getattr(descriptor, "raw", ""), getattr(descriptor, "code", ""))
+    ).lower()
+    if "2up" in text or "2 up" in text:
+        return 2
+    if "1up" in text or "1 up" in text:
+        return 1
+    return None
+
+
 def _fixture_ids(fixture):
     fixture = fixture or {}
     return {
@@ -43,11 +55,17 @@ def _outcome_probability(descriptor, matrix):
     team = descriptor.team or ("home" if side == "home" else "away" if side == "away" else "")
 
     if family == "match_result":
+        early_lead = _early_payout_lead(descriptor)
+        if early_lead:
+            return derive.result_early_payout(matrix, side, early_lead), 0.0
         return {"home": derive.home_win, "draw": derive.draw, "away": derive.away_win}.get(
             side, lambda _m: None
         )(matrix), 0.0
 
     if family == "double_chance":
+        early_lead = _early_payout_lead(descriptor)
+        if early_lead:
+            return derive.double_chance_early_payout(matrix, side, early_lead), 0.0
         return derive.double_chance(matrix, side), 0.0
 
     if family == "draw_no_bet":

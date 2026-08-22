@@ -26,7 +26,13 @@ from .canonical import CanonicalMarket, Period, Resolution, Subject
 # this map are recognised but not modelled, and are reported as such.
 FAMILY_TO_TAXONOMY = {
     "match_result": "match_result",
+    # SportyBet 1UP/2UP are early-payout guards layered on top of normal result
+    # markets. We keep their display labels distinct, but analyse them with the
+    # underlying result/double-chance model instead of treating them as unmodelled.
+    "match_result_1up": "match_result",
+    "match_result_2up": "match_result",
     "double_chance": "double_chance",
+    "double_chance_1up": "double_chance",
     "draw_no_bet": "draw_no_bet",
     "handicap": "handicap",
     "asian_handicap": "asian_handicap",

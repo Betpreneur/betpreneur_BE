@@ -1454,9 +1454,10 @@ class SportyBetShareImporter:
         )
         canonical = descriptor.canonical if descriptor.recognized else outcome_name.strip()
         if canonical:
-            if "1up" in market_text:
+            normalized_canonical = str(canonical).strip().lower()
+            if "1up" in market_text and not normalized_canonical.endswith("1up"):
                 return f"{canonical} 1UP"
-            if "2up" in market_text:
+            if "2up" in market_text and not normalized_canonical.endswith("2up"):
                 return f"{canonical} 2UP"
             if "never down" in market_text:
                 return f"{canonical} Never Down"

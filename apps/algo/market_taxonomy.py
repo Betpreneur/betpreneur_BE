@@ -116,6 +116,20 @@ def _over_under_side(value):
     return ""
 
 
+def _early_payout_modifier(value):
+    normalized = normalize_market_text(value)
+    match = re.search(r"\b([12])\s*up\b", normalized)
+    return f"{match.group(1)}UP" if match else ""
+
+
+def _strip_early_payout_modifier(value):
+    return re.sub(r"\b[12]\s*up\b", " ", normalize_market_text(value)).strip()
+
+
+def _with_early_payout_modifier(canonical, modifier):
+    return f"{canonical} {modifier}".strip() if modifier else canonical
+
+
 def _period_from_text(value):
     normalized = normalize_market_text(value)
     window = re.search(r"\bfirst\s+(5|10|15|20|25|30|35|40|50|55|60|65|70|75|80|85)\s+minutes?\b", normalized)
@@ -267,6 +281,10 @@ def describe_market(value, *, market_name="", outcome_name="", specifier=""):
     text = normalize_market_text(combined)
     market_text = normalize_market_text(market)
     outcome_text = normalize_market_text(outcome or raw)
+    modifier = _early_payout_modifier(combined)
+    text_without_modifier = _strip_early_payout_modifier(combined)
+    raw_without_modifier = _strip_early_payout_modifier(raw)
+    outcome_without_modifier = _strip_early_payout_modifier(outcome or raw)
     line = _line_from_text(spec, outcome, market, raw)
     period = _period_from_text(combined)
 
@@ -311,35 +329,45 @@ def describe_market(value, *, market_name="", outcome_name="", specifier=""):
         "gg / btts yes": "GG / BTTS Yes",
     }
     normalized_raw = normalize_market_text(raw)
-    if normalized_raw in aliases:
-        canonical = aliases[normalized_raw]
+    normalized_alias_key = raw_without_modifier if modifier else normalized_raw
+    if normalized_alias_key in aliases:
+        canonical = aliases[normalized_alias_key]
         if canonical == "Home Win":
-            return _mk(raw=raw or canonical, canonical=canonical, code="result_home", family="match_result", category="Result", side="home", selection="home", period=period)
+            canonical = _with_early_payout_modifier(canonical, modifier)
+            return _mk(raw=raw or canonical, canonical=canonical, code=f"result_home_{modifier.lower()}" if modifier else "result_home", family="match_result", category="Result", side="home", selection="home", period=period)
         if canonical == "Away Win":
-            return _mk(raw=raw or canonical, canonical=canonical, code="result_away", family="match_result", category="Result", side="away", selection="away", period=period)
+            canonical = _with_early_payout_modifier(canonical, modifier)
+            return _mk(raw=raw or canonical, canonical=canonical, code=f"result_away_{modifier.lower()}" if modifier else "result_away", family="match_result", category="Result", side="away", selection="away", period=period)
         if canonical == "Draw":
-            return _mk(raw=raw or canonical, canonical=canonical, code="result_draw", family="match_result", category="Result", side="draw", selection="draw", period=period)
+            canonical = _with_early_payout_modifier(canonical, modifier)
+            return _mk(raw=raw or canonical, canonical=canonical, code=f"result_draw_{modifier.lower()}" if modifier else "result_draw", family="match_result", category="Result", side="draw", selection="draw", period=period)
         if canonical in {"DC: 12", "DC: 1X", "DC: X2"}:
             side = {"DC: 12": "home_or_away", "DC: 1X": "home_or_draw", "DC: X2": "draw_or_away"}[canonical]
-            return _mk(raw=raw or canonical, canonical=canonical, code=f"double_chance_{canonical[-2:].lower()}", family="double_chance", category="Result", side=side, selection=side, period=period)
+            canonical = _with_early_payout_modifier(canonical, modifier)
+            return _mk(raw=raw or canonical, canonical=canonical, code=f"double_chance_{side}_{modifier.lower()}" if modifier else f"double_chance_{canonical[-2:].lower()}", family="double_chance", category="Result", side=side, selection=side, period=period)
         if canonical == "GG / BTTS Yes":
             return _mk(raw=raw or canonical, canonical=canonical, code="btts_yes", family="btts", category="Goals", side="yes", selection="yes", period=period)
 
-    if re.fullmatch(r"(home win|away win|draw)", text):
-        side = _side_from_text(text)
+    result_text = text_without_modifier if modifier else text
+    if re.fullmatch(r"(home win|away win|draw)", result_text):
+        side = _side_from_text(result_text)
         canonical = {"home": "Home Win", "away": "Away Win", "draw": "Draw"}[side]
-        return _mk(raw=raw or canonical, canonical=canonical, code=f"result_{side}", family="match_result", category="Result", side=side, selection=side, period=period)
+        canonical = _with_early_payout_modifier(canonical, modifier)
+        return _mk(raw=raw or canonical, canonical=canonical, code=f"result_{side}_{modifier.lower()}" if modifier else f"result_{side}", family="match_result", category="Result", side=side, selection=side, period=period)
 
     if "match result" in text or "1x2" in text or market_text in {"match result superodds"}:
         side = _side_from_text(outcome or raw)
         if side:
             canonical = {"home": "Home Win", "away": "Away Win", "draw": "Draw"}[side]
-            return _mk(raw=raw or canonical, canonical=canonical, code=f"result_{side}", family="match_result", category="Result", side=side, selection=side, period=period)
+            canonical = _with_early_payout_modifier(canonical, modifier)
+            return _mk(raw=raw or canonical, canonical=canonical, code=f"result_{side}_{modifier.lower()}" if modifier else f"result_{side}", family="match_result", category="Result", side=side, selection=side, period=period)
 
-    if "double chance" in text or outcome_text in {"1x", "x2", "12"}:
-        side = outcome_text.replace(" ", "") or text.replace("double chance", "").strip()
+    dc_outcome = outcome_without_modifier if modifier else outcome_text
+    if "double chance" in text or dc_outcome in {"1x", "x2", "12"}:
+        side = dc_outcome.replace(" ", "") or text_without_modifier.replace("double chance", "").strip()
         label = {"1x": "DC: 1X", "x2": "DC: X2", "12": "DC: 12"}.get(side, f"Double Chance {side.upper()}")
-        return _mk(raw=raw or label, canonical=label, code=f"double_chance_{side}", family="double_chance", category="Result", side=side, selection=side, period=period)
+        label = _with_early_payout_modifier(label, modifier)
+        return _mk(raw=raw or label, canonical=label, code=f"double_chance_{side}_{modifier.lower()}" if modifier else f"double_chance_{side}", family="double_chance", category="Result", side=side, selection=side, period=period)
 
     if "draw no bet" in text or "dnb" in text:
         side = _side_from_text(outcome or raw)

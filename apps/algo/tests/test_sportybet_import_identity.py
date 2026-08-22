@@ -930,6 +930,9 @@ class MarketIdentityThroughImportTests(SimpleTestCase):
 
         self.assertEqual(leg["market"], "Home Win 1UP")
         self.assertEqual(leg["canonical_market"]["family"], "match_result_1up")
+        self.assertEqual(leg["market_taxonomy"]["family"], "match_result")
+        self.assertEqual(leg["market_taxonomy"]["canonical"], "Home Win 1UP")
+        self.assertEqual(leg["market_taxonomy"]["side"], "home")
         self.assertEqual(leg["canonical_market"]["settlement"], "early_payout")
         self.assertIn("enhanced_result_market", leg["canonical_market"]["warnings"])
         self.assertEqual(leg["provider_market_text"], "Home Win 1UP")
@@ -939,6 +942,9 @@ class MarketIdentityThroughImportTests(SimpleTestCase):
 
         self.assertEqual(leg["market"], "DC: X2 1UP")
         self.assertEqual(leg["canonical_market"]["family"], "double_chance_1up")
+        self.assertEqual(leg["market_taxonomy"]["family"], "double_chance")
+        self.assertEqual(leg["market_taxonomy"]["canonical"], "DC: X2 1UP")
+        self.assertEqual(leg["market_taxonomy"]["side"], "draw_or_away")
         self.assertEqual(leg["canonical_market"]["settlement"], "early_payout")
         self.assertIn("enhanced_double_chance_market", leg["canonical_market"]["warnings"])
 

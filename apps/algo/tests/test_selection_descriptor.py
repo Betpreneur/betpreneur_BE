@@ -14,6 +14,7 @@ from apps.algo.views import (
     _resolved_taxonomy,
     _selection_market_descriptor,
 )
+from apps.algo.market_taxonomy import describe_market
 
 
 def _taxonomy(**overrides):
@@ -62,9 +63,26 @@ class DescriptorTests(SimpleTestCase):
 
     def test_the_period_prefixed_string_alone_would_not_resolve(self):
         # Demonstrates why the stored identity is used rather than the text.
-        from apps.algo.market_taxonomy import describe_market
 
         self.assertEqual(describe_market("1H Home Win").family, "unknown")
+
+    def test_early_payout_result_text_uses_base_result_model(self):
+        descriptor = describe_market("Home Win 1UP")
+
+        self.assertEqual(descriptor.family, "match_result")
+        self.assertEqual(descriptor.canonical, "Home Win 1UP")
+        self.assertEqual(descriptor.code, "result_home_1up")
+        self.assertEqual(descriptor.side, "home")
+        self.assertTrue(_market_can_skip_core_on_demand(descriptor))
+
+    def test_early_payout_double_chance_text_uses_base_dc_model(self):
+        descriptor = describe_market("DC: X2 1UP")
+
+        self.assertEqual(descriptor.family, "double_chance")
+        self.assertEqual(descriptor.canonical, "DC: X2 1UP")
+        self.assertEqual(descriptor.code, "double_chance_draw_or_away_1up")
+        self.assertEqual(descriptor.side, "draw_or_away")
+        self.assertTrue(_market_can_skip_core_on_demand(descriptor))
 
     def test_a_resolved_half_market_can_skip_core_scoring(self):
         selection = {"provider_payload": {"market_taxonomy": _taxonomy()}}
