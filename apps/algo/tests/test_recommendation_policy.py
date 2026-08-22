@@ -46,6 +46,8 @@ class RecommendationPolicyTests(TestCase):
             raw_confidence=confidence,
             odds=Decimal("1.50"),
             ev=Decimal(str(ev)),
+            # The odds reviewer reads this; leaving it empty reads as a single-book price.
+            odds_meta={"bookmaker_count": 4, "spread_pct": 6},
             odds_source="api_football",
             eligible=eligible,
             risk_flags=risk_flags or [],
@@ -69,6 +71,20 @@ class RecommendationPolicyTests(TestCase):
                 "goal_model": {
                     "expected_total": 2.4,
                     "draw_confidence": 24,
+                },
+                # The scoreline reviewer reads this, not the recent-form blocks. Omitting
+                # it made every candidate look like it had no scoreline history at all.
+                "scoreline_profile": {
+                    "games": 10,
+                    "h2h_games": 4,
+                    "low_total_rate": 62,
+                    "high_total_rate": 18,
+                    "btts_rate": 44,
+                    "draw_rate": 24,
+                    "h2h_low_total_rate": 60,
+                    "h2h_draw_rate": 25,
+                    "h2h_btts_rate": 40,
+                    "low_score_cluster": True,
                 },
             },
             insights=insights or {
@@ -101,7 +117,19 @@ class RecommendationPolicyTests(TestCase):
         self.assertFalse(assess_recommendation(wild_card)["recommended"])
         self.assertFalse(assess_recommendation(risky)["recommended"])
 
-        selected = self.service._select_prediction_ids(self.run)
+        # `_recommendation_candidate` recomputes league and calibration trust from the
+        # run's performance profile, discarding whatever `insights` the fixture set. With
+        # no profile every candidate looks like it has no history and is capped at
+        # value_gem, so a qualified pick needs a run that has one.
+        selected = self.service._select_prediction_ids(
+            self.run_with_performance({
+                "markets": {"Under 3.5": {"count": 30, "hit_rate": 64, "roi_flat": 6}},
+                "league_markets": {"::Under 3.5": {"count": 25, "hit_rate": 63, "roi_flat": 5}},
+                "confidence_bands": {
+                    "80+": {"count": 30, "hit_rate": 80, "roi_flat": 5, "avg_confidence": 81}
+                },
+            })
+        )
 
         self.assertEqual(selected[Pick.Tier.BANKER], [qualified.id])
         self.assertEqual(selected[Pick.Tier.VALUE_GEM], [])
@@ -180,7 +208,22 @@ class RecommendationPolicyTests(TestCase):
                 "goal_model": {
                     "expected_total": 2.4,
                     "draw_confidence": 24,
-                }
+                },
+                # The scoreline reviewer reads `fixture_context.scoreline_profile`, not the
+                # recent-form blocks. Without it the sample reads as zero and the candidate
+                # is docked for a limited scoreline sample it was never given.
+                "scoreline_profile": {
+                    "games": 10,
+                    "h2h_games": 4,
+                    "low_total_rate": 62,
+                    "high_total_rate": 18,
+                    "btts_rate": 44,
+                    "draw_rate": 24,
+                    "h2h_low_total_rate": 60,
+                    "h2h_draw_rate": 25,
+                    "h2h_btts_rate": 40,
+                    "low_score_cluster": True,
+                },
             },
             "insights": {
                 "league_trust": {
@@ -611,27 +654,30 @@ class RecommendationPolicyTests(TestCase):
 
     def test_council_reject_blocks_otherwise_recommended_pick(self):
         self.prediction(match_id="7", confidence=90, ev="0.200")
+        # A confidence band that has been badly miscalibrated is a hard veto. Negative
+        # market ROI alone is not: that veto is suppressed when the fixture is an
+        # exceptional fit for the market, which this candidate is.
         selected = self.service._select_prediction_ids(self.run_with_performance({
             "markets": {
                 "Under 3.5": {
-                    "count": 5,
-                    "hit_rate": 58,
-                    "roi_flat": -20,
+                    "count": 30,
+                    "hit_rate": 64,
+                    "roi_flat": 6,
                 }
             },
             "league_markets": {
                 "::Under 3.5": {
-                    "count": 5,
-                    "hit_rate": 58,
-                    "roi_flat": -20,
+                    "count": 30,
+                    "hit_rate": 63,
+                    "roi_flat": 5,
                 }
             },
             "confidence_bands": {
                 "80+": {
-                    "count": 30,
-                    "hit_rate": 80,
-                    "roi_flat": 5,
-                    "avg_confidence": 81,
+                    "count": 40,
+                    "hit_rate": 38,
+                    "roi_flat": -30,
+                    "avg_confidence": 88,
                 }
             },
         }))
@@ -1190,24 +1236,31 @@ class RecommendationPolicyTests(TestCase):
         self.assertIsNone(card["suggested_odds"])
 
     def test_slip_review_replaces_only_with_recommended_market(self):
+        # Over 2.5 -> Over 1.5 keeps the user's direction on goals. The original pairing
+        # here was Over 1.5 -> Under 3.5, which reverses it: backing goals and being told
+        # to back against them. That is refused for the same reason DC: 1X -> DC: X2 is.
         selected_market = {
-            "market": "Over 1.5",
+            "market": "Over 2.5",
             "recommendation_status": "no_edge",
             "display_score": 68,
         }
         replacement_market = {
-            "market": "Under 3.5",
+            "market": "Over 1.5",
             "recommendation_status": "recommended",
             "recommended": True,
             "display_score": 82,
+            "advisory_score": 82,
             "odds": 1.55,
+            # A candidate with no evidence behind it is not eligible to be recommended,
+            # so a realistic one has to carry some.
+            "advisory_evidence": {"expected_goals_home": 1.3, "expected_goals_away": 1.0},
         }
 
         verdict = _manual_verdict(selected_market, replacement_market)
         card = _selection_card(
             {
                 "match": "Spain vs Belgium",
-                "submitted_market": "Over 1.5",
+                "submitted_market": "Over 2.5",
                 "status": "analysed",
                 **verdict,
                 "selected_market": selected_market,
@@ -1217,5 +1270,5 @@ class RecommendationPolicyTests(TestCase):
 
         self.assertEqual(verdict["verdict"], "replace")
         self.assertTrue(verdict["better_market_available"])
-        self.assertEqual(card["suggested_market"], "Under 3.5")
+        self.assertEqual(card["suggested_market"], "Over 1.5")
         self.assertEqual(card["suggested_odds"], 1.55)

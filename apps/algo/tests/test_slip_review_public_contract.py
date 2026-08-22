@@ -655,7 +655,12 @@ class SlipReviewPublicContractTests(SimpleTestCase):
 
         self.assertEqual(payload["id"], 34)
         self.assertEqual(payload["source"], "sportybet")
-        self.assertEqual(set(payload.keys()), {"id", "source", "status", "ticket", "games", "recommended_ticket", "disclaimer"})
+        # `smart_randomize` is part of the product surface -- it tells the client whether
+        # a smaller ticket can be built and at what sizes.
+        self.assertEqual(
+            set(payload.keys()),
+            {"id", "source", "status", "ticket", "games", "recommended_ticket", "disclaimer", "smart_randomize"},
+        )
         self.assertIn("user_picks", payload["ticket"])
         self.assertIn("recommended_picks", payload["ticket"])
         self.assertIn("verdict", payload["ticket"])
@@ -905,6 +910,9 @@ class SlipReviewPublicContractTests(SimpleTestCase):
         self.assertEqual(_public_confidence_label(65), "Moderate")
 
     def test_public_only_payload_is_minimal_while_analysing_without_db(self):
+        # The in-progress payload streams whichever legs have already finished, so it
+        # reads `review.selections`. Nothing is finished here, so the stub returns an
+        # empty set -- the point of the test is that the payload stays minimal.
         review = SimpleNamespace(
             id=36,
             source="sportybet",
@@ -912,6 +920,9 @@ class SlipReviewPublicContractTests(SimpleTestCase):
             summary={},
             created_at="2026-08-10T22:56:48Z",
             updated_at="2026-08-10T22:57:00Z",
+            selections=SimpleNamespace(
+                all=lambda: SimpleNamespace(order_by=lambda *fields: []),
+            ),
         )
 
         payload = _slip_review_payload(review, public_only=True)
@@ -1037,6 +1048,17 @@ class SlipReviewPublicContractTests(SimpleTestCase):
 
 
 class SlipReviewPayloadDbTests(TestCase):
+    def setUp(self):
+        # These assert the persisted-event path. A reachable Redis -- shared across runs
+        # and keyed by review id -- otherwise serves stale snapshots for ids the tests
+        # happen to reuse, making the results depend on whatever ran before.
+        snapshot = patch("apps.algo.views.slip_review_redis.get_snapshot", return_value=None)
+        events = patch("apps.algo.views.slip_review_redis.get_events_after", return_value=None)
+        snapshot.start()
+        events.start()
+        self.addCleanup(snapshot.stop)
+        self.addCleanup(events.stop)
+
     def _randomize_review_payload(self):
         games = [
             {

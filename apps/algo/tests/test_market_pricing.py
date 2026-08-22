@@ -195,8 +195,15 @@ class ExpectedValueTests(SimpleTestCase):
         self.assertFalse(_replacement_is_meaningfully_better(selected, replacement))
 
     def test_a_genuinely_better_priced_market_still_replaces(self):
+        # A candidate with no evidence behind it is not eligible to be recommended at all,
+        # so a realistic one carries some.
         selected = {"market": "Home Win", "advisory_score": 60.0, "odds": 1.55}
-        replacement = {"market": "DC: 1X", "advisory_score": 85.0, "odds": 1.35}
+        replacement = {
+            "market": "DC: 1X",
+            "advisory_score": 85.0,
+            "odds": 1.35,
+            "advisory_evidence": {"expected_goals_home": 1.8, "expected_goals_away": 0.9},
+        }
 
         self.assertTrue(_replacement_is_meaningfully_better(selected, replacement))
 

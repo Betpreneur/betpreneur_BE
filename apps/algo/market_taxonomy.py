@@ -42,6 +42,10 @@ class MarketDescriptor:
     player: str = ""
     subject: str = ""
     period: str = "match"
+    # "1UP"/"2UP" when the bookmaker pays out early once the side goes ahead. The
+    # underlying result model still scores it, but that score is then a *floor*: the bet
+    # also wins in games the side led and did not go on to win.
+    early_payout: str = ""
     support_level: str = "unsupported"
     data_requirements: tuple = ()
     recognized: bool = True
@@ -215,6 +219,7 @@ def _mk(
     player="",
     subject="",
     period="match",
+    early_payout="",
     support_level="",
     data_requirements=(),
     requires_player_stats=False,
@@ -236,6 +241,7 @@ def _mk(
         player=player,
         subject=subject,
         period=period,
+        early_payout=early_payout,
         support_level=support_level or _support_level(family, period=period),
         data_requirements=tuple(data_requirements or _data_requirements(family)),
         core_supported=canonical in CORE_MARKETS,
@@ -334,17 +340,17 @@ def describe_market(value, *, market_name="", outcome_name="", specifier=""):
         canonical = aliases[normalized_alias_key]
         if canonical == "Home Win":
             canonical = _with_early_payout_modifier(canonical, modifier)
-            return _mk(raw=raw or canonical, canonical=canonical, code=f"result_home_{modifier.lower()}" if modifier else "result_home", family="match_result", category="Result", side="home", selection="home", period=period)
+            return _mk(raw=raw or canonical, canonical=canonical, code=f"result_home_{modifier.lower()}" if modifier else "result_home", family="match_result", category="Result", side="home", selection="home", period=period, early_payout=modifier)
         if canonical == "Away Win":
             canonical = _with_early_payout_modifier(canonical, modifier)
-            return _mk(raw=raw or canonical, canonical=canonical, code=f"result_away_{modifier.lower()}" if modifier else "result_away", family="match_result", category="Result", side="away", selection="away", period=period)
+            return _mk(raw=raw or canonical, canonical=canonical, code=f"result_away_{modifier.lower()}" if modifier else "result_away", family="match_result", category="Result", side="away", selection="away", period=period, early_payout=modifier)
         if canonical == "Draw":
             canonical = _with_early_payout_modifier(canonical, modifier)
-            return _mk(raw=raw or canonical, canonical=canonical, code=f"result_draw_{modifier.lower()}" if modifier else "result_draw", family="match_result", category="Result", side="draw", selection="draw", period=period)
+            return _mk(raw=raw or canonical, canonical=canonical, code=f"result_draw_{modifier.lower()}" if modifier else "result_draw", family="match_result", category="Result", side="draw", selection="draw", period=period, early_payout=modifier)
         if canonical in {"DC: 12", "DC: 1X", "DC: X2"}:
             side = {"DC: 12": "home_or_away", "DC: 1X": "home_or_draw", "DC: X2": "draw_or_away"}[canonical]
             canonical = _with_early_payout_modifier(canonical, modifier)
-            return _mk(raw=raw or canonical, canonical=canonical, code=f"double_chance_{side}_{modifier.lower()}" if modifier else f"double_chance_{canonical[-2:].lower()}", family="double_chance", category="Result", side=side, selection=side, period=period)
+            return _mk(raw=raw or canonical, canonical=canonical, code=f"double_chance_{side}_{modifier.lower()}" if modifier else f"double_chance_{canonical[-2:].lower()}", family="double_chance", category="Result", side=side, selection=side, period=period, early_payout=modifier)
         if canonical == "GG / BTTS Yes":
             return _mk(raw=raw or canonical, canonical=canonical, code="btts_yes", family="btts", category="Goals", side="yes", selection="yes", period=period)
 

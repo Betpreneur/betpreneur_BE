@@ -183,14 +183,45 @@ class ProviderMappingService:
             for token in normalize_fixture_text(f"{metadata.get('home_team')} {metadata.get('away_team')}").split()
             if len(token) > 2
         ]
+        rows = {}
         if tokens:
             query = Q()
             for token in tokens[:6]:
                 query |= Q(fixture_normalized__icontains=token)
                 query |= Q(home_team_normalized__icontains=token)
                 query |= Q(away_team_normalized__icontains=token)
-            queryset = queryset.filter(query)
-        return [self._fixture_candidate(row) for row in queryset[:200]]
+            for row in queryset.filter(query)[:200]:
+                rows[row.pk] = row
+
+        # An exact provider id is the strongest signal we have, and it was gated behind
+        # the fuzzy name filter above: a fixture whose ids match but whose team names the
+        # two providers spell differently never became a candidate, so the id match had
+        # nothing to score against. `fallback_match_ids` is a JSON list and list-membership
+        # lookups are not portable across backends, so the id sweep is done in Python over
+        # the date-bounded set rather than in SQL.
+        event_ids = set(self._provider_event_ids(metadata))
+        if event_ids:
+            for row in queryset[:500]:
+                payload = row.api_payload or {}
+                candidate_ids = {
+                    str(payload.get("provider_match_id") or "").strip(),
+                    *[str(item).strip() for item in (payload.get("fallback_match_ids") or [])],
+                } - {""}
+                if candidate_ids & event_ids:
+                    rows[row.pk] = row
+
+        return [self._fixture_candidate(row) for row in list(rows.values())[:200]]
+
+    @staticmethod
+    def _provider_event_ids(metadata: dict[str, Any]) -> list[str]:
+        return [
+            value
+            for value in (
+                str(metadata.get("provider_event_id") or "").strip(),
+                str(metadata.get("provider_game_id") or "").strip(),
+            )
+            if value
+        ]
 
     def _fixture_candidate(self, fixture: FixtureCache) -> dict[str, Any]:
         payload = fixture.api_payload or {}

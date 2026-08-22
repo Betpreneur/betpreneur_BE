@@ -102,10 +102,20 @@ class ReplacementTests(SimpleTestCase):
         self.assertFalse(_replacement_is_meaningfully_better(selected, replacement))
 
     def test_a_genuinely_better_read_still_replaces(self):
+        # Originally written as DC: 1X -> DC: X2, which is a *side reversal* -- backing
+        # home-or-draw and being told to switch to draw-or-away. The thesis guard rightly
+        # refuses that now, so the example moves to a market on the same side.
+        selected = _market("Home Win", 27.8, -13.0)
+        replacement = _market("DC: 1X", 68.0, 13.0)
+
+        self.assertTrue(_replacement_is_meaningfully_better(selected, replacement))
+
+    def test_a_swap_to_the_other_side_is_never_an_improvement(self):
+        """However much better it scores, it is a bet on the other team."""
         selected = _market("DC: 1X", 57.1, -14.1)
         replacement = _market("DC: X2", 72.2, 13.0)
 
-        self.assertTrue(_replacement_is_meaningfully_better(selected, replacement))
+        self.assertFalse(_replacement_is_meaningfully_better(selected, replacement))
 
     def test_a_market_below_the_absolute_floor_is_never_offered(self):
         """High edge does not excuse a market we would not stand behind on its own."""
@@ -115,7 +125,17 @@ class ReplacementTests(SimpleTestCase):
         self.assertFalse(_replacement_is_meaningfully_better(selected, replacement))
 
     def test_markets_without_a_shared_reference_fall_back_to_raw_scores(self):
-        selected = _market("Corners Over 9.5", 55)
-        replacement = _market("Corners Over 8.5", 72)
+        # No league reference exists for counts, so the comparison falls back to raw
+        # scores. Both still need real evidence behind them to be offered at all.
+        selected = {
+            "market": "Corners Over 9.5",
+            "advisory_score": 55,
+            "advisory_evidence": {"expected_corners": 9.1},
+        }
+        replacement = {
+            "market": "Corners Over 8.5",
+            "advisory_score": 72,
+            "advisory_evidence": {"expected_corners": 9.1},
+        }
 
         self.assertTrue(_replacement_is_meaningfully_better(selected, replacement))

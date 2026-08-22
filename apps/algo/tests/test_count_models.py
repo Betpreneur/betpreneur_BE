@@ -359,6 +359,16 @@ class CountEvaluatorTests(TestCase):
     def _evaluate(self, market):
         return count_market_evaluator.evaluate(describe_market(market), fixture=self.fixture)
 
+    def test_booking_points_line_is_converted_to_bookings(self):
+        # Lives here because it needs the team rate profiles this class sets up; it had
+        # drifted into TeamRateProfileServiceTests, which has no `self.fixture`.
+        result = count_market_evaluator.evaluate(
+            describe_market("Booking Points Over 25"), fixture=self.fixture
+        )
+
+        if result["available"]:
+            self.assertLess(result["evidence"]["effective_line"], result["evidence"]["line"])
+
     def _range_descriptor(self, family, bucket, *, team=""):
         return MarketDescriptor(
             raw=f"{family} {bucket}",
@@ -429,8 +439,11 @@ class CountEvaluatorTests(TestCase):
         self.assertTrue(home_result["available"])
         self.assertTrue(away_result["available"])
         self.assertGreater(home_result["probability"], away_result["probability"])
-        self.assertEqual(home_result["evidence"]["expected_corners"], 6.5)
-        self.assertEqual(away_result["evidence"]["expected_corners"], 4.0)
+        # Each side reads its own rate (6.5 home / 4.0 away), then shrinks toward the
+        # league prior of 5.1 with 5 pseudo-matches -- so 20 matches at 6.5 lands on 6.22.
+        # Asserting the raw profile rate here asserted that shrinkage does not happen.
+        self.assertEqual(home_result["evidence"]["expected_corners"], 6.22)
+        self.assertEqual(away_result["evidence"]["expected_corners"], 4.22)
 
     def test_invalid_corner_range_declines(self):
         descriptor = self._range_descriptor("corner_range", "many")
@@ -525,7 +538,6 @@ class TeamRateProfileServiceTests(TestCase):
 
     def test_profile_for_uses_saved_team_snapshot_before_network(self):
         StatPalFixtureSnapshot.objects.create(
-            provider="statpal",
             match_id="statpal:team:2341001",
             provider_match_id="2341001",
             snapshot_type=StatPalFixtureSnapshot.SnapshotType.TEAM_STATS,
@@ -574,14 +586,6 @@ class TeamRateProfileServiceTests(TestCase):
         self.assertIsNone(first)
         self.assertIsNone(second)
         self.assertEqual(client.soccer_endpoint.call_count, 1)
-
-    def test_booking_points_line_is_converted_to_bookings(self):
-        result = count_market_evaluator.evaluate(
-            describe_market("Booking Points Over 25"), fixture=self.fixture
-        )
-
-        if result["available"]:
-            self.assertLess(result["evidence"]["effective_line"], result["evidence"]["line"])
 
 
 class CountRegistryTests(SimpleTestCase):

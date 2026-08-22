@@ -779,6 +779,42 @@ class UserPickAdvisoryTests(SimpleTestCase):
 
         self.assertEqual(replacement["market"], "DNB Away")
 
+    def test_priced_early_payout_result_is_not_replaced_by_lower_value_dnb(self):
+        selected = _submitted_market_payload(
+            requested_market="Home Win 1UP",
+            market_taxonomy=describe_market("Home Win 1UP").to_dict(),
+            statpal_advisory={
+                "available": True,
+                "score": 66,
+                "status": "modelled",
+                "basis": "score_matrix",
+                "warnings": [],
+                "evidence": {"home_win_probability": 66, "edge_points": 10},
+            },
+            market_capability={"data_quality": "medium", "confidence_cap": 75, "warnings": []},
+            odds=1.31,
+        )
+        generated = [
+            {
+                "market": "DNB Home",
+                "odds": 1.08,
+                "advisory_score": 71,
+                "advisory_status": "playable",
+                "market_taxonomy": describe_market("DNB Home").to_dict(),
+                "market_capability": {"data_quality": "medium"},
+                "advisory_evidence": {"home_win_probability": 55, "draw_probability": 20, "edge_points": 12},
+            }
+        ]
+
+        replacement = _replacement_market_for_slip(
+            {"markets": []},
+            selected_market=selected,
+            generated_markets=generated,
+            allow_safer_fallback=True,
+        )
+
+        self.assertIsNone(replacement)
+
     def test_replacement_candidate_must_have_model_probability(self):
         selected = {
             "market": "Home Win",

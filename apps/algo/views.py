@@ -3114,6 +3114,7 @@ def _submitted_market_payload(
     market_taxonomy,
     statpal_advisory,
     market_capability,
+    odds=None,
 ):
     market_capability = _effective_market_capability(market_capability, statpal_advisory)
     advisory_score, data_confidence, advisory_status, claim_flags = _scored_claim(
@@ -3127,6 +3128,7 @@ def _submitted_market_payload(
         "market_capability": market_capability or {},
         "confidence": None,
         "final_confidence": None,
+        "odds": _float_or_none(odds),
         "advisory_score": advisory_score,
         "data_confidence": data_confidence,
         "advisory_status": advisory_status,
@@ -3435,26 +3437,57 @@ def _result_market_side(market):
     return taxonomy.get("family") or "", taxonomy.get("side") or "", _float_or_none(taxonomy.get("line"))
 
 
+RESULT_THESIS_FAMILIES = frozenset(
+    {"match_result", "double_chance", "draw_no_bet", "asian_handicap", "handicap"}
+)
+
+
+def _result_thesis_side(market):
+    """
+    Which team a result selection is backing, or "" when it backs neither.
+
+    `DC: 12` returns "" deliberately: it wins when *either* side wins, so it does not
+    carry a direction and cannot stand in for one.
+    """
+    family, side, _line = _result_market_side(market)
+    if family == "match_result":
+        return side if side in {"home", "away", "draw"} else ""
+    if family == "double_chance":
+        return {"home_or_draw": "home", "draw_or_away": "away"}.get(side, "")
+    if family in {"draw_no_bet", "asian_handicap", "handicap"}:
+        return side if side in {"home", "away"} else ""
+    return ""
+
+
 def _result_replacement_preserves_user_thesis(selected_market, replacement_market):
+    """
+    A replacement may change the market, never the team being backed.
+
+    This used to run only when the *user's* pick was a `match_result`, so a double chance
+    was unguarded: someone who backed `DC: 1X` (home or draw) was told to switch to
+    `DC: X2` (draw or away) -- the opposite team -- in three fixtures of a single slip.
+    """
     selected_family, selected_side, _ = _result_market_side(selected_market)
     candidate_family, candidate_side, candidate_line = _result_market_side(replacement_market)
-    if selected_family != "match_result" or selected_side not in {"home", "away", "draw"}:
+    if selected_family not in RESULT_THESIS_FAMILIES:
         return True
-    if candidate_family not in {"match_result", "double_chance", "draw_no_bet", "asian_handicap", "handicap"}:
+    if candidate_family not in RESULT_THESIS_FAMILIES:
         return True
-    if selected_side == "draw":
+
+    if selected_family == "match_result" and selected_side == "draw":
         return candidate_family == "match_result" and candidate_side == "draw"
-    if candidate_family == "match_result":
-        return candidate_side == selected_side
-    if candidate_family == "double_chance":
-        return (
-            (selected_side == "home" and candidate_side == "home_or_draw")
-            or (selected_side == "away" and candidate_side == "draw_or_away")
-        )
-    if candidate_family == "draw_no_bet":
-        return candidate_side == selected_side
+
+    selected_lean = _result_thesis_side(selected_market)
+    if not selected_lean:
+        # No direction to preserve (`DC: 12`): only the same market qualifies.
+        return candidate_family == selected_family and candidate_side == selected_side
+
+    if _result_thesis_side(replacement_market) != selected_lean:
+        return False
     if candidate_family in {"asian_handicap", "handicap"}:
-        return candidate_side == selected_side and (candidate_line is None or candidate_line >= 0)
+        # A negative line asks the side to win by more, which is a harder bet than the
+        # one the user made, not a safer expression of it.
+        return candidate_line is None or candidate_line >= 0
     return True
 
 
@@ -3760,6 +3793,14 @@ MINIMUM_EV_LIFT = 0.03
 SAME_FAMILY_CLOSE_RANKING_MARGIN = 8.0
 
 
+def _is_early_payout_market(market):
+    """SportyBet 1UP/2UP: paid out as soon as the side goes ahead."""
+    taxonomy = (market or {}).get("market_taxonomy")
+    if not taxonomy:
+        taxonomy = describe_market((market or {}).get("market")).to_dict()
+    return bool(taxonomy.get("early_payout"))
+
+
 def _market_expected_value(market):
     """
     Return per unit staked: `p x odds - 1`.
@@ -3970,6 +4011,14 @@ def _replacement_is_meaningfully_better(selected_market, replacement_market):
     if not _line_replacement_preserves_user_thesis(selected_market, replacement_market):
         return False
 
+    if _is_early_payout_market(selected_market):
+        # The modelled number is the probability of the *underlying* result. An early
+        # payout also wins in games the side led and then failed to see out, so the true
+        # chance is higher by an unknown margin -- and the price already reflects that.
+        # Comparing a replacement against a floor cannot show it is better, so this pick
+        # is left alone rather than swapped on a number we know understates it.
+        return False
+
     selected_score = _float_or_none(selected_market.get("advisory_score")) or float(selected_market.get("display_score") or 0)
     replacement_score = _float_or_none(replacement_market.get("advisory_score")) or float(replacement_market.get("display_score") or 0)
     scope = replacement_market.get("replacement_scope") or _replacement_scope(selected_market, replacement_market)
@@ -4021,6 +4070,14 @@ def _replacement_is_supported_fit(selected_market, replacement_market):
         return False
     scope = replacement_market.get("replacement_scope") or _replacement_scope(selected_market, replacement_market)
     if scope == "broad_fallback" and not _allows_broad_replacement(selected_market):
+        return False
+    selected_ev = _float_or_none(selected_market.get("ev"))
+    if selected_ev is None:
+        selected_ev = _market_expected_value(selected_market)
+    replacement_ev = _float_or_none(replacement_market.get("ev"))
+    if replacement_ev is None:
+        replacement_ev = _market_expected_value(replacement_market)
+    if selected_ev is not None and replacement_ev is not None and replacement_ev < selected_ev:
         return False
     fit = _market_profile_fit_score(replacement_market)
     if fit is not None and fit < 50:
@@ -4970,6 +5027,17 @@ def _public_recommendation_strength(pick):
     return "no_recommendation"
 
 
+def _price_reason_code(price_check):
+    """The reason code for how the user's price compares to the reference, if known."""
+    if not (price_check or {}).get("available"):
+        return ""
+    return {
+        "positive_edge": "price_edge",
+        "near_reference": "price_near_reference",
+        "short_price": "price_short",
+    }.get(price_check.get("status"), "price_reference")
+
+
 def _public_price_check_from_card(card):
     evidence = card.get("evidence") or {}
     statpal_evidence = evidence.get("statpal") or {}
@@ -5056,16 +5124,9 @@ def _public_why_from_card(card):
     elif league_trust in {"probation", "restricted"}:
         why.append("There is limited competition-specific history, so some caution remains.")
         codes.append("limited_league_sample")
-    price_check = _public_price_check_from_card(card)
-    if price_check.get("available"):
-        if price_check.get("status") == "positive_edge":
-            codes.append("price_edge")
-        elif price_check.get("status") == "near_reference":
-            codes.append("price_near_reference")
-        elif price_check.get("status") == "short_price":
-            codes.append("price_short")
-        else:
-            codes.append("price_reference")
+    price_code = _price_reason_code(_public_price_check_from_card(card))
+    if price_code:
+        codes.append(price_code)
     if alternative.get("reason"):
         why.append(alternative["reason"])
         codes.append("better_alternative")
@@ -5273,11 +5334,19 @@ def _public_selection_card(item):
         )
         if not why:
             why = [f"{ai_pick.get('market')} has the strongest supported profile among eligible alternatives for this fixture."]
-        reason_codes = [
+        # The `why` is rewritten to describe the alternative, but the reason codes also
+        # summarise the user's own pick -- including how its price compares. Dropping them
+        # wholesale left `reason_codes` contradicting the `price_check` in the same
+        # payload, which still reported a positive edge or a short price.
+        rebuilt = [
             code
             for code in ("market_specific_evidence", "replacement_market_fit")
             if code not in (item.get("reason_codes") or [])
         ] or ["replacement_market_fit"]
+        price_code = _price_reason_code(_public_price_check_from_card(card))
+        if price_code and price_code not in rebuilt:
+            rebuilt.append(price_code)
+        reason_codes = rebuilt
     price_check = _public_price_check_from_card(card)
     your_pick = {
         "market": item.get("submitted_market"),
@@ -8175,6 +8244,7 @@ def _analyse_manual_selection(
             market_taxonomy=market_taxonomy,
             statpal_advisory=statpal_advisory,
             market_capability=market_capability,
+            odds=selection.get("odds"),
         )
         replacement_market = _replacement_market_for_slip(
             game,
@@ -10038,7 +10108,13 @@ class SlipReviewEventsView(APIView):
         )
         redis_snapshot = slip_review_redis.get_snapshot(review.id) or {}
         redis_events = slip_review_redis.get_events_after(review.id, after_id=after_id, limit=limit)
-        if redis_events is not None:
+        # An empty list means Redis is reachable, not that this review has no events. The
+        # stream is ephemeral, so a review whose events have expired -- or one populated by
+        # a path that never pushed to Redis -- would otherwise report no progress at all
+        # while its `SlipReviewEvent` rows sit in the database. Redis is authoritative only
+        # when it actually holds something for this review.
+        redis_knows_review = bool(redis_events) or bool(redis_snapshot)
+        if redis_events is not None and redis_knows_review:
             events_payload = [_public_slip_review_stream_event(event) for event in redis_events]
             latest_event_id = (redis_snapshot or {}).get("latest_event_id")
             if latest_event_id is None and events_payload:

@@ -58,6 +58,11 @@ class StatPalAdvisory:
         return asdict(self)
 
 
+# One team's expected goals in a single match. Five is already an extreme favourite; past
+# this the source is wrong, not the fixture.
+MAX_PLAUSIBLE_TEAM_EXPECTED_GOALS = 5.0
+
+
 class StatPalMarketAdvisoryService:
     """
     Converts StatPal-shaped stats into Match Checker advisory signals.
@@ -897,6 +902,13 @@ class StatPalMarketAdvisoryService:
             away_expected = round(away_expected * factor, 2)
             sources.append(f"{period}_period_factor")
 
+        # The fitted model bounds its rates; this path never did, so a bad history summary
+        # went straight into the score matrix. A live review reported "expected goals:
+        # home 2.17, away 8.0" and scored the leg from it. Eight goals is not a football
+        # number, and a value that extreme means the source is wrong rather than the match
+        # being unusual -- so the rates are refused, not quietly clamped down to something
+        # plausible-looking.
+        implausible = max(home_expected, away_expected) > MAX_PLAUSIBLE_TEAM_EXPECTED_GOALS
         evidence = {
             "period": period,
             "home_expected_goals": round(home_expected, 2) if home_expected else None,
@@ -905,6 +917,14 @@ class StatPalMarketAdvisoryService:
             "away_team_history_goals": away_history_expected or None,
             "score_matrix_sources": sources,
         }
+        if implausible:
+            evidence["implausible_expected_goals"] = {
+                "home": round(home_expected, 2),
+                "away": round(away_expected, 2),
+                "ceiling": MAX_PLAUSIBLE_TEAM_EXPECTED_GOALS,
+            }
+            return 0.0, 0.0, evidence, ["implausible_expected_goals", "expected_score_rates_unavailable"]
+
         warnings = [] if home_expected and away_expected else ["expected_score_rates_unavailable"]
         return round(home_expected, 2), round(away_expected, 2), evidence, warnings
 
