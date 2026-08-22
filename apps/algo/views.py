@@ -3465,6 +3465,25 @@ def _line_replacement_preserves_user_thesis(selected_market, replacement_market)
     candidate_group = _market_family_group(replacement_market)
     guarded_groups = {"corners"}
     if selected_group not in guarded_groups or candidate_group != selected_group:
+        if selected_group != "goals" or candidate_group != "goals":
+            return True
+        selected_side = selected.get("selection") or selected.get("side") or ""
+        candidate_side = candidate.get("selection") or candidate.get("side") or ""
+        if selected_family == "team_total_goals":
+            return (
+                candidate_family == "team_total_goals"
+                and (selected.get("period") or "") == (candidate.get("period") or "")
+                and (selected.get("team") or "") == (candidate.get("team") or "")
+                and (not selected_side or not candidate_side or selected_side == candidate_side)
+            )
+        if selected_family == "total_goals":
+            return (
+                candidate_family == "total_goals"
+                and (selected.get("period") or "") == (candidate.get("period") or "")
+                and (not selected_side or not candidate_side or selected_side == candidate_side)
+            )
+        if selected_family in {"btts", "total_btts", "result_btts"}:
+            return candidate_side != "under"
         return True
     if selected_family != candidate_family:
         return False
@@ -3476,6 +3495,26 @@ def _line_replacement_preserves_user_thesis(selected_market, replacement_market)
     candidate_side = candidate.get("selection") or candidate.get("side") or ""
     if selected_side and candidate_side and selected_side != candidate_side:
         return False
+    return True
+
+
+def _broad_fallback_candidate_allowed(selected_market, candidate):
+    if not selected_market or not candidate:
+        return True
+    candidate_group = _market_family_group(candidate)
+    if candidate_group in {"cards", "shots_on_target"}:
+        return False
+    taxonomy = (candidate or {}).get("market_taxonomy") or describe_market((candidate or {}).get("market")).to_dict()
+    side = str(taxonomy.get("selection") or taxonomy.get("side") or "").lower()
+    line = _float_or_none(taxonomy.get("line"))
+    family = taxonomy.get("family") or ""
+    if side == "under":
+        if family == "total_goals" and line is not None and line >= 4.5:
+            return False
+        if family == "team_total_goals" and line is not None and line >= 2.5:
+            return False
+        if candidate_group == "corners" and line is not None and line >= 10.5:
+            return False
     return True
 
 
@@ -4019,6 +4058,8 @@ def _replacement_market_for_slip(
                 continue
             if scope == "broad_fallback" and (not allow_safer_fallback or not _allows_broad_replacement(selected_market)):
                 continue
+            if scope == "broad_fallback" and not _broad_fallback_candidate_allowed(selected_market, market):
+                continue
             market["replacement_scope"] = scope
             if _replacement_is_meaningfully_better(selected_market, market):
                 allowed.append(market)
@@ -4029,6 +4070,8 @@ def _replacement_market_for_slip(
                 if scope == "broad_fallback" and conflict_blocks_broad:
                     continue
                 if scope == "broad_fallback" and (not allow_safer_fallback or not _allows_broad_replacement(selected_market)):
+                    continue
+                if scope == "broad_fallback" and not _broad_fallback_candidate_allowed(selected_market, market):
                     continue
                 market["replacement_scope"] = scope
                 if _replacement_is_supported_fit(selected_market, market):
@@ -5621,13 +5664,18 @@ def _evidence_is_risk(text):
 
 def _public_market_context_line(selection, market_payload=None):
     market_payload = market_payload or {}
-    market_name = market_payload.get("market") or ((selection or {}).get("user_pick") or {}).get("market") or ""
+    user_market = ((selection or {}).get("user_pick") or {}).get("market") or ""
+    market_name = market_payload.get("market") or user_market
     confidence = _public_score(
         market_payload.get("model_probability_percent")
         or market_payload.get("confidence_score")
+        or market_payload.get("score")
+        or market_payload.get("decision_score")
         or ((selection or {}).get("user_pick") or {}).get("confidence_score")
     )
-    odds = market_payload.get("odds") or ((selection or {}).get("user_pick") or {}).get("odds")
+    odds = market_payload.get("odds")
+    if odds is None and (not market_payload.get("market") or _market_matches(market_name, user_market)):
+        odds = ((selection or {}).get("user_pick") or {}).get("odds")
     ev = market_payload.get("ev")
     parts = []
     if confidence is not None:
@@ -5712,12 +5760,14 @@ def _btts_model_line_from_evidence(evidence):
     return ""
 
 
-def _count_model_line_from_evidence(evidence):
+def _count_model_line_from_evidence(evidence, *, market_payload=None):
     evidence = evidence or {}
     statpal = evidence.get("statpal") if isinstance(evidence.get("statpal"), dict) else {}
+    taxonomy = (market_payload or {}).get("market_taxonomy") or describe_market((market_payload or {}).get("market")).to_dict()
+    taxonomy_side = str(taxonomy.get("selection") or taxonomy.get("side") or "").strip().title()
     for payload in (evidence, statpal):
         line = _float_or_none(payload.get("line"))
-        side = str(payload.get("selection") or payload.get("side") or "").strip().title()
+        side = taxonomy_side or str(payload.get("selection") or payload.get("side") or "").strip().title()
         if not side:
             side = "Over"
         corners = _float_or_none(
@@ -5761,7 +5811,7 @@ def _market_owned_model_lines(market_payload, evidence):
         if goal_line:
             lines.append(goal_line)
     elif group in {"corners", "cards", "shots_on_target"}:
-        line = _count_model_line_from_evidence(evidence)
+        line = _count_model_line_from_evidence(evidence, market_payload=market_payload)
         if line:
             lines.append(line)
     elif group == "result":
@@ -5843,7 +5893,7 @@ def _stats_backed_evidence(selection, *, market_payload=None, include_context=Tr
             if line:
                 evidence.append(line)
 
-        count_line = _count_model_line_from_evidence(selected_evidence)
+        count_line = _count_model_line_from_evidence(selected_evidence, market_payload=market_payload)
         if count_line:
             evidence.append(count_line)
         goal_line = _goal_model_line_from_evidence(selected_evidence)

@@ -982,11 +982,11 @@ class SlipReviewPublicContractTests(SimpleTestCase):
             "advisory_evidence": {"expected_total_corners": 10.8, "line": 12.5, "selection": "under"},
         }
         strong_broad = {
-            "market": "Cards Under 3.5",
+            "market": "Corners Over 8.5",
             "advisory_score": 72.0,
-            "market_taxonomy": describe_market("Cards Under 3.5").to_dict(),
+            "market_taxonomy": describe_market("Corners Over 8.5").to_dict(),
             "market_capability": {"data_quality": "medium"},
-            "advisory_evidence": {"expected_total_cards": 2.4, "line": 3.5, "selection": "under"},
+            "advisory_evidence": {"expected_total_corners": 10.8, "line": 8.5, "selection": "over"},
         }
 
         self.assertIsNone(
@@ -1004,7 +1004,7 @@ class SlipReviewPublicContractTests(SimpleTestCase):
             allow_safer_fallback=True,
         )
 
-        self.assertEqual(replacement["market"], "Cards Under 3.5")
+        self.assertEqual(replacement["market"], "Corners Over 8.5")
 
     def test_blocked_replacement_sanitizer_downgrades_replace_to_caution(self):
         item = _sample_replace_result()

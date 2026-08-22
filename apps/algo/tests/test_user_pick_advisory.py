@@ -204,12 +204,30 @@ class UserPickAdvisoryTests(SimpleTestCase):
             "market": "Over 2.5",
             "advisory_score": 48,
             "advisory_status": "avoid",
-            "market_taxonomy": {"family": "total_goals"},
+            "market_taxonomy": describe_market("Over 2.5").to_dict(),
         }
         game = {
             "markets": [
-                {"market": "DC: 12", "final_confidence": 92, "confidence": 92, "council_review": {"decision": "approve"}},
-                {"market": "Over 1.5", "final_confidence": 78, "confidence": 78, "council_review": {"decision": "approve"}},
+                {
+                    "market": "DC: 12",
+                    "advisory_score": 92,
+                    "final_confidence": 92,
+                    "confidence": 92,
+                    "council_review": {"decision": "approve"},
+                    "market_taxonomy": describe_market("DC: 12").to_dict(),
+                    "market_capability": {"data_quality": "medium"},
+                    "advisory_evidence": {"home_win_probability": 46, "away_win_probability": 46},
+                },
+                {
+                    "market": "Over 1.5",
+                    "advisory_score": 78,
+                    "final_confidence": 78,
+                    "confidence": 78,
+                    "council_review": {"decision": "approve"},
+                    "market_taxonomy": describe_market("Over 1.5").to_dict(),
+                    "market_capability": {"data_quality": "medium"},
+                    "advisory_evidence": {"expected_goals": 2.9, "line": 1.5, "selection": "over"},
+                },
             ]
         }
 
@@ -481,6 +499,147 @@ class UserPickAdvisoryTests(SimpleTestCase):
         )
 
         self.assertEqual(replacement["market"], "DNB Away")
+
+    def test_result_pick_does_not_use_broad_shots_or_cards_under_fallbacks(self):
+        selected = {
+            "market": "Home Win",
+            "advisory_score": 28,
+            "advisory_status": "avoid",
+            "market_taxonomy": describe_market("Home Win").to_dict(),
+        }
+        generated = [
+            {
+                "market": "Shots On Target Under 10.5",
+                "advisory_score": 99,
+                "advisory_status": "strong",
+                "market_taxonomy": describe_market("Shots On Target Under 10.5").to_dict(),
+                "market_capability": {"data_quality": "medium"},
+                "advisory_evidence": {
+                    "expected_shots_on_target": 4.9,
+                    "line": 10.5,
+                    "selection": "under",
+                },
+            },
+            {
+                "market": "Cards Under 5.5",
+                "advisory_score": 91,
+                "advisory_status": "strong",
+                "market_taxonomy": describe_market("Cards Under 5.5").to_dict(),
+                "market_capability": {"data_quality": "medium"},
+                "advisory_evidence": {
+                    "expected_total_cards": 3.0,
+                    "line": 5.5,
+                    "selection": "under",
+                },
+            },
+            {
+                "market": "Over 2.5",
+                "advisory_score": 73,
+                "advisory_status": "playable",
+                "market_taxonomy": describe_market("Over 2.5").to_dict(),
+                "market_capability": {"data_quality": "medium"},
+                "advisory_evidence": {
+                    "expected_goals": 3.4,
+                    "line": 2.5,
+                    "selection": "over",
+                },
+            },
+        ]
+
+        replacement = _replacement_market_for_slip(
+            {"markets": []},
+            selected_market=selected,
+            generated_markets=generated,
+            allow_safer_fallback=True,
+        )
+
+        self.assertEqual(replacement["market"], "Over 2.5")
+
+    def test_team_goal_replacement_cannot_flip_to_opponent_under(self):
+        selected = {
+            "market": "Home Team Over 0.5",
+            "advisory_score": 54,
+            "advisory_status": "avoid",
+            "market_taxonomy": describe_market("Home Team Goals Over 0.5").to_dict(),
+        }
+        generated = [
+            {
+                "market": "Away Team Under 2.5",
+                "advisory_score": 94,
+                "advisory_status": "strong",
+                "market_taxonomy": describe_market("Away Team Under 2.5").to_dict(),
+                "market_capability": {"data_quality": "medium"},
+                "advisory_evidence": {
+                    "expected_team_goals": 0.3,
+                    "line": 2.5,
+                    "selection": "under",
+                },
+            },
+            {
+                "market": "Home Team Over 1.5",
+                "advisory_score": 68,
+                "advisory_status": "playable",
+                "market_taxonomy": describe_market("Home Team Over 1.5").to_dict(),
+                "market_capability": {"data_quality": "medium"},
+                "advisory_evidence": {
+                    "expected_team_goals": 1.9,
+                    "line": 1.5,
+                    "selection": "over",
+                },
+            },
+        ]
+
+        replacement = _replacement_market_for_slip(
+            {"markets": []},
+            selected_market=selected,
+            generated_markets=generated,
+            allow_safer_fallback=True,
+        )
+
+        self.assertEqual(replacement["market"], "Home Team Over 1.5")
+
+    def test_total_goal_replacement_cannot_flip_over_pick_to_broad_under(self):
+        selected = {
+            "market": "Over 1.5",
+            "advisory_score": 54,
+            "advisory_status": "avoid",
+            "market_taxonomy": describe_market("Over 1.5").to_dict(),
+        }
+        generated = [
+            {
+                "market": "Under 4.5",
+                "advisory_score": 92,
+                "advisory_status": "strong",
+                "market_taxonomy": describe_market("Under 4.5").to_dict(),
+                "market_capability": {"data_quality": "medium"},
+                "advisory_evidence": {
+                    "expected_goals": 2.8,
+                    "line": 4.5,
+                    "selection": "under",
+                },
+            },
+            {
+                "market": "Over 2.5",
+                "advisory_score": 69,
+                "advisory_status": "playable",
+                "market_taxonomy": describe_market("Over 2.5").to_dict(),
+                "market_capability": {"data_quality": "medium"},
+                "advisory_evidence": {
+                    "expected_goals": 3.1,
+                    "line": 2.5,
+                    "selection": "over",
+                },
+            },
+        ]
+
+        replacement = _replacement_market_for_slip(
+            {"markets": []},
+            selected_market=selected,
+            generated_markets=generated,
+            allow_safer_fallback=True,
+        )
+
+        self.assertEqual(replacement["market"], "Over 2.5")
 
     def test_result_pick_generates_fixture_wide_modelled_candidates(self):
         def evaluate_market(descriptor, **kwargs):
@@ -1119,6 +1278,56 @@ class UserPickAdvisoryTests(SimpleTestCase):
 
         self.assertIn("Expected 8.634 corner events against a line of 7.5 for Over.", evidence)
         self.assertNotIn("Expected 8.634 corner events against a line of 6.5.", evidence)
+
+    def test_replacement_evidence_uses_recommended_market_side(self):
+        ai_pick = _public_market_pick(
+            {
+                "market": "Shots On Target Under 10.5",
+                "advisory_score": 75,
+                "odds": None,
+                "market_taxonomy": describe_market("Shots On Target Under 10.5").to_dict(),
+                "advisory_evidence": {
+                    "expected_shots_on_target": 4.492,
+                    "line": 10.5,
+                    "selection": "over",
+                },
+            }
+        )
+
+        evidence = _stats_backed_evidence(
+            {"user_pick": {"market": "Away Win", "confidence_score": 28, "odds": 2.91}},
+            market_payload=ai_pick,
+            owned_market_only=True,
+        )
+        joined = " ".join(evidence)
+
+        self.assertIn("for Under", joined)
+        self.assertNotIn("for Over", joined)
+
+    def test_replacement_evidence_does_not_reuse_original_odds_when_replacement_unpriced(self):
+        ai_pick = _public_market_pick(
+            {
+                "market": "Over 2.5",
+                "advisory_score": 72,
+                "odds": None,
+                "market_taxonomy": describe_market("Over 2.5").to_dict(),
+                "advisory_evidence": {
+                    "expected_goals": 3.2,
+                    "line": 2.5,
+                    "selection": "over",
+                },
+            }
+        )
+
+        evidence = _stats_backed_evidence(
+            {"user_pick": {"market": "Home Win", "confidence_score": 28, "odds": 1.52}},
+            market_payload=ai_pick,
+            owned_market_only=True,
+        )
+        joined = " ".join(evidence)
+
+        self.assertIn("Over 2.5 rates at 72% confidence.", joined)
+        self.assertNotIn("1.52 odds", joined)
 
     def test_replacement_evidence_is_owned_by_recommended_market_family(self):
         selection = {
