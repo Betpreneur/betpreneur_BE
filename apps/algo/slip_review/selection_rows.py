@@ -47,6 +47,22 @@ def selection_flagged_risky(item):
     return (item or {}).get("verdict") in {"remove", "replace", "caution"}
 
 
+def settlement_market_for(item, *, market_for_fixture_orientation, can_settle_market):
+    """
+    Canonical, orientation-corrected market used to settle this leg after kickoff.
+
+    Returns "" when the market cannot be resolved from a finished fixture, which the
+    settler records as ``unsettleable`` rather than a void.
+    """
+    market = item.get("analysis_market")
+    if not market:
+        canonical = (item.get("market_taxonomy") or {}).get("canonical") or ""
+        if canonical:
+            market = market_for_fixture_orientation(canonical, item.get("matched_fixture") or {})
+    market = str(market or "").strip()
+    return market if can_settle_market(market) else ""
+
+
 def initial_slip_selection_payload(selection):
     provider_payload = json_safe(selection.get("provider_payload") or {})
     market = selection.get("market", "")
@@ -150,6 +166,7 @@ __all__ = [
     "persist_slip_selection_progress_result",
     "replace_slip_selection_analysis_rows",
     "selection_flagged_risky",
+    "settlement_market_for",
     "slip_selection_defaults_from_analysis",
     "slip_selection_payload",
 ]

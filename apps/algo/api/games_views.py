@@ -22,6 +22,7 @@ from apps.algo.serializers import (
     GameAnalysisQuerySerializer,
     GameBackResponseSerializer,
     GameDetailResponseSerializer,
+    GameListQuerySerializer,
     GameListResponseSerializer,
     SingleGameBackRequestSerializer,
 )
@@ -47,13 +48,16 @@ class GamesView(APIView):
 
     @extend_schema(
         summary="All covered games",
-        description="Authenticated user endpoint. Returns every fixture scored for the covered leagues on a matchday, including each game's best available market and any official published pick.",
+        description=(
+            "Authenticated user endpoint. Returns every fixture scored for the covered leagues on a matchday. "
+            "Defaults to the compact payload used by the frontend; pass view=full for the heavier full payload."
+        ),
         tags=["Games"],
-        parameters=[GameAnalysisQuerySerializer],
+        parameters=[GameListQuerySerializer],
         responses={200: GameListResponseSerializer},
     )
     def get(self, request):
-        query = GameAnalysisQuerySerializer(data=request.query_params)
+        query = GameListQuerySerializer(data=request.query_params)
         query.is_valid(raise_exception=True)
         target_date = query.validated_data.get("date") or timezone.localdate()
         if query.validated_data.get("view") == "compact":

@@ -6,6 +6,7 @@ import math
 import os
 import re
 from decimal import Decimal, InvalidOperation
+from functools import partial
 
 from django.conf import settings
 from django.http import HttpResponseNotModified
@@ -63,10 +64,20 @@ from .slip_review.api import (
     provider_match_date as _provider_match_date,
     provider_metadata as _provider_metadata,
     selection_flagged_risky as _selection_flagged_risky,
+    combined_odds as _combined_odds,
+    fair_odds as _fair_odds,
+    float_or_none as _float_or_none,
+    gap_level as _gap_level,
+    implied_probability_from_odds as _implied_probability_from_odds,
+    probability_gap as _probability_gap,
+    public_confidence_label as _public_confidence_label,
+    public_score as _public_score,
     public_slip_review_error_message as _public_slip_review_error_message,
     public_slip_review_progress as _public_slip_review_progress,
     public_slip_review_status as _public_slip_review_status,
     public_slip_review_stream_event as _public_slip_review_stream_event,
+    public_ticket_label as _public_ticket_label,
+    round_percent as _round_percent,
     publish_slip_review_event as _publish_slip_review_event,
     review_status_from_summary as _review_status_from_summary,
     repair_payload as _repair_payload,
@@ -77,6 +88,7 @@ from .slip_review.api import (
     risk_level_for,
     selection_expiry as _selection_expiry,
     selection_market_descriptor as _selection_market_descriptor,
+    settlement_market_for as _settlement_market_for_impl,
     should_skip_core_on_demand as _should_skip_core_on_demand,
     cached_slip_leg_payload as _cached_slip_leg_payload,
     completed_slip_review_leg_count as _slip_review_completed_leg_count,
@@ -91,11 +103,14 @@ from .slip_review.api import (
     slip_review_billing_payload as _slip_review_billing_payload,
     slip_review_event_payload as _slip_review_event_payload,
     slip_review_progress as _slip_review_progress,
+    slip_api_usage as _slip_api_usage,
     slip_review_token_cost as _slip_review_token_cost,
     slip_selection_defaults_from_analysis as _slip_selection_defaults_from_analysis_impl,
     store_slip_leg_analysis_cache as _store_slip_leg_analysis_cache_impl,
     store_slip_review_billing as _store_slip_review_billing,
     stream_ticket_hash as _stream_ticket_hash,
+    success_percent_display as _success_percent_display,
+    value_rating as _value_rating,
     ticket_risk_service,
     try_sportybet_statpal_mapping as _try_sportybet_statpal_mapping,
 )
@@ -3536,6 +3551,13 @@ def _market_for_fixture_orientation(market, candidate):
     return market
 
 
+_settlement_market_for = partial(
+    _settlement_market_for_impl,
+    market_for_fixture_orientation=_market_for_fixture_orientation,
+    can_settle_market=algo_runner_service.can_settle_market,
+)
+
+
 def _manual_fixture_game(match_id, match_date, request=None):
     target_match_id = str(match_id or "").strip()
     prediction = (
@@ -3849,102 +3871,6 @@ def _api_response_payload(value):
     return _strip_api_usage(_json_safe(value))
 
 
-def _merge_api_usage(*usages):
-    total = _empty_api_usage()
-    for usage in usages:
-        usage = usage or {}
-        total["attempted_calls"] += int(usage.get("attempted_calls") or 0)
-        total["successful_calls"] += int(usage.get("successful_calls") or 0)
-        total["failed_calls"] += int(usage.get("failed_calls") or 0)
-        total["skipped_by_cache"] += int(usage.get("skipped_by_cache") or 0)
-        total["skipped_without_call"] += int(usage.get("skipped_without_call") or 0)
-        for key in ("snapshot_types_attempted", "snapshot_types_refreshed", "snapshot_types_failed"):
-            total[key].extend(str(value) for value in usage.get(key) or [] if value)
-    for key in ("snapshot_types_attempted", "snapshot_types_refreshed", "snapshot_types_failed"):
-        total[key] = list(dict.fromkeys(total[key]))
-    return total
-
-
-def _selection_api_usage(item):
-    refresh = item.get("statpal_refresh") or {}
-    return refresh.get("api_usage") or _empty_api_usage()
-
-
-def _slip_api_usage(items):
-    usage = _merge_api_usage(*(_selection_api_usage(item) for item in items))
-    usage["call_budget_note"] = (
-        "Counts only StatPal snapshot refresh calls made during this review. "
-        "Cache hits and existing mapped fixtures do not spend StatPal calls."
-    )
-    return usage
-
-
-def _float_or_none(value):
-    try:
-        if value in (None, ""):
-            return None
-        return float(value)
-    except (TypeError, ValueError):
-        return None
-
-
-def _round_percent(value):
-    parsed = _float_or_none(value)
-    return round(parsed * 100, 1) if parsed is not None else None
-
-
-def _fair_odds(probability):
-    parsed = _float_or_none(probability)
-    if parsed is None or parsed <= 0:
-        return None
-    return round(1 / parsed, 2)
-
-
-def _success_percent_display(value):
-    parsed = _float_or_none(value)
-    if parsed is None:
-        return None
-    if parsed == 0:
-        return "0%"
-    if 0 < parsed < 0.01:
-        return "<0.01%"
-    return f"{round(parsed, 2)}%"
-
-
-def _implied_probability_from_odds(odds):
-    parsed = _float_or_none(odds)
-    if parsed is None or parsed <= 1:
-        return None
-    return 1 / parsed
-
-
-def _probability_gap(model_probability, market_probability):
-    if model_probability is None or market_probability is None:
-        return None
-    return round((model_probability - market_probability) * 100, 1)
-
-
-def _gap_level(gap_points):
-    gap = abs(_float_or_none(gap_points) or 0)
-    if gap >= 15:
-        return "high"
-    if gap >= 8:
-        return "medium"
-    return "low"
-
-
-def _value_rating(model_probability, offered_odds):
-    market_probability = _implied_probability_from_odds(offered_odds)
-    gap = _probability_gap(model_probability, market_probability)
-    if gap is None:
-        return "unknown"
-    if gap >= 5:
-        return "positive_value"
-    if gap <= -5:
-        return "poor_value"
-    return "near_fair"
-
-
 def _selection_original_odds(item):
     provider_payload = item.get("provider_payload") or {}
     odds = provider_payload.get("odds")
@@ -3965,30 +3891,6 @@ def _selection_suggested_odds(item):
     if item.get("verdict") == "remove":
         return None
     return _selection_original_odds(item) or _float_or_none((item.get("selected_market") or {}).get("odds"))
-
-
-def _combined_odds(values):
-    odds = [value for value in values if value and value > 1]
-    if not odds:
-        return None
-    total = 1.0
-    for value in odds:
-        total *= value
-    return round(total, 2)
-
-
-def _combined_probability(scores):
-    probabilities = [
-        max(1.0, min(95.0, float(score))) / 100.0
-        for score in scores
-        if score is not None
-    ]
-    if not probabilities:
-        return None
-    total = 1.0
-    for probability in probabilities:
-        total *= probability
-    return round(total * 100, 1)
 
 
 def _optimized_leg_score(item):
@@ -4880,30 +4782,6 @@ def _bettor_pick_breakdown(selections):
             code = "playable"
         breakdown[code] = breakdown.get(code, 0) + 1
     return breakdown
-
-
-def _public_score(value):
-    value = _float_or_none(value)
-    return int(round(value)) if value is not None else None
-
-
-def _public_confidence_label(score):
-    return _pick_confidence_label(score)
-
-
-def _public_ticket_label(score):
-    score = _float_or_none(score)
-    if score is None:
-        return "Unknown"
-    if score >= 75:
-        return "Strong"
-    if score >= 65:
-        return "Good"
-    if score >= 55:
-        return "Playable"
-    if score >= 40:
-        return "Risky"
-    return "Poor"
 
 
 def _simple_pick_verdict(selection):
@@ -6281,22 +6159,6 @@ def _manual_review_summary(results):
         "public": intelligence.get("public", {}),
         "intelligence": intelligence,
     }
-
-
-def _settlement_market_for(item):
-    """
-    Canonical, orientation-corrected market used to settle this leg after kickoff.
-
-    Returns "" when the market cannot be resolved from a finished fixture, which the
-    settler records as ``unsettleable`` rather than a void.
-    """
-    market = item.get("analysis_market")
-    if not market:
-        canonical = (item.get("market_taxonomy") or {}).get("canonical") or ""
-        if canonical:
-            market = _market_for_fixture_orientation(canonical, item.get("matched_fixture") or {})
-    market = str(market or "").strip()
-    return market if algo_runner_service.can_settle_market(market) else ""
 
 
 def _log_slip_review_debug(review, summary):

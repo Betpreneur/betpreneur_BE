@@ -409,6 +409,15 @@ class GameAnalysisQuerySerializer(serializers.Serializer):
     )
 
 
+class GameListQuerySerializer(serializers.Serializer):
+    date = serializers.DateField(required=False)
+    view = serializers.ChoiceField(
+        choices=("full", "compact"),
+        required=False,
+        default="compact",
+    )
+
+
 class RecordQuerySerializer(serializers.Serializer):
     days = serializers.IntegerField(required=False, min_value=1, max_value=365, default=90)
 

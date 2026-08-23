@@ -31,6 +31,36 @@ def empty_api_usage():
     }
 
 
+def merge_api_usage(*usages):
+    total = empty_api_usage()
+    for usage in usages:
+        usage = usage or {}
+        total["attempted_calls"] += int(usage.get("attempted_calls") or 0)
+        total["successful_calls"] += int(usage.get("successful_calls") or 0)
+        total["failed_calls"] += int(usage.get("failed_calls") or 0)
+        total["skipped_by_cache"] += int(usage.get("skipped_by_cache") or 0)
+        total["skipped_without_call"] += int(usage.get("skipped_without_call") or 0)
+        for key in ("snapshot_types_attempted", "snapshot_types_refreshed", "snapshot_types_failed"):
+            total[key].extend(str(value) for value in usage.get(key) or [] if value)
+    for key in ("snapshot_types_attempted", "snapshot_types_refreshed", "snapshot_types_failed"):
+        total[key] = list(dict.fromkeys(total[key]))
+    return total
+
+
+def selection_api_usage(item):
+    refresh = (item or {}).get("statpal_refresh") or {}
+    return refresh.get("api_usage") or empty_api_usage()
+
+
+def slip_api_usage(items):
+    usage = merge_api_usage(*(selection_api_usage(item) for item in items or []))
+    usage["call_budget_note"] = (
+        "Counts only StatPal snapshot refresh calls made during this review. "
+        "Cache hits and existing mapped fixtures do not spend StatPal calls."
+    )
+    return usage
+
+
 def empty_slip_summary(verdict, *, task_id="", error=""):
     summary = {
         "count": 0,
@@ -359,10 +389,13 @@ __all__ = [
     "json_safe",
     "mark_slip_review_completed",
     "mark_slip_review_failed",
+    "merge_api_usage",
     "public_slip_review_error_message",
     "publish_slip_review_event",
     "review_status_from_summary",
+    "selection_api_usage",
     "set_slip_review_progress",
+    "slip_api_usage",
     "slip_review_leg_failure_result",
     "slip_review_progress",
 ]
