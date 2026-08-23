@@ -28,7 +28,7 @@ def generate_daily_picks(self, target_date=None):
                 score_fixture_for_daily_run.s(fixture_id).set(queue=settings.ALGO_SCORING_QUEUE)
                 for fixture_id in fixture_ids
             ]
-        )(publish_daily_run.s(algo_run.id).set(queue=settings.ALGO_DAILY_QUEUE))
+        )(publish_daily_run.si(algo_run.id).set(queue=settings.ALGO_DAILY_QUEUE))
         status_value = "scoring_queued"
         child_task_id = workflow.id
     else:
@@ -72,9 +72,20 @@ def score_fixture_for_daily_run(self, fixture_id):
 
 
 @shared_task(bind=True, ignore_result=False, max_retries=2, default_retry_delay=120)
-def publish_daily_run(self, score_results, run_id):
+def publish_daily_run(self, run_id, score_results=None):
+    if isinstance(run_id, (list, tuple)) and score_results is not None:
+        # Backward-compatible shape for callbacks queued before the immutable
+        # signature change: Celery used to prepend chord results to this task.
+        score_results, run_id = run_id, score_results
+    else:
+        score_results = score_results or []
     algo_run = algo_runner_service.publish_fanout_run(run_id)
     explain_picks_for_run.apply_async(args=[algo_run.id], queue=settings.ALGO_LLM_QUEUE)
+    scored = sum(1 for item in score_results if (item or {}).get("status") == "scored")
+    failed = sum(1 for item in score_results if (item or {}).get("status") == "failed")
+    if not score_results:
+        scored = algo_run.total_scored
+        failed = (algo_run.result or {}).get("failed_fixtures", 0)
     return {
         "run_id": algo_run.id,
         "target_date": algo_run.target_date.isoformat(),
@@ -83,8 +94,8 @@ def publish_daily_run(self, score_results, run_id):
         "bankers": algo_run.bankers,
         "value_gems": algo_run.value_gems,
         "wild_cards": algo_run.wild_cards,
-        "scored": sum(1 for item in score_results or [] if (item or {}).get("status") == "scored"),
-        "failed": sum(1 for item in score_results or [] if (item or {}).get("status") == "failed"),
+        "scored": scored,
+        "failed": failed,
         "error": algo_run.error,
     }
 

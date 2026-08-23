@@ -2549,6 +2549,34 @@ class AlgoRunnerService:
             })
         return self._market_family_statpal_coverage(markets)
 
+    def _prediction_summary_metrics(self, algo_run):
+        family_counts = defaultdict(int)
+        statpal_coverage = {}
+        queryset = (
+            MarketPrediction.objects.filter(run=algo_run)
+            .only("market", "insights")
+            .order_by("id")
+        )
+        for prediction in queryset.iterator(chunk_size=500):
+            insights = prediction.insights or {}
+            route = insights.get("daily_evaluation_route") or {}
+            family = route.get("family") or insights.get("market_family") or "unknown"
+            family_counts[str(family or "unknown")] += 1
+            self._merge_market_family_statpal_coverage(
+                statpal_coverage,
+                self._market_family_statpal_coverage([
+                    {
+                        "market": prediction.market,
+                        "market_family": family,
+                        "insights": insights,
+                    }
+                ]),
+            )
+        return {
+            "market_family_counts": dict(sorted(family_counts.items())),
+            "statpal_market_family_coverage": self._finalize_market_family_statpal_coverage(statpal_coverage),
+        }
+
     def _enrich_fixture_statpal_diagnostics(self, fixture):
         enriched = dict(fixture)
         insights = dict(enriched.get("insights") or {})
@@ -2943,6 +2971,23 @@ class AlgoRunnerService:
             MarketPrediction.objects.filter(run=algo_run)
             .exclude(market__in=["DC: 1X", "DC: X2"])
             .exclude(ev__isnull=True)
+            .only(
+                "id",
+                "match_id",
+                "market",
+                "confidence",
+                "ev",
+                "odds",
+                "odds_source",
+                "odds_meta",
+                "eligible",
+                "risk_flags",
+                "insights",
+                "home_recent_form",
+                "away_recent_form",
+                "fixture_context",
+                "league",
+            )
             .order_by("-confidence", "-ev", "odds")
         )
         predictions.sort(key=self._prediction_mode_rank, reverse=True)
@@ -3026,7 +3071,28 @@ class AlgoRunnerService:
     def _refresh_recommendation_rejections(self, algo_run):
         updates = []
         performance = (algo_run.result or {}).get("performance_profile") or self._performance_profile()
-        for prediction in MarketPrediction.objects.filter(run=algo_run, published=False):
+        queryset = (
+            MarketPrediction.objects.filter(run=algo_run, published=False)
+            .only(
+                "id",
+                "market",
+                "confidence",
+                "ev",
+                "odds",
+                "odds_source",
+                "odds_meta",
+                "eligible",
+                "risk_flags",
+                "insights",
+                "home_recent_form",
+                "away_recent_form",
+                "fixture_context",
+                "league",
+                "rejection_reason",
+            )
+            .order_by("id")
+        )
+        for prediction in queryset.iterator(chunk_size=500):
             candidate = self._recommendation_candidate(prediction, performance)
             assessment = assess_recommendation(candidate)
             council_tier = self._tier_after_council(prediction, candidate)
@@ -3055,6 +3121,9 @@ class AlgoRunnerService:
                 changed = True
             if changed:
                 updates.append(prediction)
+            if len(updates) >= 500:
+                MarketPrediction.objects.bulk_update(updates, ["rejection_reason", "insights"], batch_size=500)
+                updates = []
         if updates:
             MarketPrediction.objects.bulk_update(updates, ["rejection_reason", "insights"], batch_size=500)
 
@@ -3742,7 +3811,7 @@ class AlgoRunnerService:
         picks = self._publish_selected_predictions(algo_run, bankroll)
         scored_count = AlgoFixture.objects.filter(run=algo_run, status=AlgoFixture.Status.SCORED).count()
         failed_count = AlgoFixture.objects.filter(run=algo_run, status=AlgoFixture.Status.FAILED).count()
-        predictions = list(MarketPrediction.objects.filter(run=algo_run).only("market", "insights"))
+        prediction_metrics = self._prediction_summary_metrics(algo_run)
         aggregate = MarketPrediction.objects.filter(run=algo_run).aggregate(
             market_count=Count("id"),
             markets_70_plus=Count("id", filter=Q(confidence__gte=70)),
@@ -3768,8 +3837,8 @@ class AlgoRunnerService:
             "strategy_profile": result.get("strategy_profile", {}),
             "performance_profile": result.get("performance_profile", {}),
             "market_count": aggregate.get("market_count") or 0,
-            "market_family_counts": self._prediction_market_family_counts(predictions),
-            "statpal_market_family_coverage": self._prediction_statpal_family_coverage(predictions),
+            "market_family_counts": prediction_metrics["market_family_counts"],
+            "statpal_market_family_coverage": prediction_metrics["statpal_market_family_coverage"],
             "top_pick_market_family_counts": self._pick_family_counts(picks),
             "top_pick_optimization_counts": self._pick_optimization_counts(picks),
             "daily_optimization_mode": self._daily_optimization_mode(),
