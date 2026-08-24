@@ -33,12 +33,17 @@ from apps.algo.serializers import (
 )
 from apps.algo.slip_review import api as slip_review_redis
 from apps.algo.slip_review.api import (
+    SLIP_REVIEW_MARKET_OPTIONS,
+    SLIP_REVIEW_STREAM_TICKET_SECONDS,
+    SLIP_REVIEW_VERDICT_OPTIONS,
+    compact_slip_review_list_payload as build_compact_slip_review_list_payload,
     consume_slip_review_token_reservation,
     create_queued_slip_review,
     empty_slip_summary,
     insufficient_feature_tokens_payload,
     insufficient_tokens_payload,
     plan_repair,
+    public_score,
     public_slip_review_progress,
     public_slip_review_status,
     public_slip_review_stream_event,
@@ -46,15 +51,44 @@ from apps.algo.slip_review.api import (
     repair_payload,
     release_slip_review_token_reservation,
     reserve_slip_review_tokens,
+    selection_has_analysis,
     set_slip_review_progress,
     slip_recap_payload,
     slip_review_event_payload,
+    slip_review_payload as build_slip_review_payload,
     slip_review_progress,
+    smart_randomize_ticket,
     stream_ticket_hash,
     ticket_risk_service,
+    with_smart_randomize,
 )
 from apps.algo.tasks import import_slip_review
 from apps.algo.wallet.api import InsufficientTokens, token_wallet_service
+from .response_utils import api_response_payload
+
+
+def _compact_slip_review_list_payload(review, *, include_picks=True, pick_limit=None, use_summary=True):
+    return build_compact_slip_review_list_payload(
+        review,
+        include_picks=include_picks,
+        pick_limit=pick_limit,
+        use_summary=use_summary,
+        build_bettor_public_payload=legacy_views._build_bettor_public_payload,
+        public_score=public_score,
+    )
+
+
+def _slip_review_payload(review, *, include_selections=True, public_only=False):
+    return build_slip_review_payload(
+        review,
+        include_selections=include_selections,
+        public_only=public_only,
+        api_response_payload=api_response_payload,
+        build_bettor_public_payload=legacy_views._build_bettor_public_payload,
+        with_smart_randomize=with_smart_randomize,
+        selection_has_analysis=selection_has_analysis,
+        manual_review_summary=legacy_views._manual_review_summary,
+    )
 
 
 class ManualSlipReviewView(APIView):
@@ -124,7 +158,7 @@ class ManualSlipReviewView(APIView):
             release_slip_review_token_reservation(review)
             raise
         return Response(
-            legacy_views._api_response_payload(
+            api_response_payload(
                 {
                     "id": review.id,
                     "source": review.source,
@@ -214,7 +248,7 @@ def _queue_bookmaker_review(request, *, source, submitted_payload):
             "progress": review.summary.get("progress") or {},
         },
     )
-    return Response(legacy_views._slip_review_payload(review, include_selections=True), status=status.HTTP_202_ACCEPTED)
+    return Response(_slip_review_payload(review, include_selections=True), status=status.HTTP_202_ACCEPTED)
 
 
 class SlipRepairView(APIView):
@@ -304,8 +338,8 @@ class SlipReviewRandomizeView(APIView):
 
         serializer = SlipReviewRandomizeRequestSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
-        public_payload = legacy_views._slip_review_payload(review, include_selections=True, public_only=True)
-        ticket, error = legacy_views._smart_randomize_ticket(public_payload, serializer.validated_data["games"])
+        public_payload = _slip_review_payload(review, include_selections=True, public_only=True)
+        ticket, error = smart_randomize_ticket(public_payload, serializer.validated_data["games"])
         if error:
             return Response(error, status=status.HTTP_400_BAD_REQUEST)
         token_cost = int(getattr(settings, "SLIP_REVIEW_RANDOMIZE_TOKEN_COST", 5))
@@ -338,7 +372,7 @@ class SlipReviewRandomizeView(APIView):
             "transaction_id": charge.transaction.id if charge.transaction else None,
             "wallet": charge.balance_after,
         }
-        return Response(legacy_views._api_response_payload(ticket))
+        return Response(api_response_payload(ticket))
 
 
 class SlipReviewRecapView(APIView):
@@ -432,7 +466,7 @@ class SlipReviewListView(APIView):
             {
                 "count": len(reviews),
                 "reviews": [
-                    legacy_views._compact_slip_review_list_payload(
+                    _compact_slip_review_list_payload(
                         review,
                         include_picks=include_picks or pick_limit > 0,
                         pick_limit=pick_limit if pick_limit > 0 else None,
@@ -457,8 +491,8 @@ class SlipReviewOptionsView(APIView):
     def get(self, request):
         return Response(
             {
-                "markets": legacy_views.SLIP_REVIEW_MARKET_OPTIONS,
-                "verdicts": legacy_views.SLIP_REVIEW_VERDICT_OPTIONS,
+                "markets": SLIP_REVIEW_MARKET_OPTIONS,
+                "verdicts": SLIP_REVIEW_VERDICT_OPTIONS,
                 "sources": [
                     {"value": "manual", "label": "Manual"},
                     {"value": "sportybet", "label": "SportyBet"},
@@ -494,7 +528,7 @@ class SlipReviewDetailView(APIView):
             user=request.user,
         )
         public_only = str(request.query_params.get("view", "")).lower() == "public"
-        return Response(legacy_views._slip_review_payload(review, include_selections=True, public_only=public_only))
+        return Response(_slip_review_payload(review, include_selections=True, public_only=public_only))
 
 
 class SlipReviewEventsView(APIView):
@@ -547,7 +581,7 @@ class SlipReviewEventsView(APIView):
             "latest_event_id": latest_event_id,
             "events": events_payload,
         }
-        response = Response(legacy_views._api_response_payload(payload))
+        response = Response(api_response_payload(payload))
         response["Cache-Control"] = "private, no-store"
         response["Vary"] = "Authorization, Cookie"
         return response
@@ -573,7 +607,7 @@ class SlipReviewStreamTokenView(APIView):
             user=request.user,
         )
         now = timezone.now()
-        expires_at = now + timedelta(seconds=max(60, legacy_views.SLIP_REVIEW_STREAM_TICKET_SECONDS))
+        expires_at = now + timedelta(seconds=max(60, SLIP_REVIEW_STREAM_TICKET_SECONDS))
         ticket = secrets.token_urlsafe(32)
         SlipReviewStreamToken.objects.filter(expires_at__lt=now).delete()
         SlipReviewStreamToken.objects.create(
@@ -586,10 +620,10 @@ class SlipReviewStreamTokenView(APIView):
         scheme = "wss" if request.is_secure() else "ws"
         ws_url = f"{scheme}://{request.get_host()}{ws_path}"
         return Response(
-            legacy_views._api_response_payload(
+            api_response_payload(
                 {
                     "ticket": ticket,
-                    "expires_in": max(60, legacy_views.SLIP_REVIEW_STREAM_TICKET_SECONDS),
+                    "expires_in": max(60, SLIP_REVIEW_STREAM_TICKET_SECONDS),
                     "expires_at": expires_at,
                     "ws_path": ws_path,
                     "ws_url": ws_url,

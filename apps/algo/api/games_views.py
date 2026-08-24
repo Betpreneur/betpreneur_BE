@@ -26,6 +26,7 @@ from apps.algo.serializers import (
     GameListResponseSerializer,
     SingleGameBackRequestSerializer,
 )
+from .response_utils import private_cached_response as _private_cached_response
 from apps.algo.views import (
     _all_games_payload,
     _apply_council_recommendation_gate,
@@ -36,7 +37,6 @@ from apps.algo.views import (
     _market_verdict_for_game,
     _normalise_council_review,
     _picks_by_match,
-    _private_cached_response,
     _public_reasoning_text,
     _tier_for_confidence,
 )

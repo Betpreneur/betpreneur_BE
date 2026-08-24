@@ -24,6 +24,10 @@ from apps.algo.serializers import (
     RecordResponseSerializer,
     TopPickResponseSerializer,
 )
+from .response_utils import (
+    private_cached_response as _private_cached_response,
+    public_cached_response as _public_cached_response,
+)
 from apps.algo.views import (
     EXCLUDED_MARKETS,
     SETTLED_PICK_STATUSES,
@@ -35,8 +39,6 @@ from apps.algo.views import (
     _latest_successful_run,
     _performance_summary,
     _pick_detail_payload,
-    _private_cached_response,
-    _public_cached_response,
     _public_record_pick_payload,
     _top_pick_sort_key,
 )

@@ -115,9 +115,10 @@ def explain_picks_for_run(self, run_id):
 )
 def import_slip_review(self, review_id):
     try:
-        from .views import _json_safe, process_slip_review_import
+        from .api.response_utils import json_safe
+        from .views import process_slip_review_import
 
-        return _json_safe(process_slip_review_import(review_id))
+        return json_safe(process_slip_review_import(review_id))
     except SoftTimeLimitExceeded:
         from .views import fail_slip_review_import
 
@@ -148,13 +149,15 @@ def import_slip_review(self, review_id):
 )
 def analyse_slip_review_leg(self, review_id, index, selection, days=3):
     try:
-        from .views import _json_safe, process_slip_review_leg_analysis
+        from .api.response_utils import json_safe
+        from .views import process_slip_review_leg_analysis
 
-        return _json_safe(process_slip_review_leg_analysis(review_id, index, selection, days=days))
+        return json_safe(process_slip_review_leg_analysis(review_id, index, selection, days=days))
     except SoftTimeLimitExceeded as exc:
-        from .views import _json_safe, process_slip_review_leg_failure
+        from .api.response_utils import json_safe
+        from .views import process_slip_review_leg_failure
 
-        return _json_safe(
+        return json_safe(
             process_slip_review_leg_failure(
                 review_id,
                 index,
@@ -166,17 +169,19 @@ def analyse_slip_review_leg(self, review_id, index, selection, days=3):
     except Exception as exc:
         if self.request.retries < self.max_retries:
             raise self.retry(exc=exc, countdown=60 * (self.request.retries + 1))
-        from .views import _json_safe, process_slip_review_leg_failure
+        from .api.response_utils import json_safe
+        from .views import process_slip_review_leg_failure
 
-        return _json_safe(process_slip_review_leg_failure(review_id, index, selection, str(exc)))
+        return json_safe(process_slip_review_leg_failure(review_id, index, selection, str(exc)))
 
 
 @shared_task(bind=True, ignore_result=False, max_retries=1, default_retry_delay=60)
 def finalize_slip_review_import(self, leg_results, review_id):
     try:
-        from .views import _json_safe, finalize_slip_review_import_results
+        from .api.response_utils import json_safe
+        from .views import finalize_slip_review_import_results
 
-        return _json_safe(finalize_slip_review_import_results(review_id, leg_results))
+        return json_safe(finalize_slip_review_import_results(review_id, leg_results))
     except Exception as exc:
         if self.request.retries < self.max_retries:
             raise self.retry(exc=exc, countdown=60)
@@ -187,9 +192,10 @@ def finalize_slip_review_import(self, leg_results, review_id):
 
 @shared_task(bind=True, ignore_result=False)
 def recover_stale_slip_reviews(self, stale_after_seconds=None, limit=25):
-    from .views import _json_safe, recover_stale_slip_reviews as recover_stale
+    from .api.response_utils import json_safe
+    from .views import recover_stale_slip_reviews as recover_stale
 
-    return _json_safe(recover_stale(stale_after_seconds=stale_after_seconds, limit=limit))
+    return json_safe(recover_stale(stale_after_seconds=stale_after_seconds, limit=limit))
 
 
 @shared_task(bind=True, ignore_result=False)

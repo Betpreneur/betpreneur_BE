@@ -6,7 +6,6 @@ from rest_framework.permissions import AllowAny, IsAdminUser
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from apps.algo import views as legacy_views
 from apps.algo.models import AlgoRun
 from apps.algo.serializers import (
     AlgoRunCreateSerializer,
@@ -19,6 +18,8 @@ from apps.algo.serializers import (
     TaskStatusSerializer,
 )
 from apps.algo.tasks import generate_daily_picks, run_monthly_auditor, settle_daily_results
+from .maintenance import maintenance_jobs
+from .response_utils import api_response_payload
 
 
 @extend_schema_view(
@@ -159,7 +160,7 @@ class MaintenanceRunView(APIView):
     def post(self, request):
         serializer = MaintenanceRunRequestSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
-        available = legacy_views._maintenance_jobs()
+        available = maintenance_jobs()
         requested = serializer.validated_data.get("jobs") or list(available)
 
         unknown = [name for name in requested if name not in available]
@@ -204,7 +205,7 @@ class TaskStatusView(APIView):
             "error": "",
         }
         if task.successful():
-            payload["result"] = legacy_views._api_response_payload(task.result)
+            payload["result"] = api_response_payload(task.result)
         elif task.failed():
             payload["error"] = str(task.result)
         return Response(payload, status=status.HTTP_200_OK)

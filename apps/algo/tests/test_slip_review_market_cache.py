@@ -9,9 +9,10 @@ from django.test import TestCase
 from django.utils import timezone
 
 from apps.algo.models import SlipReviewMarketCache
+from apps.algo.api.maintenance import maintenance_jobs
 from apps.algo.services import algo_runner_service
 from apps.algo.slip_review_market_cache import SlipReviewMarketCacheWriter
-from apps.algo.views import _maintenance_jobs, _manual_fixture_game
+from apps.algo.views import _manual_fixture_game
 
 
 class SlipReviewMarketCacheWriterTests(TestCase):
@@ -186,8 +187,8 @@ class SlipReviewMarketCacheOperationsTests(TestCase):
             settings.CELERY_TASK_ROUTES["apps.algo.tasks.cleanup_slip_review_market_cache"]["queue"],
             settings.ALGO_MAINTENANCE_QUEUE,
         )
-        self.assertIn("slip_review_market_cache", _maintenance_jobs())
-        self.assertIn("slip_review_market_cache_cleanup", _maintenance_jobs())
+        self.assertIn("slip_review_market_cache", maintenance_jobs())
+        self.assertIn("slip_review_market_cache_cleanup", maintenance_jobs())
 
     def test_cleanup_deletes_only_expired_private_cache_rows(self):
         now = timezone.now()

@@ -1,6 +1,4 @@
 """Market-data and provider-readiness API views."""
-
-import json
 from datetime import timedelta
 
 from django.utils import timezone
@@ -20,26 +18,7 @@ from apps.algo.serializers import (
     StatPalReadinessQuerySerializer,
     StatPalReadinessResponseSerializer,
 )
-
-
-def _json_safe(value):
-    return json.loads(json.dumps(value, default=str))
-
-
-def _strip_api_usage(value):
-    if isinstance(value, dict):
-        return {
-            key: _strip_api_usage(child)
-            for key, child in value.items()
-            if key != "api_usage"
-        }
-    if isinstance(value, list):
-        return [_strip_api_usage(item) for item in value]
-    return value
-
-
-def _api_response_payload(value):
-    return _strip_api_usage(_json_safe(value))
+from .response_utils import api_response_payload as _api_response_payload
 
 
 def _market_health_state(loss_streak, recent_5_losses, recent_10_hit_rate, recent_10_count, roi_flat):

@@ -2,6 +2,7 @@
 
 from apps.algo.models import SlipSelection
 from apps.algo.slip_review.lifecycle import json_safe
+from apps.algo.slip_review.public_formatting import float_or_none
 
 
 def slip_selection_defaults_from_analysis(
@@ -9,8 +10,6 @@ def slip_selection_defaults_from_analysis(
     *,
     settlement_market_for,
     decimal_or_none,
-    selection_original_odds,
-    float_or_none,
 ):
     item = json_safe(item or {})
     matched = item.get("matched_fixture") or {}
@@ -39,6 +38,142 @@ def slip_selection_defaults_from_analysis(
         "advisory_score": float_or_none(
             item.get("advisory_score") or (item.get("selected_market") or {}).get("advisory_score")
         ),
+    }
+
+
+def selection_original_odds(item):
+    provider_payload = (item or {}).get("provider_payload") or {}
+    odds = provider_payload.get("odds")
+    if odds is None:
+        odds = ((provider_payload.get("provider_payload") or {}).get("selection") or {}).get("odds")
+    if odds is None:
+        odds = ((provider_payload.get("provider_payload") or {}).get("leg") or {}).get("odds")
+    if odds is None:
+        odds = ((item or {}).get("selected_market") or {}).get("odds")
+    return float_or_none(odds)
+
+
+def selection_suggested_odds(item):
+    item = item or {}
+    if item.get("verdict") == "replace":
+        return float_or_none((item.get("replacement_market") or {}).get("odds"))
+    if item.get("status") != "analysed":
+        return None
+    if item.get("verdict") == "remove":
+        return None
+    return selection_original_odds(item) or float_or_none((item.get("selected_market") or {}).get("odds"))
+
+
+def optimized_leg_score(item):
+    item = item or {}
+    if item.get("verdict") == "replace":
+        return float_or_none((item.get("replacement_market") or {}).get("advisory_score"))
+    if item.get("status") != "analysed":
+        return None
+    if item.get("verdict") == "remove":
+        return None
+    return float_or_none(item.get("advisory_score") or (item.get("selected_market") or {}).get("advisory_score"))
+
+
+def selection_has_analysis(item):
+    item = item or {}
+    if item.get("status") == "analysed":
+        return True
+    if item.get("status") == "market_not_found":
+        selected_market = item.get("selected_market") or {}
+        return bool(item.get("replacement_market")) or float_or_none(selected_market.get("advisory_score")) is not None
+    return False
+
+
+def selection_is_unmatched(item):
+    return (item or {}).get("status") in {"unmatched", "ambiguous_match"}
+
+
+def selection_strength_score(item):
+    item = item or {}
+    if not selection_has_analysis(item):
+        return None
+    market = item.get("selected_market") or {}
+    advisory_score = float_or_none(item.get("advisory_score") or market.get("advisory_score"))
+    final_confidence = float_or_none(market.get("final_confidence") or market.get("confidence")) or 0
+    display_score = float_or_none(market.get("display_score")) or final_confidence
+    verdict_bonus = {
+        "keep": 12,
+        "caution": -4,
+        "replace": -18,
+        "remove": -35,
+    }.get(item.get("verdict"), -20)
+    risk_penalty = min(len(market.get("risk_flags") or []) * 2.5, 18)
+    base_score = advisory_score if advisory_score is not None else (final_confidence * 0.6 + display_score * 0.25)
+    score = base_score + verdict_bonus - risk_penalty
+    return round(max(0, min(100, score)), 1)
+
+
+def selection_card(item, *, alternative_reason, replacement_scope):
+    item = item or {}
+    matched = item.get("matched_fixture") or {}
+    selected_market = item.get("selected_market") or {}
+    replacement_market = item.get("replacement_market") or {}
+    action = item.get("verdict")
+    leg_score = item.get("selection_score")
+    if leg_score is None:
+        risk_level = "unknown"
+    elif leg_score < 45 or action == "remove":
+        risk_level = "high"
+    elif leg_score < 65 or action in {"replace", "caution"}:
+        risk_level = "medium"
+    else:
+        risk_level = "low"
+    alternative = None
+    if replacement_market:
+        alternative = {
+            "market": replacement_market.get("market"),
+            "confidence": replacement_market.get("final_confidence") or replacement_market.get("confidence"),
+            "advisory_score": replacement_market.get("advisory_score"),
+            "risk_level": (
+                "low"
+                if (replacement_market.get("advisory_score") or 0) >= 78
+                else "medium"
+                if (replacement_market.get("advisory_score") or 0) >= 55
+                else "high"
+            ),
+            "odds": float_or_none(replacement_market.get("odds")),
+            "ev": float_or_none(replacement_market.get("ev")),
+            "reason": alternative_reason(item.get("submitted_market"), replacement_market),
+            "replacement_scope": replacement_market.get("replacement_scope") or replacement_scope(selected_market, replacement_market),
+            "evidence": replacement_market.get("advisory_evidence") or {},
+            "warnings": replacement_market.get("advisory_warnings") or [],
+        }
+    return {
+        "match": item.get("match"),
+        "fixture": matched.get("fixture") or item.get("match"),
+        "match_id": matched.get("match_id", ""),
+        "submitted_market": item.get("submitted_market"),
+        "verdict": item.get("verdict"),
+        "recommended_action": action,
+        "no_replacement_available": bool(item.get("no_replacement_available")),
+        "status": item.get("status"),
+        "score": item.get("selection_score"),
+        "submitted_pick_score": item.get("selection_score"),
+        "leg_score": leg_score,
+        "risk_level": risk_level,
+        "advisory_score": item.get("advisory_score") or selected_market.get("advisory_score"),
+        "advisory_status": item.get("advisory_status") or selected_market.get("advisory_status"),
+        "advisory_basis": selected_market.get("advisory_basis"),
+        "evidence": selected_market.get("advisory_evidence") or {},
+        "match_resolution_score": (matched.get("match_score") if matched else None),
+        "confidence": selected_market.get("final_confidence") or selected_market.get("confidence"),
+        "odds": selection_original_odds(item),
+        "suggested_market": replacement_market.get("market") if item.get("verdict") == "replace" else item.get("submitted_market"),
+        "suggested_odds": selection_suggested_odds(item),
+        "suggested_advisory_score": replacement_market.get("advisory_score") if replacement_market else None,
+        "suggested_advisory_status": replacement_market.get("advisory_status") if replacement_market else "",
+        "alternative": alternative,
+        "message": item.get("message", ""),
+        "why_risky": (selected_market.get("advisory_warnings") or selected_market.get("risk_flags") or [])[:4],
+        "warnings": (selected_market.get("advisory_warnings") or selected_market.get("risk_flags") or [])[:6],
+        "statpal_advisory": item.get("statpal_advisory") or selected_market.get("statpal_advisory") or {},
+        "statpal_context": item.get("statpal_context") or {},
     }
 
 
@@ -163,9 +298,16 @@ __all__ = [
     "initialize_slip_selection_progress_rows",
     "leg_results_from_persisted_slip_selections",
     "mark_slip_selection_analysing",
+    "optimized_leg_score",
     "persist_slip_selection_progress_result",
     "replace_slip_selection_analysis_rows",
     "selection_flagged_risky",
+    "selection_card",
+    "selection_has_analysis",
+    "selection_is_unmatched",
+    "selection_original_odds",
+    "selection_strength_score",
+    "selection_suggested_odds",
     "settlement_market_for",
     "slip_selection_defaults_from_analysis",
     "slip_selection_payload",

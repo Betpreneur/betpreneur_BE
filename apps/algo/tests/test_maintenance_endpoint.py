@@ -24,7 +24,7 @@ class MaintenanceEndpointTests(TestCase):
         self.client = APIClient()
         self.url = reverse("algo-maintenance-run")
 
-        patcher = mock.patch("apps.algo.views._maintenance_jobs")
+        patcher = mock.patch("apps.algo.api.admin_views.maintenance_jobs")
         self.jobs = patcher.start()
         self.addCleanup(patcher.stop)
         self.calls = {}
