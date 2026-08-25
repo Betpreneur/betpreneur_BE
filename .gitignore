@@ -159,7 +159,11 @@ venv.bak/
 
 # Local service account credentials
 grind_key.json
-apps/algo/
+apps/algo/*
+!apps/algo/apps.py
+!apps/algo/migrations/
+apps/algo/migrations/*
+!apps/algo/migrations/*.py
 # Spyder project settings
 .spyderproject
 .spyproject
