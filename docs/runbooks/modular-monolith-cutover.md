@@ -15,16 +15,14 @@ Two exceptions:
 
 | Migration | Why it differs | How to apply |
 |---|---|---|
-| `analytics.0001_initial` | Real `CREATE TABLE` for `bankroll_bankrollsnapshot` and `reports_report`. Those apps were deleted outright, so their history went with them — but the tables already exist in production. | **`--fake`** |
+| `analytics.0001_initial` | Adopts `bankroll_bankrollsnapshot` and `reports_report` from retired apps. It creates them on fresh databases and skips creation when production tables already exist. | apply normally |
 | `settlement.0001_settlement_run` | Genuinely new table. | apply normally |
 
 ## Procedure
 
 ```bash
-# 1. Fake the one migration whose tables already exist.
-python manage.py migrate analytics 0001 --fake
-
-# 2. Everything else applies normally — no DDL except settlement_run.
+# Everything applies normally. The only new DDL on production should be
+# settlement_run; analytics adopts its existing tables.
 python manage.py migrate
 ```
 
