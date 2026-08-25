@@ -1,0 +1,152 @@
+"""Daily-run tasks.
+
+Thin adapters — the work lives in services/.
+"""
+from datetime import date
+
+from celery import chord, shared_task
+from django.conf import settings
+from django.core.exceptions import ObjectDoesNotExist
+from django.utils import timezone
+
+from betpreneur.modules.picks.services.runner_service import algo_runner_service
+
+
+@shared_task(bind=True, ignore_result=False)
+def generate_daily_picks(self, target_date=None):
+    if target_date is None:
+        target_date = timezone.localdate()
+    else:
+        target_date = date.fromisoformat(target_date)
+
+    algo_run = algo_runner_service.create_run(target_date=target_date)
+    fixture_ids = algo_runner_service.prepare_fanout_run(algo_run)
+    if fixture_ids:
+        workflow = chord(
+            [
+                score_fixture_for_daily_run.s(fixture_id).set(queue=settings.ALGO_SCORING_QUEUE)
+                for fixture_id in fixture_ids
+            ]
+        )(publish_daily_run.si(algo_run.id).set(queue=settings.ALGO_DAILY_QUEUE))
+        status_value = "scoring_queued"
+        child_task_id = workflow.id
+    else:
+        algo_run.refresh_from_db()
+        status_value = algo_run.status
+        child_task_id = ""
+    return {
+        "run_id": algo_run.id,
+        "target_date": algo_run.target_date.isoformat(),
+        "status": status_value,
+        "publish_task_id": child_task_id,
+        "picks_count": algo_run.picks_count,
+        "bankers": algo_run.bankers,
+        "value_gems": algo_run.value_gems,
+        "wild_cards": algo_run.wild_cards,
+        "error": algo_run.error,
+    }
+
+
+@shared_task(
+    bind=True,
+    ignore_result=False,
+    max_retries=3,
+    default_retry_delay=60,
+    rate_limit="6/m",
+    soft_time_limit=900,
+    time_limit=1200,
+)
+def score_fixture_for_daily_run(self, fixture_id):
+    try:
+        result = algo_runner_service.score_fixture_for_run(fixture_id)
+    except ObjectDoesNotExist as exc:
+        return {
+            "fixture_id": fixture_id,
+            "status": "skipped",
+            "error": str(exc) or "object_not_found",
+        }
+    if result.get("status") == "failed" and self.request.retries < self.max_retries:
+        raise self.retry(countdown=60 * (self.request.retries + 1))
+    return result
+
+
+@shared_task(bind=True, ignore_result=False, max_retries=2, default_retry_delay=120)
+def publish_daily_run(self, run_id, score_results=None):
+    if isinstance(run_id, (list, tuple)) and score_results is not None:
+        # Backward-compatible shape for callbacks queued before the immutable
+        # signature change: Celery used to prepend chord results to this task.
+        score_results, run_id = run_id, score_results
+    else:
+        score_results = score_results or []
+    algo_run = algo_runner_service.publish_fanout_run(run_id)
+    explain_picks_for_run.apply_async(args=[algo_run.id], queue=settings.ALGO_LLM_QUEUE)
+    scored = sum(1 for item in score_results if (item or {}).get("status") == "scored")
+    failed = sum(1 for item in score_results if (item or {}).get("status") == "failed")
+    if not score_results:
+        scored = algo_run.total_scored
+        failed = (algo_run.result or {}).get("failed_fixtures", 0)
+    return {
+        "run_id": algo_run.id,
+        "target_date": algo_run.target_date.isoformat(),
+        "status": algo_run.status,
+        "picks_count": algo_run.picks_count,
+        "bankers": algo_run.bankers,
+        "value_gems": algo_run.value_gems,
+        "wild_cards": algo_run.wild_cards,
+        "scored": scored,
+        "failed": failed,
+        "error": algo_run.error,
+    }
+
+
+@shared_task(
+    bind=True,
+    ignore_result=False,
+    max_retries=3,
+    default_retry_delay=120,
+    rate_limit="12/m",
+    soft_time_limit=300,
+    time_limit=420,
+)
+def explain_picks_for_run(self, run_id):
+    try:
+        return algo_runner_service.explain_picks_for_run(run_id)
+    except Exception as exc:
+        raise self.retry(exc=exc, countdown=120 * (self.request.retries + 1))
+
+
+@shared_task(bind=True, ignore_result=False)
+def recover_daily_run(self, run_id, rescore_failed=False):
+    return algo_runner_service.recover_fanout_run(run_id, rescore_failed=rescore_failed)
+
+
+@shared_task(
+    bind=True,
+    ignore_result=False,
+    max_retries=1,
+    default_retry_delay=300,
+    soft_time_limit=3600,
+    time_limit=4200,
+)
+def build_slip_review_market_cache(self, start_date=None, days=None, sync_fixtures=True, force=False, max_fixtures=None):
+    parsed_start = date.fromisoformat(start_date) if start_date else None
+    try:
+        return algo_runner_service.build_slip_review_market_cache(
+            start_date=parsed_start,
+            days=days,
+            sync_fixtures=sync_fixtures,
+            force=force,
+            max_fixtures=max_fixtures,
+        )
+    except Exception as exc:
+        if self.request.retries < self.max_retries:
+            raise self.retry(exc=exc, countdown=300)
+        raise
+
+
+@shared_task(bind=True, ignore_result=False)
+def cleanup_slip_review_market_cache(self, grace_seconds=None, limit=None):
+    return algo_runner_service.cleanup_slip_review_market_cache(
+        grace_seconds=grace_seconds,
+        limit=limit,
+    )

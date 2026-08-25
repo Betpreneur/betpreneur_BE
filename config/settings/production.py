@@ -1,0 +1,19 @@
+"""Production hardening."""
+from decouple import Csv, config
+
+from .base import *
+
+DEBUG = False
+ALLOWED_HOSTS = config("DJANGO_ALLOWED_HOSTS", cast=Csv())
+
+SECURE_SSL_REDIRECT = config("SECURE_SSL_REDIRECT", default=True, cast=bool)
+SECURE_HSTS_SECONDS = config("SECURE_HSTS_SECONDS", default=31536000, cast=int)
+SECURE_HSTS_INCLUDE_SUBDOMAINS = True
+SECURE_HSTS_PRELOAD = True
+SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
+SESSION_COOKIE_SECURE = True
+CSRF_COOKIE_SECURE = True
+SECURE_CONTENT_TYPE_NOSNIFF = True
+X_FRAME_OPTIONS = "DENY"
+
+EVENT_BUS_IMMEDIATE = False

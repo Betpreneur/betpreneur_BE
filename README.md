@@ -2,14 +2,46 @@
 
 Django + DRF backend for Betpreneur GrindAlgo betting intelligence engine.
 
-## The Current Shape
+## Structure
 
-- `apps/accounts` - custom user model plus starter signup/login/me APIs.
-- `apps/algo` - algo run records, pick records, and embedded GrindAlgo runners.
-- `apps/bankroll` - bankroll snapshots.
-- `apps/reports` - generated report metadata.
-- `apps/integrations` - external integration configuration... All external API lives here.
-- `apps/algo/grindalgo` - embedded GrindAlgo runner powered by API-Football, imported by Django instead of running on Cloud Run/GCP.
+A modular monolith: eleven domain modules over a platform and integration
+layer, with the boundaries enforced by `import-linter` rather than convention.
+
+```
+betpreneur/
+├── platform/       technical; knows no domain
+├── integrations/   one adapter per external system (each ships fakes.py)
+└── modules/
+    ├── markets · identity          vocabulary and accounts
+    ├── catalog · billing           fixtures/providers, and money
+    ├── scoring                     statistics
+    ├── pricing · explanations      judgement (no tables)
+    ├── picks                       the daily product
+    ├── slips                       the paid product
+    └── settlement · analytics      grading and reporting
+```
+
+A module calls **down** through the callee's `api.py`; nothing reaches up.
+`apps/algo` still exists but holds **only migrations** — see
+[ADR 0002](docs/architecture/decisions/0002-state-only-model-moves.md).
+
+- [docs/architecture/modules.md](docs/architecture/modules.md) — what each module owns
+- [docs/architecture/dependency-rules.md](docs/architecture/dependency-rules.md) — the rules and how they are enforced
+- [docs/architecture/decisions/](docs/architecture/decisions/) — why it is shaped this way
+- [docs/runbooks/modular-monolith-cutover.md](docs/runbooks/modular-monolith-cutover.md) — deploying the migration
+
+## Verify
+
+`make verify` runs the gate that CI runs. All six must pass:
+
+| Check | Asserts |
+|---|---|
+| `verify-schema` | no DDL beyond `scripts/expected_schema_changes.txt` |
+| `verify-api` | the public OpenAPI schema is unchanged |
+| `verify-migrations` | no model drift from migration state |
+| `verify-imports` | 15 module-boundary contracts |
+| `verify-lint` | ruff clean |
+| `verify-tests` | the full suite |
 
 ## Setup
 
@@ -22,6 +54,8 @@ python manage.py migrate
 python manage.py createsuperuser
 python manage.py runserver
 ```
+
+Docker: `make up` (compose lives in `deploy/`, build context is the repo root).
 
 ## Starter Endpoints
 

@@ -2,6 +2,10 @@
 # Betpreneur Backend - Makefile
 # ================================================================
 
+# All docker commands run against deploy/compose.yaml, whose build context
+# is the repo root.
+COMPOSE = docker compose -f deploy/compose.yaml
+
 # Colors
 GREEN = \033[0;32m
 YELLOW = \033[0;33m
@@ -33,65 +37,109 @@ help:
 # Docker Compose Shortcuts
 # ------------------------------
 build:
-	docker compose build
+	$(COMPOSE) build
 
 up:
-	docker compose up -d
+	$(COMPOSE) up -d
 
 down:
-	docker compose down
+	$(COMPOSE) down
 
 restart:
-	docker compose restart
+	$(COMPOSE) restart
 
 logs:
-	docker compose logs
+	$(COMPOSE) logs
 
 logs-f:
-	docker compose logs -f
+	$(COMPOSE) logs -f
 
 # ------------------------------
 # Management Commands
 # ------------------------------
 migrate:
-	docker compose exec backend python manage.py migrate
+	$(COMPOSE) exec backend python manage.py migrate
 
 makemigrations:
-	docker compose exec backend python manage.py makemigrations
+	$(COMPOSE) exec backend python manage.py makemigrations
 
 createsuperuser:
-	docker compose exec backend python manage.py createsuperuser
+	$(COMPOSE) exec backend python manage.py createsuperuser
 
 shell:
-	docker compose exec backend python manage.py shell
+	$(COMPOSE) exec backend python manage.py shell
 
 collectstatic:
-	docker compose exec backend python manage.py collectstatic --noinput
+	$(COMPOSE) exec backend python manage.py collectstatic --noinput
 
 test:
-	docker compose exec backend python manage.py test
+	$(COMPOSE) exec backend python manage.py test
 
 # ------------------------------
 # Development
 # ------------------------------
 dev: down
 	@echo "$(YELLOW)Starting development server...$(NC)"
-	docker compose up -d db
+	$(COMPOSE) up -d db
 	@sleep 2
-	docker compose exec backend python manage.py migrate
-	docker compose up -d backend
+	$(COMPOSE) exec backend python manage.py migrate
+	$(COMPOSE) up -d backend
 
 # ------------------------------
 # Production
 # ------------------------------
 prod: down
 	@echo "$(YELLOW)Starting production server...$(NC)"
-	docker compose --profile prod up -d
+	$(COMPOSE) --profile prod up -d
 
 # ------------------------------
 # Cleanup
 # ------------------------------
 clean:
-	docker compose down -v
+	$(COMPOSE) down -v
 	rm -rf staticfiles media
 	@echo "$(YELLOW)Cleaned up!$(NC)"
+# ------------------------------
+# Refactor verification gate
+# ------------------------------
+# NOTE: .env points DB_HOST at a remote database. Every target below forces a
+# throwaway sqlite file so local tooling can never reach it.
+DJ_GUARD = DB_ENGINE=django.db.backends.sqlite3 DB_NAME=$(CURDIR)/.tooling.sqlite3 \
+           DB_HOST= DB_USER= DB_PASSWORD= DB_PORT=
+DJ = $(DJ_GUARD) .venv/bin/python manage.py
+
+.PHONY: verify verify-schema verify-api verify-migrations verify-imports verify-lint verify-tests
+
+## Full gate — run this at the end of every work package.
+verify: verify-schema verify-api verify-migrations verify-imports verify-lint verify-tests
+	@echo ""
+	@echo "GATE PASSED"
+
+## Schema built from migrations must match the base ref exactly.
+verify-schema:
+	@./scripts/verify_schema.sh
+
+## The public HTTP API must not move. Frozen for the whole refactor.
+verify-api:
+	@./scripts/verify_api.sh
+
+## Model definitions must match migration state — no un-generated changes.
+verify-migrations:
+	@echo "Checking migration state…"
+	@$(DJ) makemigrations --check --dry-run
+
+## Module boundaries: layer order, domain purity, integration isolation.
+verify-imports:
+	@echo "Checking import contracts…"
+	@.venv/bin/lint-imports
+
+## Lint. Pyflakes-level findings (undefined names, unused imports) are errors;
+## inherited style debt is listed in pyproject's ignore list.
+verify-lint:
+	@echo "Linting…"
+	@.venv/bin/ruff check betpreneur config
+
+## Full test suite (sqlite cannot clone in parallel under forkserver).
+verify-tests:
+	@echo "Running tests…"
+	@$(DJ) test

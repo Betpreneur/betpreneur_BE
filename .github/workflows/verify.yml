@@ -1,0 +1,75 @@
+name: verify
+
+# The modular-monolith gate. Six checks; all must pass.
+#
+# verify-schema and verify-api compare this branch against a base ref, so the
+# checkout needs full history (fetch-depth: 0) and the base branch fetched.
+
+on:
+  pull_request:
+  push:
+    branches: [main, dev]
+
+concurrency:
+  group: verify-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0        # verify-schema/api build a worktree of the base
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: pip-${{ runner.os }}-${{ hashFiles('requirements.txt') }}
+
+      - name: Install
+        run: |
+          # The gate's scripts and Makefile call .venv/bin/python by design, so
+          # CI builds the same layout rather than special-casing itself.
+          python -m venv .venv
+          .venv/bin/pip install --upgrade pip
+          .venv/bin/pip install -r requirements.txt
+
+      - name: Determine base ref
+        id: base
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            BASE="origin/${{ github.base_ref }}"
+          else
+            # On a push, compare against the previous commit on this branch —
+            # the point is to catch unintended drift, not to diff against self.
+            BASE="${{ github.event.before }}"
+            git cat-file -e "$BASE^{commit}" 2>/dev/null || BASE="HEAD~1"
+          fi
+          echo "ref=$BASE" >> "$GITHUB_OUTPUT"
+          echo "comparing against $BASE"
+
+      - name: Schema unchanged (except declared additions)
+        run: ./scripts/verify_schema.sh --base "${{ steps.base.outputs.ref }}"
+
+      - name: Public API unchanged
+        run: ./scripts/verify_api.sh --base "${{ steps.base.outputs.ref }}"
+
+      - name: Migration state consistent
+        run: make verify-migrations
+
+      - name: Module boundaries
+        run: make verify-imports
+
+      - name: Lint
+        run: make verify-lint
+
+      - name: Tests
+        run: make verify-tests

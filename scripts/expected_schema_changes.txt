@@ -1,0 +1,16 @@
+# Tables this branch adds on purpose, one per line.
+#
+# Everything in WP 0-6 was a pure package move with zero DDL, so the schema gate
+# demanded an empty diff. Deliberate schema changes go here so the gate keeps
+# failing on anything NOT listed — which is the part that actually protects you.
+#
+# Each entry needs a real migration and, for an existing database, a plan:
+# settlement_run is new, so it is created normally rather than faked.
+#
+# LIFECYCLE: entries are relative to whatever CI compares against — the PR's
+# base branch, or the previous commit on a push. Once a change is merged it
+# exists in the base too, so its entry stops matching anything and should be
+# removed. Leaving stale entries here quietly widens the hole the gate is
+# meant to close.
+
+settlement_run

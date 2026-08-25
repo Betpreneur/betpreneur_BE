@@ -1,0 +1,68 @@
+[project]
+name = "betpreneur"
+version = "0.1.0"
+requires-python = ">=3.12"
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+extend-exclude = [".venv", "*/migrations/*"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "C4", "DJ", "RUF"]
+ignore = [
+    "E501",    # line length is handled by the formatter
+    "B008",    # function call in default arg — common and fine in DRF
+    "RUF012",  # mutable class attrs; Django Meta/DRF use these everywhere
+    # Style debt inherited from code moved verbatim during the refactor. Each is
+    # a real cleanup, but changing them means editing logic that moved without
+    # behaviour change, so they are deferred rather than mixed into the move.
+    "B904",    # raise ... from err inside except
+    "B905",    # zip() without strict=
+    "B007",    # unused loop variable
+    "C408",    # dict() instead of a literal
+    "E731",    # lambda assigned to a name
+    "DJ012",   # Django model member ordering
+    "RUF001",  # ambiguous unicode in strings
+    "RUF005",  # list concat instead of unpacking
+    "RUF034",  # useless if-else
+    "RUF059",  # unused unpacked variable
+    "UP031",   # printf-style formatting
+    "UP035",   # deprecated typing imports
+    "RUF046",  # redundant int() around round()/floor()
+    "C414",    # redundant list() inside sorted()
+    "C416",    # comprehension that could be list()
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["betpreneur", "config", "apps"]
+section-order = ["future", "standard-library", "third-party", "first-party", "local-folder"]
+
+[tool.ruff.lint.per-file-ignores]
+# Settings modules re-export names that Django reads off the module; they look
+# unused to a linter but removing them breaks the app.
+"config/settings/*.py" = ["F401", "F403", "F405", "E402"]
+# Public facades exist to re-export. __all__ covers most of it, but be explicit.
+"betpreneur/modules/*/api.py" = ["F401"]
+"betpreneur/modules/*/contracts.py" = ["F401"]
+"betpreneur/modules/*/admin.py" = ["F401", "F403"]
+# The legacy grindalgo runner moved verbatim. Reformatting 4.5k lines of it
+# would bury any real change in noise; it is linted when it is decomposed.
+"betpreneur/modules/catalog/services/legacy_runner.py" = ["ALL"]
+"betpreneur/modules/analytics/auditor.py" = ["ALL"]
+"betpreneur/modules/picks/services/results.py" = ["ALL"]
+
+[tool.mypy]
+python_version = "3.12"
+warn_unused_ignores = true
+warn_redundant_casts = true
+ignore_missing_imports = true
+# domain/ is pure python with no framework magic, so it gets the strict treatment.
+[[tool.mypy.overrides]]
+module = "betpreneur.modules.*.domain.*"
+disallow_untyped_defs = true
+strict_equality = true
+
+[[tool.mypy.overrides]]
+module = "betpreneur.platform.types.*"
+disallow_untyped_defs = true
