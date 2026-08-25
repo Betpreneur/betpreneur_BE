@@ -4,7 +4,7 @@
 
 # All docker commands run against deploy/compose.yaml, whose build context
 # is the repo root.
-COMPOSE = docker compose -f deploy/compose.yaml
+COMPOSE = docker compose --project-directory . -f deploy/compose.yaml
 
 # Colors
 GREEN = \033[0;32m
