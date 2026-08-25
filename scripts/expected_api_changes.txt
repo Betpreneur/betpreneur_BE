@@ -1,0 +1,15 @@
+# Deliberate changes to the public OpenAPI schema, one JSON pointer fragment
+# per line. Anything NOT listed fails verify-api — that is the part that
+# protects you.
+#
+# The refactor itself changed nothing here; these are separate improvements.
+#
+# LIFECYCLE: entries are relative to whatever CI compares against (a PR's base
+# branch, or the previous commit). Once merged, a change exists in the base too
+# and its entry stops matching — remove it then, or the gate quietly narrows.
+
+# Six list/detail pairs shared an auto-generated operationId, which Spectacular
+# resolved with "_2" suffixes assigned by URL traversal order. That made SDK
+# method names unstable: reordering routes could swap them between the list and
+# detail endpoint. Now pinned explicitly. Paths and payloads are unchanged.
+operationId
