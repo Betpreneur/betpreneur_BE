@@ -52,22 +52,76 @@ Confirmed after migrating the production copy:
 
 ## Celery — the one thing that needs coordination
 
-Task names changed from `apps.algo.tasks.*` to `betpreneur.modules.<module>.tasks.*`.
-Queue names are unchanged, so the `docker-compose` workers need no edits.
+**Every task was renamed.** Queue names did not change, so the compose worker
+definitions need no edits — but a worker running the new code does not
+register `apps.algo.tasks.*`, and a message already queued under an old name
+will fail with `NotRegistered`.
 
-**Messages already queued under the old names will fail on the worker.** Drain
-the queues before cutover, or accept losing in-flight maintenance jobs — they
-are beat-scheduled (5-minutely and nightly), so a short gap is harmless.
+### Before deploying
 
-Renamed tasks:
+```bash
+# 1. See what is still queued under the old names.
+celery -A config inspect scheduled
+celery -A config inspect reserved
+redis-cli -u "$CELERY_BROKER_URL" llen algo_maintenance   # per queue
 
-| Old | New |
-|---|---|
+# 2. Let them drain, or purge if you accept losing in-flight maintenance work.
+#    Everything on these queues is beat-scheduled (5-minutely or nightly), so a
+#    short gap is harmless — but slip_review_* carries user-facing imports.
+celery -A config purge -Q algo_maintenance,algo_daily,algo_scoring,algo_llm,algo_statpal,algo_settlement
+
+# 3. Stop beat FIRST so nothing new is queued under old names.
+#    Then restart every worker and beat together — a mixed fleet will drop work
+#    in both directions.
+```
+
+Do not roll workers one at a time. Old workers cannot run new messages and new
+workers cannot run old ones, so a partial roll loses tasks whichever way it
+goes.
+
+### The full rename
+
+| `apps.algo.tasks.analyse_slip_review_leg` | `betpreneur.modules.slips.tasks.analyse_slip_review_leg` |
+| `apps.algo.tasks.build_slip_review_market_cache` | `betpreneur.modules.picks.tasks.build_slip_review_market_cache` |
+| `apps.algo.tasks.build_statpal_daily_cache` | `betpreneur.modules.catalog.tasks.build_statpal_daily_cache` |
+| `apps.algo.tasks.cleanup_slip_review_market_cache` | `betpreneur.modules.picks.tasks.cleanup_slip_review_market_cache` |
+| `apps.algo.tasks.expire_token_reservations` | `betpreneur.modules.billing.tasks.expire_token_reservations` |
+| `apps.algo.tasks.explain_picks_for_run` | `betpreneur.modules.picks.tasks.explain_picks_for_run` |
+| `apps.algo.tasks.finalize_slip_review_import` | `betpreneur.modules.slips.tasks.finalize_slip_review_import` |
+| `apps.algo.tasks.fit_score_models` | `betpreneur.modules.scoring.tasks.fit_score_models` |
 | `apps.algo.tasks.generate_daily_picks` | `betpreneur.modules.picks.tasks.generate_daily_picks` |
+| `apps.algo.tasks.import_slip_review` | `betpreneur.modules.slips.tasks.import_slip_review` |
+| `apps.algo.tasks.publish_daily_run` | `betpreneur.modules.picks.tasks.publish_daily_run` |
+| `apps.algo.tasks.recover_daily_run` | `betpreneur.modules.picks.tasks.recover_daily_run` |
+| `apps.algo.tasks.recover_stale_slip_reviews` | `betpreneur.modules.slips.tasks.recover_stale_slip_reviews` |
+| `apps.algo.tasks.refill_daily_free_tokens` | `betpreneur.modules.billing.tasks.refill_daily_free_tokens` |
+| `apps.algo.tasks.refresh_imminent_lineups` | `betpreneur.modules.scoring.tasks.refresh_imminent_lineups` |
+| `apps.algo.tasks.refresh_player_availability` | `betpreneur.modules.scoring.tasks.refresh_player_availability` |
+| `apps.algo.tasks.run_monthly_auditor` | `betpreneur.modules.analytics.tasks.run_monthly_auditor` |
+| `apps.algo.tasks.score_fixture_for_daily_run` | `betpreneur.modules.picks.tasks.score_fixture_for_daily_run` |
 | `apps.algo.tasks.settle_daily_results` | `betpreneur.modules.settlement.tasks.settle_daily_results` |
 | `apps.algo.tasks.settle_slip_selections` | `betpreneur.modules.settlement.tasks.settle_slip_selections` |
-| `apps.algo.tasks.refill_daily_free_tokens` | `betpreneur.modules.billing.tasks.refill_daily_free_tokens` |
-| …and the rest, per `config/celery/routes.py` | |
+| `apps.algo.tasks.sync_fixture_horizon` | `betpreneur.modules.catalog.tasks.sync_fixture_horizon` |
+
+## OpenAPI operation ids
+
+Six list/detail pairs previously shared an auto-generated `operationId`, which
+Spectacular resolved with `_2` suffixes assigned by URL traversal order — so
+reordering routes could silently swap an SDK method between the list and the
+detail endpoint. They are now pinned explicitly:
+
+| Endpoint | operationId |
+|---|---|
+| `GET /api/algo/games/` | `algo_games_list` (was `algo_games_retrieve`) |
+| `GET /api/algo/games/{match_id}/` | `algo_games_retrieve` (was `..._retrieve_2`) |
+| `GET /api/algo/picks/` | `algo_picks_list` (was `algo_picks_retrieve`) |
+| `GET /api/algo/picks/{pick_id}/` | `algo_picks_retrieve` (was `..._retrieve_2`) |
+| `GET /api/algo/slip-reviews/` | `algo_slip_reviews_list` (was `..._retrieve`) |
+| `GET /api/algo/slip-reviews/{review_id}/` | `algo_slip_reviews_retrieve` (was `..._retrieve_2`) |
+
+**Paths, parameters and payloads are unchanged** — nothing at runtime moves.
+Only a client that *generates an SDK from the schema* sees a difference, as
+renamed methods. Regenerate before deploying if you have one.
 
 ## Rollback
 

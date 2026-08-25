@@ -12,20 +12,13 @@ import asyncio
 
 from channels.testing import WebsocketCommunicator
 from django.contrib.auth import get_user_model
-from django.test import TransactionTestCase, override_settings
+from django.test import TransactionTestCase
 from rest_framework.test import APIClient
 from rest_framework_simplejwt.tokens import RefreshToken
 
 from betpreneur.modules.slips.models import SlipReview
 
 
-# CHANNEL_LAYERS is only defined when ENABLE_WEBSOCKETS is true at settings-load
-# time, so flipping the flag here is not enough — the in-memory layer has to be
-# supplied too. Redis is not involved.
-@override_settings(
-    ENABLE_WEBSOCKETS=True,
-    CHANNEL_LAYERS={"default": {"BACKEND": "channels.layers.InMemoryChannelLayer"}},
-)
 class SlipReviewWebsocketTests(TransactionTestCase):
     def setUp(self):
         self.user = get_user_model().objects.create_user(
@@ -65,10 +58,13 @@ class SlipReviewWebsocketTests(TransactionTestCase):
             frame = None
             if accepted:
                 try:
-                    frame = await asyncio.wait_for(comm.receive_json_from(), timeout=5)
+                    frame = await comm.receive_json_from(timeout=5)
                 except TimeoutError:
                     pass
-            await comm.disconnect()
+            try:
+                await comm.disconnect()
+            except asyncio.CancelledError:
+                pass
             return accepted, frame
 
         return asyncio.run(run())

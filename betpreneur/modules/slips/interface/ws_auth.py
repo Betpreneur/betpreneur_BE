@@ -1,30 +1,36 @@
-import hashlib
 import logging
+from types import SimpleNamespace
 from urllib.parse import parse_qs
 
-from channels.db import database_sync_to_async
-from django.contrib.auth.models import AnonymousUser
-from django.utils import timezone
+from django.core import signing
 
-from betpreneur.modules.slips.models import SlipReviewStreamToken
+from betpreneur.platform.config import env_int
 
 log = logging.getLogger(__name__)
 
+SLIP_REVIEW_STREAM_TICKET_SECONDS = env_int("SLIP_REVIEW_STREAM_TICKET_SECONDS", 30 * 60)
+SLIP_REVIEW_STREAM_TICKET_SALT = "betpreneur.slip-review.stream"
 
-@database_sync_to_async
+
 def _user_for_stream_ticket(ticket):
-    token_hash = hashlib.sha256(str(ticket or "").encode("utf-8")).hexdigest()
-    stream_token = (
-        SlipReviewStreamToken.objects.select_related("user")
-        .filter(token_hash=token_hash, expires_at__gt=timezone.now())
-        .first()
-    )
-    if not stream_token:
+    try:
+        payload = signing.loads(
+            ticket,
+            salt=SLIP_REVIEW_STREAM_TICKET_SALT,
+            max_age=max(60, SLIP_REVIEW_STREAM_TICKET_SECONDS),
+        )
+    except signing.BadSignature:
         log.warning("Websocket stream ticket authentication failed")
-        return AnonymousUser(), None
-    stream_token.last_used_at = timezone.now()
-    stream_token.save(update_fields=["last_used_at"])
-    return stream_token.user, stream_token.review_id
+        return None, None
+
+    try:
+        user_id = int(payload["user_id"])
+        review_id = int(payload["review_id"])
+    except (KeyError, TypeError, ValueError):
+        log.warning("Websocket stream ticket payload was malformed")
+        return None, None
+
+    return SimpleNamespace(id=user_id, is_authenticated=True), review_id
 
 
 class JwtAuthMiddleware:
@@ -34,13 +40,17 @@ class JwtAuthMiddleware:
     async def __call__(self, scope, receive, send):
         query = parse_qs(scope.get("query_string", b"").decode())
         ticket = (query.get("ticket") or [None])[0]
-        if ticket:
-            user, review_id = await _user_for_stream_ticket(ticket)
-            scope["user"] = user
-            scope["slip_review_stream_review_id"] = review_id
-        else:
-            scope["user"] = AnonymousUser()
-            scope["slip_review_stream_review_id"] = None
+        if not ticket:
+            await send({"type": "websocket.close", "code": 4401})
+            return
+
+        user, review_id = _user_for_stream_ticket(ticket)
+        if not user or not user.is_authenticated:
+            await send({"type": "websocket.close", "code": 4401})
+            return
+
+        scope["user"] = user
+        scope["slip_review_stream_review_id"] = review_id
         return await self.app(scope, receive, send)
 
 

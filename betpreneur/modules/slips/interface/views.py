@@ -6,11 +6,11 @@ import hashlib
 import json
 import logging
 import os
-import secrets
 import time
 from datetime import datetime, timedelta
 
 from django.conf import settings
+from django.core import signing
 from django.db import IntegrityError
 from django.db.models import Count, Prefetch, Q
 from django.shortcuts import get_object_or_404
@@ -203,6 +203,7 @@ SLIP_REVIEW_DEEPSEEK_MAX_GAMES = _env_int("SLIP_REVIEW_DEEPSEEK_MAX_GAMES", 5)
 
 
 SLIP_REVIEW_STREAM_TICKET_SECONDS = _env_int("SLIP_REVIEW_STREAM_TICKET_SECONDS", 30 * 60)
+SLIP_REVIEW_STREAM_TICKET_SALT = "betpreneur.slip-review.stream"
 
 
 
@@ -3108,6 +3109,7 @@ class SlipReviewListView(APIView):
     serializer_class = SlipReviewListResponseSerializer
 
     @extend_schema(
+        operation_id="algo_slip_reviews_list",
         summary="List slip reviews",
         description=(
             "Authenticated user endpoint. Returns compact previous manual/bookmaker slip reviews for the current user: "
@@ -3218,6 +3220,7 @@ class SlipReviewDetailView(APIView):
     serializer_class = SlipReviewDetailResponseSerializer
 
     @extend_schema(
+        operation_id="algo_slip_reviews_retrieve",
         summary="Slip review detail",
         description=(
             "Authenticated user endpoint. Returns one previous slip review. Use `?view=public` for the "
@@ -3346,7 +3349,10 @@ class SlipReviewStreamTokenView(APIView):
         )
         now = timezone.now()
         expires_at = now + timedelta(seconds=max(60, SLIP_REVIEW_STREAM_TICKET_SECONDS))
-        ticket = secrets.token_urlsafe(32)
+        ticket = signing.dumps(
+            {"user_id": request.user.id, "review_id": review.id},
+            salt=SLIP_REVIEW_STREAM_TICKET_SALT,
+        )
         SlipReviewStreamToken.objects.filter(expires_at__lt=now).delete()
         SlipReviewStreamToken.objects.create(
             review=review,

@@ -18,6 +18,16 @@ EVENT_BUS_IMMEDIATE = True
 
 PASSWORD_HASHERS = ["django.contrib.auth.hashers.MD5PasswordHasher"]
 
+# Websocket tests need Channels wired at settings-load time. Keeping the test
+# layer in memory avoids Redis while matching the production ASGI shape.
+ENABLE_WEBSOCKETS = True
+CHANNEL_LAYERS = {
+    "default": {
+        "BACKEND": "channels.layers.InMemoryChannelLayer",
+    }
+}
+SLIP_REVIEW_REDIS_PROGRESS_ENABLED = False
+
 CACHES = {
     "default": {
         "BACKEND": "django.core.cache.backends.locmem.LocMemCache",

@@ -1331,6 +1331,7 @@ class DailyPicksView(APIView):
     serializer_class = DailyPicksResponseSerializer
 
     @extend_schema(
+        operation_id="algo_picks_list",
         summary="Daily picks",
         description="Authenticated user endpoint. Returns the published picks for a matchday. Defaults to today in WAT.",
         tags=["Picks"],
@@ -1412,6 +1413,7 @@ class GamesView(APIView):
     serializer_class = GameListResponseSerializer
 
     @extend_schema(
+        operation_id="algo_games_list",
         summary="All covered games",
         description="Authenticated user endpoint. Returns every fixture scored for the covered leagues on a matchday, including each game's best available market and any official published pick.",
         tags=["Games"],
@@ -1432,6 +1434,7 @@ class GameDetailView(APIView):
     serializer_class = GameDetailResponseSerializer
 
     @extend_schema(
+        operation_id="algo_games_retrieve",
         summary="Game analysis detail",
         description="Authenticated user endpoint. Returns full model context for one scored fixture, including all markets, fixture context, forms, team news, insights, and official picks if published.",
         tags=["Games"],
@@ -1453,6 +1456,7 @@ class PickDetailView(APIView):
     serializer_class = PickDetailResponseSerializer
 
     @extend_schema(
+        operation_id="algo_picks_retrieve",
         summary="Pick detail",
         description="Authenticated user endpoint. Returns one published pick with fixture context, market context, model summary, and historical performance slices.",
         tags=["Picks"],

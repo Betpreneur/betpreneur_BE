@@ -38,11 +38,32 @@ schema "$WORK/base" base
 schema "$ROOT"      head
 
 echo
-if diff -u "$WORK/base.json" "$WORK/head.json" > "$WORK/api.diff"; then
+diff -u "$WORK/base.json" "$WORK/head.json" > "$WORK/api.diff" && {
   echo "PASS  public API identical to '$BASE'"
   exit 0
+}
+
+# Drop lines matching a declared change. Anything left is unexpected.
+EXPECTED="$ROOT/scripts/expected_api_changes.txt"
+if [[ -f "$EXPECTED" ]]; then
+  PATTERNS=$(grep -vE '^\s*(#|$)' "$EXPECTED" || true)
+else
+  PATTERNS=""
 fi
-echo "FAIL  public API differs from '$BASE':"
-sed 's/^/  /' "$WORK/api.diff" | head -60
-echo "  ($(grep -c '^[+-]' "$WORK/api.diff") changed lines)"
+grep '^[+-]' "$WORK/api.diff" | grep -v '^[+-][+-]' > "$WORK/changed.txt" || true
+if [[ -n "$PATTERNS" ]]; then
+  grep -vFf <(echo "$PATTERNS") "$WORK/changed.txt" > "$WORK/unexpected.txt" || true
+else
+  cp "$WORK/changed.txt" "$WORK/unexpected.txt"
+fi
+
+if [[ ! -s "$WORK/unexpected.txt" ]]; then
+  echo "PASS  only declared changes ($(echo $PATTERNS | tr '\n' ' ')) differ from '$BASE'"
+  exit 0
+fi
+echo "FAIL  UNDECLARED public API change vs '$BASE':"
+echo
+sed 's/^/  /' "$WORK/unexpected.txt" | head -40
+echo
+echo "  If deliberate, add a matching line to scripts/expected_api_changes.txt."
 exit 1
