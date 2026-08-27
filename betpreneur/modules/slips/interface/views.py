@@ -2606,7 +2606,7 @@ def _analyse_manual_selection(
             odds=selection.get("odds"),
         )
         replacement_market = _replacement_market_for_slip(
-            game,
+            scoring_game,
             selected_market=submitted_market,
             generated_markets=generated_markets,
             allow_safer_fallback=True,
@@ -2660,7 +2660,7 @@ def _analyse_manual_selection(
     best_market = with_match_checker_advisory(best_market)
     recommended_market = with_match_checker_advisory(recommended_market)
     replacement_market = _replacement_market_for_slip(
-        game,
+        scoring_game,
         selected_market=selected_market,
         generated_markets=generated_markets,
         allow_safer_fallback=True,
