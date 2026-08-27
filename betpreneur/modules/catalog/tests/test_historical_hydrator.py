@@ -4,6 +4,7 @@ from django.test import SimpleTestCase, TestCase
 
 from betpreneur.modules.catalog.api import (
     DataCoverage,
+    HistoricalHydrationScope,
     HistoricalTeamHydrator,
     TeamProfile,
     TeamSeasonProfile,
@@ -120,6 +121,18 @@ class HistoricalHydratorPureTests(SimpleTestCase):
 
         self.assertEqual(stats["goals_scored"], 102)
         self.assertEqual(stats["goals_allowed"], 39)
+
+    def test_statpal_current_season_omits_season_query_param(self):
+        league = TOP_EUROPEAN_INTELLIGENCE_LEAGUES[0]
+        scope = HistoricalHydrationScope(league=league, season=league.current_season)
+
+        self.assertIsNone(HistoricalTeamHydrator._statpal_season_params(scope))
+
+    def test_statpal_previous_season_keeps_season_query_param(self):
+        league = TOP_EUROPEAN_INTELLIGENCE_LEAGUES[0]
+        scope = HistoricalHydrationScope(league=league, season=league.previous_season)
+
+        self.assertEqual(HistoricalTeamHydrator._statpal_season_params(scope), {"season": league.previous_season})
 
 
 class HistoricalHydratorPersistenceTests(TestCase):

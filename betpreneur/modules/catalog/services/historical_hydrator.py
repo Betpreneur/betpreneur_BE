@@ -88,7 +88,7 @@ class HistoricalTeamHydrator:
             try:
                 standings_payload = self.client.soccer_league_standings(
                     statpal_league_id,
-                    params={"season": scope.season},
+                    params=self._statpal_season_params(scope),
                 )
                 standings = [
                     row
@@ -312,6 +312,12 @@ class HistoricalTeamHydrator:
         if row_season and row_season != str(season):
             return False
         return bool(row.get("team_id") or row.get("team_name"))
+
+    @staticmethod
+    def _statpal_season_params(scope: HistoricalHydrationScope) -> dict[str, str] | None:
+        if str(scope.season or "") == str(scope.league.current_season or ""):
+            return None
+        return {"season": str(scope.season)}
 
     def _api_football_standings(self, scope: HistoricalHydrationScope) -> list[dict[str, Any]]:
         response = aps_get(

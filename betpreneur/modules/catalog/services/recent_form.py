@@ -151,7 +151,7 @@ class RecentFormBuilder:
         if scope.league.statpal_league_id:
             payload = self.client.soccer_league_matches(
                 scope.league.statpal_league_id,
-                params={"season": scope.season},
+                params=self._statpal_season_params(scope),
             )
             fixtures = normalize_daily_matches(payload, target_date=timezone.localdate())
             provider_league_id = str(scope.league.statpal_league_id)
@@ -439,6 +439,12 @@ class RecentFormBuilder:
                 }
             )
         return rows
+
+    @staticmethod
+    def _statpal_season_params(scope: RecentFormScope) -> dict[str, str] | None:
+        if str(scope.season or "") == str(scope.league.current_season or ""):
+            return None
+        return {"season": str(scope.season)}
 
     @staticmethod
     def _api_football_season(season: str) -> str:

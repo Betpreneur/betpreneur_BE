@@ -6,6 +6,7 @@ from betpreneur.modules.catalog.api import (
     DataCoverage,
     FixtureCache,
     RecentFormBuilder,
+    RecentFormScope,
     TeamProfile,
     TeamRecentFormProfile,
     TeamSeasonProfile,
@@ -36,6 +37,16 @@ class RecentFormBuilderTests(TestCase):
             matches_played=20,
             data_quality=TeamSeasonProfile.DataQuality.STRONG,
         )
+
+    def test_statpal_current_season_omits_season_query_param(self):
+        scope = RecentFormScope(league=self.league, season=self.league.current_season)
+
+        self.assertIsNone(RecentFormBuilder._statpal_season_params(scope))
+
+    def test_statpal_previous_season_keeps_season_query_param(self):
+        scope = RecentFormScope(league=self.league, season=self.league.previous_season)
+
+        self.assertEqual(RecentFormBuilder._statpal_season_params(scope), {"season": self.league.previous_season})
 
     def _fixture(self, day, home, away, home_id, away_id, hg, ag, *, status="Finished", team_stats=None):
         FixtureCache.objects.create(
