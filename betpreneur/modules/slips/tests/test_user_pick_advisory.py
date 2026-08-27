@@ -240,6 +240,42 @@ class UserPickAdvisoryTests(SimpleTestCase):
         self.assertEqual(replacement["market"], "Over 1.5")
         self.assertEqual(replacement["replacement_scope"], "comparable_market")
 
+    def test_cross_family_replacement_prefers_meaningful_market_over_broad_safe_pick(self):
+        selected = {
+            "market": "Away Win",
+            "advisory_score": 28,
+            "advisory_status": "avoid",
+            "market_taxonomy": describe_market("Away Win").to_dict(),
+        }
+        generated = [
+            {
+                "market": "Over 1.5",
+                "advisory_score": 83,
+                "advisory_status": "strong",
+                "market_taxonomy": describe_market("Over 1.5").to_dict(),
+                "market_capability": {"data_quality": "medium"},
+                "advisory_evidence": {"expected_goals": 3.2, "line": 1.5, "selection": "over"},
+            },
+            {
+                "market": "Over 2.5",
+                "advisory_score": 69,
+                "advisory_status": "playable",
+                "market_taxonomy": describe_market("Over 2.5").to_dict(),
+                "market_capability": {"data_quality": "medium"},
+                "advisory_evidence": {"expected_goals": 3.2, "line": 2.5, "selection": "over"},
+            },
+        ]
+
+        replacement = _replacement_market_for_slip(
+            {"markets": []},
+            selected_market=selected,
+            generated_markets=generated,
+            allow_safer_fallback=True,
+        )
+
+        self.assertEqual(replacement["market"], "Over 2.5")
+        self.assertEqual(replacement["replacement_scope"], "broad_fallback")
+
     def test_result_replacement_preserves_selected_team_thesis(self):
         selected = {
             "market": "Away Win",
@@ -1646,6 +1682,39 @@ class UserPickAdvisoryTests(SimpleTestCase):
         )
 
         self.assertIn("Stored home team profile hit Corners Over 7.5 in 4 of 5 tracked matches (80.0%).", evidence)
+
+    def test_replacement_evidence_uses_league_profile_only_when_model_context_is_missing(self):
+        pick = _public_market_pick(
+            {
+                "market": "Over 2.5",
+                "advisory_score": 70,
+                "odds": 1.71,
+                "market_taxonomy": describe_market("Over 2.5").to_dict(),
+                "advisory_evidence": {
+                    "expected_goals": 3.2,
+                    "line": 2.5,
+                    "selection": "over",
+                    "team_intelligence_source": "stored_league_market_profile",
+                    "team_intelligence_profile": {
+                        "market": "Over 2.5",
+                        "scope": "league",
+                        "attempts": 385,
+                        "wins": 216,
+                        "hit_rate": 56.1,
+                    },
+                },
+            }
+        )
+
+        evidence = _stats_backed_evidence(
+            {"user_pick": {"market": "Away Win", "confidence_score": 28, "odds": 1.7}},
+            market_payload=pick,
+            owned_market_only=True,
+        )
+
+        joined = " ".join(evidence)
+        self.assertIn("Expected goals", joined)
+        self.assertNotIn("Stored league profile", joined)
 
     def test_goal_replacement_evidence_does_not_reuse_corner_reasons(self):
         selection = {

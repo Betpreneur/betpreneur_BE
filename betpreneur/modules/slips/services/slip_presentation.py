@@ -41,6 +41,7 @@ from betpreneur.modules.slips.domain.slip_analysis import (
     _select_ranked_replacement,
     _simple_pick_verdict,
     enrich_market_with_team_intelligence,
+    is_broad_safe_cross_family_replacement,
 )
 
 
@@ -121,6 +122,14 @@ def _replacement_market_for_slip(
         for market in markets
         if _market_was_assessed(market) and _replacement_candidate_is_eligible(market)
     ]
+    if selected_market:
+        meaningful_candidates = [
+            market
+            for market in candidates
+            if not is_broad_safe_cross_family_replacement(selected_market, market)
+        ]
+        if meaningful_candidates:
+            candidates = meaningful_candidates
     if not candidates:
         return None
     if selected_market:
@@ -251,7 +260,8 @@ def _stats_backed_evidence(selection, *, market_payload=None, include_context=Tr
     if owned_market_only:
         evidence.extend(market_owned_model_lines(market_payload, selected_evidence))
         profile_line = _team_intelligence_profile_line(selected_evidence, market_payload=market_payload)
-        if profile_line:
+        profile_source = str(selected_evidence.get("team_intelligence_source") or "")
+        if profile_line and ("stored_league" not in profile_source or not evidence):
             evidence.append(profile_line)
         h2h_line = _h2h_evidence_line(selected_evidence)
         if h2h_line:

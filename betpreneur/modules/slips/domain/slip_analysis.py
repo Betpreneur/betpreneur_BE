@@ -310,6 +310,28 @@ MINIMUM_EV_LIFT = 0.03
 SAME_FAMILY_CLOSE_RANKING_MARGIN = 8.0
 
 
+def _is_broad_safe_market(market):
+    taxonomy = (market or {}).get("market_taxonomy") or describe_market((market or {}).get("market")).to_dict()
+    family = taxonomy.get("family") or ""
+    side = str(taxonomy.get("selection") or taxonomy.get("side") or "").lower()
+    line = float_or_none(taxonomy.get("line"))
+    if family == "double_chance":
+        return True
+    if family == "total_goals" and side == "over" and line is not None and line <= 1.5:
+        return True
+    if family == "total_goals" and side == "under" and line is not None and line >= 4.5:
+        return True
+    return False
+
+
+def is_broad_safe_cross_family_replacement(selected_market, candidate):
+    if not selected_market or not candidate:
+        return False
+    if replacement_scope(selected_market, candidate) != "broad_fallback":
+        return False
+    return _is_broad_safe_market(candidate)
+
+
 def _is_early_payout_market(market):
     """SportyBet 1UP/2UP: paid out as soon as the side goes ahead."""
     taxonomy = (market or {}).get("market_taxonomy")
@@ -481,7 +503,7 @@ def _team_intelligence_market_fit(market, team_intelligence):
     taxonomy = (market or {}).get("market_taxonomy") or describe_market((market or {}).get("market")).to_dict()
     family = taxonomy.get("family") or ""
     market_name = (market or {}).get("market") or taxonomy.get("canonical") or ""
-    candidates = []
+    team_candidates = []
     for label, profile in _team_intelligence_profiles_for_market(taxonomy, team_intelligence):
         for item in profile.get("market_profiles") or []:
             if item.get("market_family") != family:
@@ -491,13 +513,17 @@ def _team_intelligence_market_fit(market, team_intelligence):
                 continue
             score = _profile_fit_from_market_profile(item, exact=exact)
             if score is not None:
-                candidates.append(
+                team_candidates.append(
                     {
                         "score": score,
                         "source": f"stored_{label}_team_market_profile",
                         "profile": _compact_team_intelligence_profile(item),
                     }
                 )
+    if team_candidates:
+        return max(team_candidates, key=lambda item: item["score"])
+
+    league_candidates = []
     league = (team_intelligence or {}).get("league") or {}
     for item in league.get("market_profiles") or []:
         if item.get("market_family") != family:
@@ -507,16 +533,16 @@ def _team_intelligence_market_fit(market, team_intelligence):
             continue
         score = _profile_fit_from_market_profile(item, exact=exact, league=True)
         if score is not None:
-            candidates.append(
+            league_candidates.append(
                 {
                     "score": score,
                     "source": "stored_league_market_profile",
                     "profile": _compact_team_intelligence_profile(item),
                 }
             )
-    if not candidates:
+    if not league_candidates:
         return None
-    return max(candidates, key=lambda item: item["score"])
+    return max(league_candidates, key=lambda item: item["score"])
 
 
 def _team_intelligence_profiles_for_market(taxonomy, team_intelligence):
@@ -727,6 +753,10 @@ def _replacement_is_meaningfully_better(selected_market, replacement_market):
     selected_score = float_or_none(selected_market.get("advisory_score")) or float(selected_market.get("display_score") or 0)
     replacement_score = float_or_none(replacement_market.get("advisory_score")) or float(replacement_market.get("display_score") or 0)
     scope = replacement_market.get("replacement_scope") or replacement_scope(selected_market, replacement_market)
+    if scope == "broad_fallback" and _is_broad_safe_market(replacement_market):
+        fit = market_profile_fit_score(replacement_market)
+        if replacement_score < 75 or fit is None or fit < 82:
+            return False
     minimum_score = 58 if scope == "comparable_market" else 60
     minimum_lift = 4 if scope == "comparable_market" else 6
 
@@ -776,6 +806,10 @@ def _replacement_is_supported_fit(selected_market, replacement_market):
     scope = replacement_market.get("replacement_scope") or replacement_scope(selected_market, replacement_market)
     if scope == "broad_fallback" and not allows_broad_replacement(selected_market):
         return False
+    if scope == "broad_fallback" and _is_broad_safe_market(replacement_market):
+        fit = market_profile_fit_score(replacement_market)
+        if replacement_score < 75 or fit is None or fit < 82:
+            return False
     selected_ev = float_or_none(selected_market.get("ev"))
     if selected_ev is None:
         selected_ev = _market_expected_value(selected_market)
