@@ -99,7 +99,7 @@ class TeamIntelligenceDebugApiTests(TestCase):
             league_name="Premier League",
             season="2026-2027",
             status=DataCoverage.Status.FRESH,
-            score=92,
+            metadata={"confidence": 92},
             last_success_at=now,
         )
 

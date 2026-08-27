@@ -142,7 +142,6 @@ class TeamIntelligenceBackfillService:
             for row in coverage.only("metadata")
             if isinstance(row.metadata, dict) and row.metadata.get("confidence") is not None
         ]
-        score_values = [float(value) for value in coverage.values_list("score", flat=True) if value is not None]
         return json_safe(
             {
                 "coverage_counts": coverage_counts,
@@ -150,7 +149,7 @@ class TeamIntelligenceBackfillService:
                 "missing_market_families": missing_families,
                 "profile_confidence": {
                     "average": round(sum(confidence_values) / len(confidence_values), 1) if confidence_values else 0.0,
-                    "average_coverage_score": round(sum(score_values) / len(score_values), 1) if score_values else 0.0,
+                    "samples": len(confidence_values),
                 },
             }
         )

@@ -126,7 +126,7 @@ class TeamIntelligenceDebugService:
             "league_name": row.league_name,
             "season": row.season,
             "status": row.status,
-            "score": row.score,
+            "confidence": row.metadata.get("confidence") if isinstance(row.metadata, dict) else None,
             "freshness_seconds": row.freshness_seconds,
             "available_requirements": row.available_requirements,
             "missing_requirements": row.missing_requirements,
