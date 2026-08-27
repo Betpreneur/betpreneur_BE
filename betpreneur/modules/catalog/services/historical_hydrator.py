@@ -424,7 +424,7 @@ class HistoricalTeamHydrator:
         return TeamSeasonProfile.DataQuality.MISSING
 
     @staticmethod
-    def _api_football_season(self, season: str) -> str:
+    def _api_football_season(season: str) -> str:
         return str(season or "").replace("/", "-").split("-", 1)[0]
 
     def _save_coverage(self, profile: TeamSeasonProfile, *, team_error: str = "", provider: str = "statpal") -> None:
