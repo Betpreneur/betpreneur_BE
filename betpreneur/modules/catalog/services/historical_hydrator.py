@@ -357,16 +357,20 @@ class HistoricalTeamHydrator:
     @classmethod
     def _api_football_scope_stats(cls, stats: dict[str, Any]) -> dict[str, Any]:
         goals = stats.get("goals") if isinstance(stats.get("goals"), dict) else {}
-        goals_for = goals.get("for") if isinstance(goals.get("for"), dict) else {}
-        goals_against = goals.get("against") if isinstance(goals.get("against"), dict) else {}
         return {
             "games_played": cls._int(stats.get("played")),
             "wins": cls._int(stats.get("win")),
             "draws": cls._int(stats.get("draw")),
             "losses": cls._int(stats.get("lose")),
-            "goals_scored": cls._num(goals_for.get("total")),
-            "goals_allowed": cls._num(goals_against.get("total")),
+            "goals_scored": cls._api_football_goal_total(goals.get("for")),
+            "goals_allowed": cls._api_football_goal_total(goals.get("against")),
         }
+
+    @classmethod
+    def _api_football_goal_total(cls, value: Any) -> float | None:
+        if isinstance(value, dict):
+            return cls._num(value.get("total"))
+        return cls._num(value)
 
     @staticmethod
     def _team_league_stats_row(

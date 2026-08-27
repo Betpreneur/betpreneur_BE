@@ -91,6 +91,36 @@ class HistoricalHydratorPureTests(SimpleTestCase):
             },
         )
 
+    def test_api_football_scope_stats_accepts_flat_goal_totals(self):
+        stats = HistoricalTeamHydrator._api_football_scope_stats(
+            {
+                "played": 38,
+                "win": 26,
+                "draw": 7,
+                "lose": 5,
+                "goals": {"for": 71, "against": 27},
+            }
+        )
+
+        self.assertEqual(stats["games_played"], 38)
+        self.assertEqual(stats["wins"], 26)
+        self.assertEqual(stats["goals_scored"], 71)
+        self.assertEqual(stats["goals_allowed"], 27)
+
+    def test_api_football_scope_stats_accepts_nested_goal_totals(self):
+        stats = HistoricalTeamHydrator._api_football_scope_stats(
+            {
+                "played": 38,
+                "goals": {
+                    "for": {"total": 102},
+                    "against": {"total": 39},
+                },
+            }
+        )
+
+        self.assertEqual(stats["goals_scored"], 102)
+        self.assertEqual(stats["goals_allowed"], 39)
+
 
 class HistoricalHydratorPersistenceTests(TestCase):
     def test_hydrate_scope_stores_team_identity_profile_and_coverage(self):
@@ -147,24 +177,15 @@ class HistoricalHydratorPersistenceTests(TestCase):
                                     "win": 28,
                                     "draw": 4,
                                     "lose": 6,
-                                    "goals": {
-                                        "for": {"total": 102},
-                                        "against": {"total": 39},
-                                    },
+                                    "goals": {"for": 102, "against": 39},
                                 },
                                 "home": {
                                     "played": 19,
-                                    "goals": {
-                                        "for": {"total": 55},
-                                        "against": {"total": 18},
-                                    },
+                                    "goals": {"for": 55, "against": 18},
                                 },
                                 "away": {
                                     "played": 19,
-                                    "goals": {
-                                        "for": {"total": 47},
-                                        "against": {"total": 21},
-                                    },
+                                    "goals": {"for": 47, "against": 21},
                                 },
                             }
                         ]
@@ -186,4 +207,10 @@ class HistoricalHydratorPersistenceTests(TestCase):
         profile = TeamSeasonProfile.objects.get(team__canonical_normalized="barcelona")
         self.assertEqual(profile.source, "api_football")
         self.assertEqual(profile.matches_played, 38)
+        self.assertEqual(profile.goals_for, 102)
+        self.assertEqual(profile.goals_against, 39)
+        self.assertEqual(profile.home_goals_for, 55)
+        self.assertEqual(profile.home_goals_against, 18)
+        self.assertEqual(profile.away_goals_for, 47)
+        self.assertEqual(profile.away_goals_against, 21)
         self.assertEqual(profile.provider_ids["api_football"]["team_id"], "529")
