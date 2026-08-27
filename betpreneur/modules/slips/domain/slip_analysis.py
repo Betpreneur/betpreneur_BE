@@ -144,8 +144,6 @@ def _generated_market_names_for_family(descriptor):
             "DC: 12",
             "DNB Home",
             "DNB Away",
-            "AH Home +0.5",
-            "AH Away +0.5",
         ]
     if family == "btts":
         return ["GG / BTTS Yes", "BTTS No"]
@@ -178,8 +176,6 @@ FIXTURE_WIDE_RECOMMENDATION_MARKETS = (
     "DC: 12",
     "DNB Home",
     "DNB Away",
-    "AH Home +0.5",
-    "AH Away +0.5",
     # Full-match goals and BTTS
     "Over 1.5",
     "Over 2.5",
@@ -565,6 +561,9 @@ def _compact_team_intelligence_profile(profile):
         "market": profile.get("market"),
         "scope": profile.get("scope"),
         "attempts": profile.get("attempts"),
+        "wins": profile.get("wins"),
+        "losses": profile.get("losses"),
+        "voids": profile.get("voids"),
         "hit_rate": profile.get("hit_rate"),
         "confidence": profile.get("confidence"),
         "data_quality": profile.get("data_quality"),
@@ -622,7 +621,7 @@ def _blocked_slip_recommendation_market(market):
     if not descriptor.recognized:
         return False
     if descriptor.family in {"asian_handicap", "handicap"}:
-        return False
+        return True
     line = float_or_none(descriptor.line)
     return descriptor.side == "over" and line is not None and abs(line - 0.5) < 0.001
 

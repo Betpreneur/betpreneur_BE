@@ -173,6 +173,69 @@ def _stat_line_from_form(label, form):
     return format_game_form_line(label, form) + "."
 
 
+def _team_intelligence_profile_line(evidence, *, market_payload=None):
+    profile = (evidence or {}).get("team_intelligence_profile")
+    if not isinstance(profile, dict):
+        return ""
+    attempts = profile.get("attempts")
+    wins = profile.get("wins")
+    hit_rate = profile.get("hit_rate")
+    try:
+        attempts = int(attempts)
+    except (TypeError, ValueError):
+        attempts = 0
+    try:
+        wins = int(wins)
+    except (TypeError, ValueError):
+        wins = None
+    try:
+        hit_rate = round(float(hit_rate), 1)
+    except (TypeError, ValueError):
+        hit_rate = None
+    if attempts <= 0:
+        return ""
+    market = profile.get("market") or (market_payload or {}).get("market") or "this market"
+    scope = str(profile.get("scope") or "all").replace("_", " ").lower()
+    source = str((evidence or {}).get("team_intelligence_source") or "")
+    if "league" in source:
+        label = "league profile"
+    elif scope in {"home", "away"}:
+        label = f"{scope} team profile"
+    else:
+        label = "team profile"
+    if wins is not None:
+        rate = f" ({hit_rate}%)" if hit_rate is not None else ""
+        return f"Stored {label} hit {market} in {wins} of {attempts} tracked matches{rate}."
+    if hit_rate is not None:
+        return f"Stored {label} shows a {hit_rate}% hit rate for {market} across {attempts} tracked matches."
+    return ""
+
+
+def _h2h_evidence_line(evidence):
+    evidence = evidence or {}
+    statpal = evidence.get("statpal") if isinstance(evidence.get("statpal"), dict) else {}
+    h2h = evidence.get("h2h") if isinstance(evidence.get("h2h"), dict) else statpal.get("h2h") if isinstance(statpal.get("h2h"), dict) else {}
+    for payload in (h2h, evidence, statpal):
+        if not isinstance(payload, dict):
+            continue
+        games = payload.get("h2h_games") or payload.get("games")
+        try:
+            games = int(games)
+        except (TypeError, ValueError):
+            games = 0
+        if games <= 0:
+            continue
+        avg_goals = payload.get("h2h_avg_goals") or payload.get("avg_goals")
+        try:
+            avg_goals = round(float(avg_goals), 2)
+        except (TypeError, ValueError):
+            avg_goals = None
+        if avg_goals is not None:
+            return f"Head-to-head sample: {games} meetings averaged {avg_goals} goals."
+        return f"Head-to-head sample includes {games} tracked meetings."
+    return ""
+
+
 def _stats_backed_evidence(selection, *, market_payload=None, include_context=True, owned_market_only=False):
     market_payload = market_payload or {}
     evidence = []
@@ -187,6 +250,12 @@ def _stats_backed_evidence(selection, *, market_payload=None, include_context=Tr
     )
     if owned_market_only:
         evidence.extend(market_owned_model_lines(market_payload, selected_evidence))
+        profile_line = _team_intelligence_profile_line(selected_evidence, market_payload=market_payload)
+        if profile_line:
+            evidence.append(profile_line)
+        h2h_line = _h2h_evidence_line(selected_evidence)
+        if h2h_line:
+            evidence.append(h2h_line)
     else:
         for label, form in (
             ("Home", (selection or {}).get("home_recent_form")),

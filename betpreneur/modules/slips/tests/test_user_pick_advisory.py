@@ -1209,10 +1209,11 @@ class UserPickAdvisoryTests(SimpleTestCase):
 
         self.assertIsNone(replacement)
 
-    def test_recommendation_policy_does_not_block_handicap_plus_half(self):
+    def test_recommendation_policy_blocks_handicap_plus_half_as_replacement(self):
         self.assertTrue(_blocked_slip_recommendation_market({"market": "Over 0.5"}))
         self.assertTrue(_blocked_slip_recommendation_market({"market": "1H Over 0.5"}))
-        self.assertFalse(_blocked_slip_recommendation_market({"market": "AH Home +0.5"}))
+        self.assertTrue(_blocked_slip_recommendation_market({"market": "AH Home +0.5"}))
+        self.assertTrue(_blocked_slip_recommendation_market({"market": "AH Away +0.5"}))
 
     def test_generated_match_corner_markets_start_at_bookable_over_lines(self):
         names = set(_generated_market_names_for_family(describe_market("Corners Over 8.5")))
@@ -1614,6 +1615,37 @@ class UserPickAdvisoryTests(SimpleTestCase):
         self.assertIn("corner events", joined)
         self.assertNotIn("Expected goals", joined)
         self.assertNotIn("Home:", joined)
+
+    def test_replacement_evidence_includes_stored_team_market_profile(self):
+        corner_pick = _public_market_pick(
+            {
+                "market": "Corners Over 7.5",
+                "advisory_score": 73,
+                "odds": None,
+                "market_taxonomy": describe_market("Corners Over 7.5").to_dict(),
+                "advisory_evidence": {
+                    "expected_total_corners": 11.4,
+                    "line": 7.5,
+                    "selection": "over",
+                    "team_intelligence_source": "stored_home_team_market_profile",
+                    "team_intelligence_profile": {
+                        "market": "Corners Over 7.5",
+                        "scope": "home",
+                        "attempts": 5,
+                        "wins": 4,
+                        "hit_rate": 80,
+                    },
+                },
+            }
+        )
+
+        evidence = _stats_backed_evidence(
+            {"user_pick": {"market": "Away Win", "confidence_score": 28, "odds": 1.7}},
+            market_payload=corner_pick,
+            owned_market_only=True,
+        )
+
+        self.assertIn("Stored home team profile hit Corners Over 7.5 in 4 of 5 tracked matches (80.0%).", evidence)
 
     def test_goal_replacement_evidence_does_not_reuse_corner_reasons(self):
         selection = {
