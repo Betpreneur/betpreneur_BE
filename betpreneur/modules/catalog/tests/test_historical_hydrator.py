@@ -134,6 +134,22 @@ class HistoricalHydratorPureTests(SimpleTestCase):
 
         self.assertEqual(HistoricalTeamHydrator._statpal_season_params(scope), {"season": league.previous_season})
 
+    def test_row_matches_scope_treats_slash_and_dash_seasons_as_same(self):
+        league = TOP_EUROPEAN_INTELLIGENCE_LEAGUES[0]
+
+        self.assertTrue(
+            HistoricalTeamHydrator._row_matches_scope(
+                {
+                    "provider_competition_id": str(league.statpal_league_id),
+                    "season": league.current_season.replace("-", "/"),
+                    "team_id": "42",
+                },
+                league=league,
+                season=league.current_season,
+                provider_league_id=str(league.statpal_league_id),
+            )
+        )
+
 
 class HistoricalHydratorPersistenceTests(TestCase):
     def test_hydrate_scope_stores_team_identity_profile_and_coverage(self):

@@ -297,8 +297,9 @@ class HistoricalTeamHydrator:
                 scopes.append(HistoricalHydrationScope(league=league, season=str(season)))
         return scopes
 
-    @staticmethod
+    @classmethod
     def _row_matches_scope(
+        cls,
         row: dict[str, Any],
         *,
         league: IntelligenceLeague,
@@ -309,7 +310,7 @@ class HistoricalTeamHydrator:
         row_season = str(row.get("season") or "").strip()
         if row_league_id and row_league_id != provider_league_id:
             return False
-        if row_season and row_season != str(season):
+        if row_season and cls._normalize_season(row_season) != cls._normalize_season(season):
             return False
         return bool(row.get("team_id") or row.get("team_name"))
 
@@ -318,6 +319,10 @@ class HistoricalTeamHydrator:
         if str(scope.season or "") == str(scope.league.current_season or ""):
             return None
         return {"season": str(scope.season)}
+
+    @staticmethod
+    def _normalize_season(value: str) -> str:
+        return str(value or "").strip().replace("/", "-")
 
     def _api_football_standings(self, scope: HistoricalHydrationScope) -> list[dict[str, Any]]:
         response = aps_get(
