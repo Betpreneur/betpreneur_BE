@@ -82,7 +82,7 @@ services:
     build:
       context: .
       dockerfile: deploy/Dockerfile
-      target: production
+      target: worker
     restart: unless-stopped
     env_file:
       - .env
@@ -136,7 +136,7 @@ services:
     build:
       context: .
       dockerfile: deploy/Dockerfile
-      target: production
+      target: worker
     restart: unless-stopped
     env_file:
       - .env
@@ -159,7 +159,7 @@ services:
     build:
       context: .
       dockerfile: deploy/Dockerfile
-      target: production
+      target: worker
     restart: unless-stopped
     env_file:
       - .env
@@ -182,7 +182,7 @@ services:
     build:
       context: .
       dockerfile: deploy/Dockerfile
-      target: production
+      target: worker
     restart: unless-stopped
     env_file:
       - .env
@@ -200,7 +200,7 @@ services:
     build:
       context: .
       dockerfile: deploy/Dockerfile
-      target: production
+      target: worker
     restart: unless-stopped
     env_file:
       - .env
@@ -218,7 +218,7 @@ services:
     build:
       context: .
       dockerfile: deploy/Dockerfile
-      target: production
+      target: worker
     restart: unless-stopped
     env_file:
       - .env
@@ -236,7 +236,7 @@ services:
     build:
       context: .
       dockerfile: deploy/Dockerfile
-      target: production
+      target: worker
     restart: unless-stopped
     env_file:
       - .env
@@ -254,7 +254,7 @@ services:
     build:
       context: .
       dockerfile: deploy/Dockerfile
-      target: production
+      target: worker
     restart: unless-stopped
     env_file:
       - .env
@@ -308,7 +308,7 @@ services:
     build:
       context: .
       dockerfile: deploy/Dockerfile
-      target: production
+      target: worker
     restart: unless-stopped
     env_file:
       - .env
@@ -356,7 +356,7 @@ services:
     build:
       context: .
       dockerfile: deploy/Dockerfile
-      target: production
+      target: worker
     restart: unless-stopped
     env_file:
       - .env
@@ -399,7 +399,7 @@ services:
     build:
       context: .
       dockerfile: deploy/Dockerfile
-      target: production
+      target: worker
     restart: unless-stopped
     env_file:
       - .env
