@@ -40,6 +40,7 @@ from betpreneur.modules.slips.domain.slip_analysis import (
     _replacement_is_supported_fit,
     _select_ranked_replacement,
     _simple_pick_verdict,
+    enrich_market_with_team_intelligence,
 )
 
 
@@ -98,6 +99,8 @@ def _replacement_market_for_slip(
         if market.get("market") not in EXCLUDED_MARKETS
     ]
     markets.extend(generated_markets or [])
+    team_intelligence = (game or {}).get("team_intelligence") or {}
+    markets = [enrich_market_with_team_intelligence(market, team_intelligence) for market in markets]
     allowed_markets = []
     blocked_markets = []
     for market in markets:

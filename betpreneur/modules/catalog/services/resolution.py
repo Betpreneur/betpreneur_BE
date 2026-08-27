@@ -15,6 +15,7 @@ from betpreneur.modules.catalog.models import (
     ProviderPlayerMap,
     ProviderTeamMap,
     TeamAliasMap,
+    TeamProfile,
 )
 from betpreneur.platform.db.json import json_safe
 
@@ -457,22 +458,53 @@ class ProviderMappingService:
         internal_team_name: str = "",
         api_team_id: int | None = None,
         country: str = "",
+        league_key: str = "",
+        league_name: str = "",
+        provider_league_id: str = "",
+        season: str = "",
+        aliases: list[str] | tuple[str, ...] | None = None,
         confidence=100,
         resolution_method: str = "provider_id",
         payload: dict[str, Any] | None = None,
     ) -> ProviderTeamMap:
         now = timezone.now()
+        team = self.link_provider_team_identity(
+            provider=provider,
+            provider_team_id=provider_team_id,
+            provider_team_name=provider_team_name,
+            canonical_name=internal_team_name or provider_team_name,
+            api_team_id=api_team_id,
+            country=country,
+            league_key=league_key,
+            league_name=league_name,
+            provider_league_id=provider_league_id,
+            season=season,
+            aliases=aliases,
+            confidence=confidence,
+            resolution_method=resolution_method,
+            payload=payload,
+        )
         defaults = {
             "provider_team_name": provider_team_name,
             "provider_team_normalized": normalize_fixture_text(provider_team_name),
-            "internal_team_id": str(internal_team_id or ""),
-            "internal_team_name": internal_team_name,
-            "internal_team_normalized": normalize_fixture_text(internal_team_name),
+            "internal_team_id": str(team.pk or internal_team_id or ""),
+            "internal_team_name": team.canonical_name,
+            "internal_team_normalized": team.canonical_normalized,
             "api_team_id": api_team_id,
             "country": country,
             "confidence": _decimal_confidence(confidence),
             "resolution_method": resolution_method,
-            "payload": json_safe(payload or {}),
+            "payload": json_safe(
+                {
+                    **(payload or {}),
+                    "team_profile_id": team.pk,
+                    "legacy_internal_team_id": str(internal_team_id or ""),
+                    "league_key": league_key,
+                    "league_name": league_name,
+                    "provider_league_id": str(provider_league_id or ""),
+                    "season": str(season or ""),
+                }
+            ),
             "active": True,
             "verified_at": now,
         }
@@ -488,12 +520,157 @@ class ProviderMappingService:
         self._learn_team_alias(
             provider=provider,
             provider_team_name=provider_team_name,
-            internal_team_name=internal_team_name or provider_team_name,
+            internal_team_name=team.canonical_name,
             api_team_id=api_team_id,
             country=country,
             confidence=confidence,
         )
         return row
+
+    def link_provider_team_identity(
+        self,
+        *,
+        provider: str,
+        provider_team_id: str,
+        provider_team_name: str,
+        canonical_name: str = "",
+        api_team_id: int | None = None,
+        country: str = "",
+        league_key: str = "",
+        league_name: str = "",
+        provider_league_id: str = "",
+        season: str = "",
+        aliases: list[str] | tuple[str, ...] | None = None,
+        confidence=100,
+        resolution_method: str = "provider_id",
+        payload: dict[str, Any] | None = None,
+    ) -> TeamProfile:
+        """Link one provider's team row to the canonical TeamProfile identity."""
+
+        canonical = str(canonical_name or provider_team_name or "").strip()
+        if not canonical:
+            raise ValueError("canonical_name or provider_team_name is required")
+
+        normalized = normalize_fixture_text(canonical)
+        provider_key = self._provider_key(provider)
+        provider_team_id = str(provider_team_id or "").strip()
+        inferred_api_team_id = self._api_team_id_for_provider(provider_key, provider_team_id, api_team_id)
+
+        with transaction.atomic():
+            team, created = TeamProfile.objects.select_for_update().get_or_create(
+                canonical_normalized=normalized,
+                defaults={
+                    "canonical_name": canonical,
+                    "country": country,
+                    "primary_league_key": league_key,
+                    "primary_league_name": league_name,
+                    "provider_ids": {},
+                    "aliases": [],
+                    "metadata": {},
+                    "active": True,
+                },
+            )
+            provider_ids = self._provider_ids_with_mapping(
+                team.provider_ids,
+                provider=provider_key,
+                provider_team_id=provider_team_id,
+                provider_league_id=str(provider_league_id or ""),
+                season=str(season or ""),
+                api_team_id=inferred_api_team_id,
+            )
+            alias_values = self._merged_aliases(team.aliases, [provider_team_name, *(aliases or [])])
+            metadata = {
+                **(team.metadata or {}),
+                "last_provider_mapping": {
+                    "provider": provider_key,
+                    "team_id": provider_team_id,
+                    "league_id": str(provider_league_id or ""),
+                    "season": str(season or ""),
+                    "confidence": str(_decimal_confidence(confidence)),
+                    "resolution_method": resolution_method,
+                },
+            }
+            if payload:
+                metadata["last_provider_payload"] = json_safe(payload)
+
+            update_fields = ["provider_ids", "aliases", "metadata", "active", "updated_at"]
+            team.provider_ids = provider_ids
+            team.aliases = alias_values
+            team.metadata = json_safe(metadata)
+            team.active = True
+            if country and not team.country:
+                team.country = country
+                update_fields.append("country")
+            if league_key and (created or not team.primary_league_key):
+                team.primary_league_key = league_key
+                update_fields.append("primary_league_key")
+            if league_name and (created or not team.primary_league_name):
+                team.primary_league_name = league_name
+                update_fields.append("primary_league_name")
+            team.save(update_fields=update_fields)
+
+        for alias in [provider_team_name, *(aliases or [])]:
+            self._learn_team_alias(
+                provider=provider_key,
+                provider_team_name=str(alias or "").strip(),
+                internal_team_name=team.canonical_name,
+                api_team_id=inferred_api_team_id,
+                country=country or team.country,
+                confidence=confidence,
+            )
+        return team
+
+    @staticmethod
+    def _provider_key(provider: str) -> str:
+        return str(provider or "").strip().lower().replace("-", "_").replace(" ", "_")
+
+    @staticmethod
+    def _api_team_id_for_provider(provider: str, provider_team_id: str, api_team_id: int | None) -> int | None:
+        if api_team_id is not None:
+            return api_team_id
+        if provider in {"api_football", "apifootball"}:
+            try:
+                return int(provider_team_id)
+            except (TypeError, ValueError):
+                return None
+        return None
+
+    @staticmethod
+    def _provider_ids_with_mapping(
+        existing: dict[str, Any] | None,
+        *,
+        provider: str,
+        provider_team_id: str,
+        provider_league_id: str,
+        season: str,
+        api_team_id: int | None,
+    ) -> dict[str, Any]:
+        provider_ids = dict(existing or {})
+        current = provider_ids.get(provider) or {}
+        if not isinstance(current, dict):
+            current = {"team_id": str(current)}
+        if provider_team_id:
+            current["team_id"] = provider_team_id
+        if provider_league_id:
+            current["league_id"] = provider_league_id
+        if season:
+            current["season"] = season
+        if api_team_id is not None:
+            current["api_team_id"] = api_team_id
+        provider_ids[provider] = current
+        return json_safe(provider_ids)
+
+    @staticmethod
+    def _merged_aliases(existing: list[Any] | None, aliases: list[str]) -> list[str]:
+        merged: list[str] = []
+        seen: set[str] = set()
+        for value in [*(existing or []), *aliases]:
+            alias = str(value or "").strip()
+            key = normalize_fixture_text(alias)
+            if alias and key and key not in seen:
+                seen.add(key)
+                merged.append(alias)
+        return merged
 
     def learn_player(
         self,

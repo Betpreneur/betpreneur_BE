@@ -10,6 +10,7 @@ from .views import (
     StatPalFixtureContextView,
     StatPalFixtureRefreshView,
     StatPalReadinessView,
+    TeamIntelligenceDebugView,
 )
 
 urlpatterns = [
@@ -17,4 +18,5 @@ urlpatterns = [
     path("statpal/fixtures/context/", StatPalFixtureContextView.as_view(), name="algo-statpal-fixture-context"),
     path("statpal/fixtures/refresh/", StatPalFixtureRefreshView.as_view(), name="algo-statpal-fixture-refresh"),
     path("statpal/readiness/", StatPalReadinessView.as_view(), name="algo-statpal-readiness"),
+    path("team-intelligence/debug/", TeamIntelligenceDebugView.as_view(), name="algo-team-intelligence-debug"),
 ]

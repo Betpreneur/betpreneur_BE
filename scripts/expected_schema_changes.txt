@@ -14,3 +14,9 @@
 # meant to close.
 
 settlement_run
+catalog_datacoverage
+catalog_leaguemarketprofile
+catalog_teammarketprofile
+catalog_teamprofile
+catalog_teamrecentformprofile
+catalog_teamseasonprofile

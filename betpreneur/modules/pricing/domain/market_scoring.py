@@ -591,6 +591,9 @@ def market_profile_fit_score(market):
     "does the profile actually lean toward this side of this line?"
     """
     evidence = (market or {}).get("advisory_evidence") or {}
+    intelligence_fit = float_or_none(evidence.get("team_intelligence_fit_score"))
+    if intelligence_fit is not None:
+        return round(max(0, min(100, intelligence_fit)), 1)
     statpal = evidence.get("statpal") if isinstance(evidence.get("statpal"), dict) else {}
     taxonomy = (market or {}).get("market_taxonomy") or describe_market((market or {}).get("market")).to_dict()
     family = taxonomy.get("family") or ""

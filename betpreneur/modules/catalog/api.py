@@ -13,18 +13,34 @@ from __future__ import annotations
 from betpreneur.platform.db.json import json_safe
 
 from .domain.bridge import descriptor_from_canonical
+from .domain.league_registry import (
+    IntelligenceLeague,
+    team_intelligence_league_ids,
+    team_intelligence_leagues,
+    team_intelligence_registry_payload,
+)
 from .domain.sportybet_normalize import resolve
 from .domain.text import normalize_fixture_text
 from .interface.views import api_response_payload
 from .models import (
+    DataCoverage,
     FixtureCache,
+    LeagueMarketProfile,
     ProviderFixtureMap,
     ProviderPlayerMap,
+    ProviderTeamMap,
     SlipReviewMarketCache,
     StatPalFixtureSnapshot,
+    TeamAliasMap,
+    TeamMarketProfile,
+    TeamProfile,
+    TeamRecentFormProfile,
+    TeamSeasonProfile,
 )
 from .services import legacy_runner
+from .services.coverage_tracker import DataCoverageScope, DataCoverageTracker
 from .services.daily_build import StatPalDailyBuildService
+from .services.historical_hydrator import HistoricalHydrationScope, HistoricalTeamHydrator
 from .services.legacy_runner import (
     aps_get,
     fetch_team_recent_form,
@@ -32,23 +48,51 @@ from .services.legacy_runner import (
     run_daily_algo,
 )
 from .services.market_cache import SlipReviewMarketCacheWriter
+from .services.market_profiles import MarketProfileBuilder, MarketProfileScope
 from .services.planner import FixtureHydrator, plan_slip_hydration
 from .services.provider_client import statpal_client
-from .services.resolution import provider_mapping_service
+from .services.recent_form import DEFAULT_RECENT_FORM_WINDOWS, RecentFormBuilder, RecentFormScope
+from .services.resolution import ProviderMappingService, provider_mapping_service
 from .services.runner_env import runner_env
 from .services.search import FixtureSearchService, token_side_score
 from .services.snapshots import statpal_snapshot_service
+from .services.team_intelligence import TeamIntelligenceService, team_intelligence_service
+from .services.team_intelligence_backfill import (
+    TeamIntelligenceBackfillService,
+    team_intelligence_backfill_service,
+)
 
 __all__ = [
+    "DEFAULT_RECENT_FORM_WINDOWS",
+    "DataCoverage",
+    "DataCoverageScope",
+    "DataCoverageTracker",
     "FixtureCache",
     "FixtureHydrator",
     "FixtureSearchService",
+    "HistoricalHydrationScope",
+    "HistoricalTeamHydrator",
+    "IntelligenceLeague",
+    "LeagueMarketProfile",
+    "MarketProfileBuilder",
+    "MarketProfileScope",
     "ProviderFixtureMap",
+    "ProviderMappingService",
     "ProviderPlayerMap",
+    "ProviderTeamMap",
+    "RecentFormBuilder",
+    "RecentFormScope",
     "SlipReviewMarketCache",
     "SlipReviewMarketCacheWriter",
     "StatPalDailyBuildService",
     "StatPalFixtureSnapshot",
+    "TeamAliasMap",
+    "TeamIntelligenceBackfillService",
+    "TeamIntelligenceService",
+    "TeamMarketProfile",
+    "TeamProfile",
+    "TeamRecentFormProfile",
+    "TeamSeasonProfile",
     "api_response_payload",
     "aps_get",
     "descriptor_from_canonical",
@@ -63,5 +107,10 @@ __all__ = [
     "runner_env",
     "statpal_client",
     "statpal_snapshot_service",
+    "team_intelligence_backfill_service",
+    "team_intelligence_league_ids",
+    "team_intelligence_leagues",
+    "team_intelligence_registry_payload",
+    "team_intelligence_service",
     "token_side_score",
 ]

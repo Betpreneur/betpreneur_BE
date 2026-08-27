@@ -52,6 +52,319 @@ class StatPalFixtureCoverage(FixtureCache):
         verbose_name_plural = "StatPal Fixture Coverage"
 
 
+class TeamProfile(models.Model):
+    """Provider-neutral team identity for the Team Intelligence Store."""
+
+    canonical_name = models.CharField(max_length=255)
+    canonical_normalized = models.CharField(max_length=255, unique=True)
+    country = models.CharField(max_length=100, blank=True)
+    primary_league_key = models.CharField(max_length=120, blank=True)
+    primary_league_name = models.CharField(max_length=255, blank=True)
+    provider_ids = models.JSONField(default=dict, blank=True)
+    aliases = models.JSONField(default=list, blank=True)
+    metadata = models.JSONField(default=dict, blank=True)
+    active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "catalog_teamprofile"
+        ordering = ["canonical_name"]
+        indexes = [
+            models.Index(fields=["country", "canonical_name"]),
+            models.Index(fields=["primary_league_key"]),
+            models.Index(fields=["active"]),
+        ]
+
+    def __str__(self):
+        return self.canonical_name
+
+
+class TeamSeasonProfile(models.Model):
+    """Season-level team facts used as the stable baseline for match analysis."""
+
+    class DataQuality(models.TextChoices):
+        STRONG = "strong", "Strong"
+        MEDIUM = "medium", "Medium"
+        LIMITED = "limited", "Limited"
+        POOR = "poor", "Poor"
+        MISSING = "missing", "Missing"
+
+    team = models.ForeignKey(TeamProfile, on_delete=models.CASCADE, related_name="season_profiles")
+    league_key = models.CharField(max_length=120)
+    league_name = models.CharField(max_length=255)
+    country = models.CharField(max_length=100, blank=True)
+    season = models.CharField(max_length=32)
+    provider_ids = models.JSONField(default=dict, blank=True)
+    matches_played = models.PositiveIntegerField(default=0)
+    home_matches = models.PositiveIntegerField(default=0)
+    away_matches = models.PositiveIntegerField(default=0)
+    goals_for = models.FloatField(null=True, blank=True)
+    goals_against = models.FloatField(null=True, blank=True)
+    home_goals_for = models.FloatField(null=True, blank=True)
+    home_goals_against = models.FloatField(null=True, blank=True)
+    away_goals_for = models.FloatField(null=True, blank=True)
+    away_goals_against = models.FloatField(null=True, blank=True)
+    xg_for = models.FloatField(null=True, blank=True)
+    xg_against = models.FloatField(null=True, blank=True)
+    corners_for = models.FloatField(null=True, blank=True)
+    corners_against = models.FloatField(null=True, blank=True)
+    cards_for = models.FloatField(null=True, blank=True)
+    cards_against = models.FloatField(null=True, blank=True)
+    shots_for = models.FloatField(null=True, blank=True)
+    shots_against = models.FloatField(null=True, blank=True)
+    shots_on_target_for = models.FloatField(null=True, blank=True)
+    shots_on_target_against = models.FloatField(null=True, blank=True)
+    clean_sheet_rate = models.FloatField(null=True, blank=True)
+    btts_rate = models.FloatField(null=True, blank=True)
+    over_15_rate = models.FloatField(null=True, blank=True)
+    over_25_rate = models.FloatField(null=True, blank=True)
+    stats = models.JSONField(default=dict, blank=True)
+    data_quality = models.CharField(max_length=20, choices=DataQuality.choices, default=DataQuality.MISSING)
+    source = models.CharField(max_length=30, default="derived")
+    fetched_at = models.DateTimeField(null=True, blank=True)
+    computed_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "catalog_teamseasonprofile"
+        ordering = ["league_name", "season", "team__canonical_name"]
+        indexes = [
+            models.Index(fields=["league_key", "season"]),
+            models.Index(fields=["country", "league_name"]),
+            models.Index(fields=["data_quality"]),
+            models.Index(fields=["updated_at"]),
+        ]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["team", "league_key", "season"],
+                name="unique_team_season_profile",
+            )
+        ]
+
+    def __str__(self):
+        return f"{self.team} {self.league_name} {self.season}"
+
+
+class TeamRecentFormProfile(models.Model):
+    """Rolling team form windows, split by all/home/away scopes."""
+
+    class Scope(models.TextChoices):
+        ALL = "all", "All"
+        HOME = "home", "Home"
+        AWAY = "away", "Away"
+
+    team = models.ForeignKey(TeamProfile, on_delete=models.CASCADE, related_name="recent_form_profiles")
+    league_key = models.CharField(max_length=120, blank=True)
+    league_name = models.CharField(max_length=255, blank=True)
+    season = models.CharField(max_length=32, blank=True)
+    window = models.PositiveSmallIntegerField(default=5)
+    scope = models.CharField(max_length=10, choices=Scope.choices, default=Scope.ALL)
+    matches = models.PositiveSmallIntegerField(default=0)
+    wins = models.PositiveSmallIntegerField(default=0)
+    draws = models.PositiveSmallIntegerField(default=0)
+    losses = models.PositiveSmallIntegerField(default=0)
+    goals_for = models.FloatField(null=True, blank=True)
+    goals_against = models.FloatField(null=True, blank=True)
+    xg_for = models.FloatField(null=True, blank=True)
+    xg_against = models.FloatField(null=True, blank=True)
+    corners_for = models.FloatField(null=True, blank=True)
+    corners_against = models.FloatField(null=True, blank=True)
+    cards_for = models.FloatField(null=True, blank=True)
+    cards_against = models.FloatField(null=True, blank=True)
+    shots_on_target_for = models.FloatField(null=True, blank=True)
+    shots_on_target_against = models.FloatField(null=True, blank=True)
+    form = models.JSONField(default=list, blank=True)
+    stats = models.JSONField(default=dict, blank=True)
+    source = models.CharField(max_length=30, default="derived")
+    computed_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "catalog_teamrecentformprofile"
+        ordering = ["team__canonical_name", "window", "scope"]
+        indexes = [
+            models.Index(fields=["team", "window", "scope"]),
+            models.Index(fields=["league_key", "season"]),
+            models.Index(fields=["computed_at"]),
+        ]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["team", "league_key", "season", "window", "scope"],
+                name="unique_team_recent_form_profile",
+            )
+        ]
+
+    def __str__(self):
+        return f"{self.team} last {self.window} ({self.scope})"
+
+
+class TeamMarketProfile(models.Model):
+    """Team behaviour for a market or market family in a season."""
+
+    class Scope(models.TextChoices):
+        ALL = "all", "All"
+        HOME = "home", "Home"
+        AWAY = "away", "Away"
+
+    team = models.ForeignKey(TeamProfile, on_delete=models.CASCADE, related_name="market_profiles")
+    league_key = models.CharField(max_length=120)
+    league_name = models.CharField(max_length=255)
+    season = models.CharField(max_length=32)
+    market_family = models.CharField(max_length=80)
+    market = models.CharField(max_length=120)
+    scope = models.CharField(max_length=10, choices=Scope.choices, default=Scope.ALL)
+    side = models.CharField(max_length=20, blank=True)
+    line = models.FloatField(null=True, blank=True)
+    attempts = models.PositiveIntegerField(default=0)
+    wins = models.PositiveIntegerField(default=0)
+    losses = models.PositiveIntegerField(default=0)
+    voids = models.PositiveIntegerField(default=0)
+    hit_rate = models.FloatField(null=True, blank=True)
+    avg_odds = models.FloatField(null=True, blank=True)
+    roi_flat = models.FloatField(null=True, blank=True)
+    confidence = models.FloatField(null=True, blank=True)
+    data_quality = models.CharField(max_length=20, default="missing")
+    stats = models.JSONField(default=dict, blank=True)
+    source = models.CharField(max_length=30, default="derived")
+    computed_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "catalog_teammarketprofile"
+        ordering = ["league_name", "season", "team__canonical_name", "market"]
+        indexes = [
+            models.Index(fields=["team", "market_family"]),
+            models.Index(fields=["league_key", "season", "market_family"]),
+            models.Index(fields=["market", "scope"]),
+            models.Index(fields=["data_quality"]),
+        ]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["team", "league_key", "season", "market", "scope"],
+                name="unique_team_market_profile",
+            )
+        ]
+
+    def __str__(self):
+        return f"{self.team} {self.market} ({self.scope})"
+
+
+class LeagueMarketProfile(models.Model):
+    """League-wide market reliability for Team Intelligence."""
+
+    league_key = models.CharField(max_length=120)
+    league_name = models.CharField(max_length=255)
+    country = models.CharField(max_length=100, blank=True)
+    season = models.CharField(max_length=32)
+    provider_ids = models.JSONField(default=dict, blank=True)
+    market_family = models.CharField(max_length=80)
+    market = models.CharField(max_length=120)
+    side = models.CharField(max_length=20, blank=True)
+    line = models.FloatField(null=True, blank=True)
+    attempts = models.PositiveIntegerField(default=0)
+    wins = models.PositiveIntegerField(default=0)
+    losses = models.PositiveIntegerField(default=0)
+    voids = models.PositiveIntegerField(default=0)
+    hit_rate = models.FloatField(null=True, blank=True)
+    avg_odds = models.FloatField(null=True, blank=True)
+    roi_flat = models.FloatField(null=True, blank=True)
+    confidence = models.FloatField(null=True, blank=True)
+    fairness_score = models.FloatField(null=True, blank=True)
+    volatility = models.FloatField(null=True, blank=True)
+    data_quality = models.CharField(max_length=20, default="missing")
+    stats = models.JSONField(default=dict, blank=True)
+    source = models.CharField(max_length=30, default="derived")
+    computed_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "catalog_leaguemarketprofile"
+        ordering = ["league_name", "season", "market"]
+        indexes = [
+            models.Index(fields=["league_key", "season"]),
+            models.Index(fields=["market_family", "market"]),
+            models.Index(fields=["data_quality"]),
+            models.Index(fields=["fairness_score"]),
+        ]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["league_key", "season", "market"],
+                name="unique_league_market_profile",
+            )
+        ]
+
+    def __str__(self):
+        return f"{self.league_name} {self.market} {self.season}"
+
+
+class DataCoverage(models.Model):
+    """Freshness and missing-data tracker for intelligence hydration."""
+
+    class SubjectType(models.TextChoices):
+        TEAM = "team", "Team"
+        LEAGUE = "league", "League"
+        MARKET = "market", "Market"
+        FIXTURE = "fixture", "Fixture"
+
+    class Status(models.TextChoices):
+        FRESH = "fresh", "Fresh"
+        STALE = "stale", "Stale"
+        PARTIAL = "partial", "Partial"
+        MISSING = "missing", "Missing"
+        FAILED = "failed", "Failed"
+
+    subject_type = models.CharField(max_length=20, choices=SubjectType.choices)
+    subject_key = models.CharField(max_length=255)
+    team = models.ForeignKey(
+        TeamProfile,
+        null=True,
+        blank=True,
+        on_delete=models.CASCADE,
+        related_name="coverage_rows",
+    )
+    league_key = models.CharField(max_length=120, blank=True)
+    league_name = models.CharField(max_length=255, blank=True)
+    season = models.CharField(max_length=32, blank=True)
+    provider = models.CharField(max_length=30)
+    coverage_key = models.CharField(max_length=120)
+    status = models.CharField(max_length=20, choices=Status.choices, default=Status.MISSING)
+    freshness_seconds = models.PositiveIntegerField(null=True, blank=True)
+    available_requirements = models.JSONField(default=list, blank=True)
+    missing_requirements = models.JSONField(default=list, blank=True)
+    last_attempted_at = models.DateTimeField(null=True, blank=True)
+    last_success_at = models.DateTimeField(null=True, blank=True)
+    expires_at = models.DateTimeField(null=True, blank=True)
+    error = models.TextField(blank=True)
+    metadata = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "catalog_datacoverage"
+        ordering = ["status", "subject_type", "subject_key", "coverage_key"]
+        indexes = [
+            models.Index(fields=["subject_type", "subject_key"]),
+            models.Index(fields=["league_key", "season"]),
+            models.Index(fields=["provider", "coverage_key"]),
+            models.Index(fields=["status", "expires_at"]),
+            models.Index(fields=["team", "status"]),
+        ]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["subject_type", "subject_key", "provider", "coverage_key"],
+                name="unique_data_coverage_subject_provider_key",
+            )
+        ]
+
+    def __str__(self):
+        return f"{self.subject_type}:{self.subject_key} {self.coverage_key} ({self.status})"
+
+
 class BookmakerLeagueMap(models.Model):
     provider = models.CharField(max_length=30)
     provider_competition_id = models.CharField(max_length=100, blank=True)

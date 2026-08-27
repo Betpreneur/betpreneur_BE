@@ -387,6 +387,191 @@ def _rank_replacement_candidates(candidates, *, selected_market=None):
     return sorted(candidates, key=key, reverse=True)
 
 
+def enrich_market_with_team_intelligence(market, team_intelligence):
+    """Attach stored team/league profile fit to a candidate market."""
+    if not market or not isinstance(team_intelligence, dict):
+        return market
+    if not team_intelligence.get("available") and not _team_intelligence_has_league_priors(team_intelligence):
+        return market
+    profile_fit = _team_intelligence_market_fit(market, team_intelligence)
+    if not profile_fit:
+        return market
+    payload = dict(market)
+    evidence = dict(payload.get("advisory_evidence") or {})
+    evidence.setdefault("team_intelligence_fit_score", profile_fit["score"])
+    evidence.setdefault("team_intelligence_source", profile_fit["source"])
+    evidence.setdefault("team_intelligence_profile", profile_fit["profile"])
+    payload["advisory_evidence"] = evidence
+    payload["team_intelligence_fit_score"] = profile_fit["score"]
+    return payload
+
+
+def analysis_data_fallback_state(team_intelligence=None, statpal_context=None):
+    """Describe the data layer slip review should trust for this fixture."""
+    team_intelligence = team_intelligence or {}
+    statpal_context = statpal_context or {}
+    warnings = []
+
+    intelligence_status = team_intelligence.get("status") or "missing"
+    if _team_intelligence_is_fresh_enough(team_intelligence):
+        primary = "team_intelligence"
+    else:
+        if intelligence_status == "stale" or _team_intelligence_has_stale_coverage(team_intelligence):
+            warnings.append("team_intelligence_stale")
+        elif intelligence_status == "missing" or not team_intelligence.get("available"):
+            warnings.append("team_intelligence_missing")
+        elif team_intelligence.get("missing"):
+            warnings.append("team_intelligence_partial")
+
+        if _provider_snapshots_available(statpal_context):
+            primary = "provider_snapshots"
+        elif _team_intelligence_has_league_priors(team_intelligence):
+            primary = "league_priors"
+            warnings.append("provider_snapshots_missing")
+        else:
+            primary = "unavailable"
+            warnings.append("provider_snapshots_missing")
+            warnings.append("league_priors_missing")
+
+    return {
+        "primary": primary,
+        "source_order": ["team_intelligence", "provider_snapshots", "league_priors"],
+        "team_intelligence_status": intelligence_status,
+        "provider_snapshots_available": _provider_snapshots_available(statpal_context),
+        "league_priors_available": _team_intelligence_has_league_priors(team_intelligence),
+        "warnings": warnings,
+    }
+
+
+def _team_intelligence_is_fresh_enough(team_intelligence):
+    if not isinstance(team_intelligence, dict) or not team_intelligence.get("available"):
+        return False
+    if team_intelligence.get("status") not in {"available", "partial"}:
+        return False
+    if _team_intelligence_has_stale_coverage(team_intelligence):
+        return False
+    missing = set(team_intelligence.get("missing") or [])
+    return not {"home_team_profile", "away_team_profile"} <= missing
+
+
+def _team_intelligence_has_stale_coverage(team_intelligence):
+    for key in ("home", "away", "league"):
+        payload = (team_intelligence or {}).get(key) or {}
+        coverage = payload.get("coverage") or {}
+        if coverage.get("status") in {"stale", "failed"}:
+            return True
+    return False
+
+
+def _team_intelligence_has_league_priors(team_intelligence):
+    league = (team_intelligence or {}).get("league") or {}
+    coverage = league.get("coverage") or {}
+    if coverage.get("status") in {"stale", "failed"}:
+        return False
+    return bool(league.get("market_profiles"))
+
+
+def _provider_snapshots_available(statpal_context):
+    snapshots = (statpal_context or {}).get("snapshots") or {}
+    for snapshot in snapshots.values():
+        if isinstance(snapshot, dict) and any(snapshot.get(key) for key in ("payload", "summary", "data", "items")):
+            return True
+        if snapshot:
+            return True
+    return False
+
+
+def _team_intelligence_market_fit(market, team_intelligence):
+    taxonomy = (market or {}).get("market_taxonomy") or describe_market((market or {}).get("market")).to_dict()
+    family = taxonomy.get("family") or ""
+    market_name = (market or {}).get("market") or taxonomy.get("canonical") or ""
+    candidates = []
+    for label, profile in _team_intelligence_profiles_for_market(taxonomy, team_intelligence):
+        for item in profile.get("market_profiles") or []:
+            if item.get("market_family") != family:
+                continue
+            exact = market_matches(market_name, item.get("market"))
+            if not exact and item.get("market") != market_name:
+                continue
+            score = _profile_fit_from_market_profile(item, exact=exact)
+            if score is not None:
+                candidates.append(
+                    {
+                        "score": score,
+                        "source": f"stored_{label}_team_market_profile",
+                        "profile": _compact_team_intelligence_profile(item),
+                    }
+                )
+    league = (team_intelligence or {}).get("league") or {}
+    for item in league.get("market_profiles") or []:
+        if item.get("market_family") != family:
+            continue
+        exact = market_matches(market_name, item.get("market"))
+        if not exact and item.get("market") != market_name:
+            continue
+        score = _profile_fit_from_market_profile(item, exact=exact, league=True)
+        if score is not None:
+            candidates.append(
+                {
+                    "score": score,
+                    "source": "stored_league_market_profile",
+                    "profile": _compact_team_intelligence_profile(item),
+                }
+            )
+    if not candidates:
+        return None
+    return max(candidates, key=lambda item: item["score"])
+
+
+def _team_intelligence_profiles_for_market(taxonomy, team_intelligence):
+    family = taxonomy.get("family") or ""
+    side = taxonomy.get("side") or taxonomy.get("selection") or ""
+    team = taxonomy.get("team") or ""
+    if team == "home" or side == "home":
+        return [("home", (team_intelligence or {}).get("home") or {})]
+    if team == "away" or side == "away":
+        return [("away", (team_intelligence or {}).get("away") or {})]
+    if family in {"team_total_goals", "team_corners", "team_cards", "team_shots_on_target"}:
+        return []
+    return [
+        ("home", (team_intelligence or {}).get("home") or {}),
+        ("away", (team_intelligence or {}).get("away") or {}),
+    ]
+
+
+def _profile_fit_from_market_profile(profile, *, exact: bool, league: bool = False):
+    hit_rate = float_or_none(profile.get("hit_rate"))
+    confidence = float_or_none(profile.get("confidence"))
+    attempts = float_or_none(profile.get("attempts")) or 0
+    if hit_rate is None and confidence is None:
+        return None
+    sample_weight = min(1.0, attempts / (20 if league else 12))
+    base = hit_rate if hit_rate is not None else confidence
+    if confidence is not None and hit_rate is not None:
+        base = (hit_rate * 0.65) + (confidence * 0.35)
+    score = (base * (0.75 + sample_weight * 0.25)) if base is not None else None
+    if score is None:
+        return None
+    if not exact:
+        score -= 8
+    if league:
+        score -= 5
+    return round(max(0, min(100, score)), 1)
+
+
+def _compact_team_intelligence_profile(profile):
+    return {
+        "market_family": profile.get("market_family"),
+        "market": profile.get("market"),
+        "scope": profile.get("scope"),
+        "attempts": profile.get("attempts"),
+        "hit_rate": profile.get("hit_rate"),
+        "confidence": profile.get("confidence"),
+        "data_quality": profile.get("data_quality"),
+        "source": "team_intelligence_store",
+    }
+
+
 def _replacement_ranking_score(market, *, selected_market=None):
     probability = float_or_none(market.get("advisory_score"))
     if probability is None:

@@ -354,6 +354,12 @@ def _maintenance_jobs():
 
     build_statpal_daily_cache = task("betpreneur.modules.catalog.tasks.build_statpal_daily_cache")
     sync_fixture_horizon = task("betpreneur.modules.catalog.tasks.sync_fixture_horizon")
+    hydrate_team_intelligence_history = task("betpreneur.modules.catalog.tasks.hydrate_team_intelligence_history")
+    build_team_recent_form = task("betpreneur.modules.catalog.tasks.build_team_recent_form")
+    build_team_market_profiles = task("betpreneur.modules.catalog.tasks.build_team_market_profiles")
+    refresh_team_data_coverage = task("betpreneur.modules.catalog.tasks.refresh_team_data_coverage")
+    backfill_team_intelligence = task("betpreneur.modules.catalog.tasks.backfill_team_intelligence")
+    refresh_team_intelligence_nightly = task("betpreneur.modules.analytics.tasks.refresh_team_intelligence_nightly")
     build_slip_review_market_cache = task("betpreneur.modules.picks.tasks.build_slip_review_market_cache")
     cleanup_slip_review_market_cache = task("betpreneur.modules.picks.tasks.cleanup_slip_review_market_cache")
     fit_score_models = task("betpreneur.modules.scoring.tasks.fit_score_models")
@@ -366,6 +372,27 @@ def _maintenance_jobs():
         # Ordered so a full run populates fixtures before anything that reads them.
         "statpal_daily_cache": (build_statpal_daily_cache, "Build StatPal 3-day fixtures and analysis snapshots"),
         "fixture_horizon": (sync_fixture_horizon, "Cache every fixture in the 3-day window"),
+        "team_intelligence_history": (
+            hydrate_team_intelligence_history,
+            "Hydrate current/previous season team baselines for top leagues",
+        ),
+        "team_recent_form": (build_team_recent_form, "Build last-5/10/15 all/home/away form profiles"),
+        "team_market_profiles": (
+            build_team_market_profiles,
+            "Build historical market behaviour for teams and leagues",
+        ),
+        "team_data_coverage": (
+            refresh_team_data_coverage,
+            "Refresh Team Intelligence freshness, gaps and source-quality coverage",
+        ),
+        "team_intelligence_backfill": (
+            backfill_team_intelligence,
+            "Run one-time current/previous season backfill for top Team Intelligence leagues",
+        ),
+        "team_intelligence_nightly": (
+            refresh_team_intelligence_nightly,
+            "Queue the ordered nightly Team Intelligence refresh chain",
+        ),
         "slip_review_market_cache": (build_slip_review_market_cache, "Pre-score private markets for slip review"),
         "slip_review_market_cache_cleanup": (cleanup_slip_review_market_cache, "Delete expired private slip-review market rows"),
         "score_models": (fit_score_models, "Refit per-league goal models"),

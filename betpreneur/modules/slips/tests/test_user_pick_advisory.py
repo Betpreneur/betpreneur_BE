@@ -18,6 +18,7 @@ from betpreneur.modules.slips.domain.slip_analysis import (
     _market_can_skip_core_on_demand,
     _public_market_pick,
     _submitted_market_payload,
+    analysis_data_fallback_state,
 )
 from betpreneur.modules.slips.interface.views import _generated_match_checker_markets
 from betpreneur.modules.slips.services.slip_presentation import (
@@ -432,6 +433,139 @@ class UserPickAdvisoryTests(SimpleTestCase):
         )
 
         self.assertEqual(replacement["market"], "Corners Over 8.5")
+
+    def test_stage10_team_intelligence_feeds_market_fit_score(self):
+        market = {
+            "market": "Over 2.5",
+            "advisory_evidence": {"team_intelligence_fit_score": 84.4},
+        }
+
+        self.assertEqual(market_profile_fit_score(market), 84.4)
+
+    def test_stage10_team_intelligence_can_change_replacement_ranking(self):
+        selected = {
+            "market": "Home Win",
+            "advisory_score": 31,
+            "advisory_status": "avoid",
+            "market_taxonomy": describe_market("Home Win").to_dict(),
+        }
+        game = {
+            "markets": [],
+            "team_intelligence": {
+                "available": True,
+                "home": {
+                    "market_profiles": [
+                        {
+                            "market_family": "total_goals",
+                            "market": "Over 2.5",
+                            "attempts": 18,
+                            "hit_rate": 88,
+                            "confidence": 82,
+                            "data_quality": "strong",
+                        },
+                        {
+                            "market_family": "total_goals",
+                            "market": "Under 4.5",
+                            "attempts": 18,
+                            "hit_rate": 42,
+                            "confidence": 44,
+                            "data_quality": "limited",
+                        },
+                    ],
+                },
+                "away": {"market_profiles": []},
+                "league": {"market_profiles": []},
+            },
+        }
+        generated = [
+            {
+                "market": "Under 4.5",
+                "advisory_score": 75,
+                "advisory_status": "playable",
+                "market_taxonomy": describe_market("Under 4.5").to_dict(),
+                "market_capability": {"data_quality": "medium"},
+                "advisory_evidence": {
+                    "expected_goals": 2.4,
+                    "line": 4.5,
+                    "selection": "under",
+                },
+            },
+            {
+                "market": "Over 2.5",
+                "advisory_score": 70,
+                "advisory_status": "playable",
+                "market_taxonomy": describe_market("Over 2.5").to_dict(),
+                "market_capability": {"data_quality": "medium"},
+                "advisory_evidence": {
+                    "expected_goals": 3.4,
+                    "line": 2.5,
+                    "selection": "over",
+                },
+            },
+        ]
+
+        replacement = _replacement_market_for_slip(
+            game,
+            selected_market=selected,
+            generated_markets=generated,
+            allow_safer_fallback=True,
+        )
+
+        self.assertEqual(replacement["market"], "Over 2.5")
+        self.assertEqual(replacement["advisory_evidence"]["team_intelligence_source"], "stored_home_team_market_profile")
+
+    def test_stage11_fresh_team_intelligence_is_primary_data_source(self):
+        state = analysis_data_fallback_state(
+            {
+                "available": True,
+                "status": "available",
+                "home": {"coverage": {"status": "fresh"}},
+                "away": {"coverage": {"status": "fresh"}},
+                "league": {"coverage": {"status": "fresh"}, "market_profiles": [{"market": "Over 2.5"}]},
+                "missing": [],
+            },
+            {"snapshots": {"detailed_stats": {"summary": {"matches": 12}}}},
+        )
+
+        self.assertEqual(state["primary"], "team_intelligence")
+        self.assertTrue(state["provider_snapshots_available"])
+        self.assertTrue(state["league_priors_available"])
+
+    def test_stage11_stale_team_intelligence_falls_back_to_provider_snapshots(self):
+        state = analysis_data_fallback_state(
+            {
+                "available": True,
+                "status": "available",
+                "home": {"coverage": {"status": "stale"}},
+                "away": {"coverage": {"status": "fresh"}},
+                "league": {"coverage": {"status": "fresh"}, "market_profiles": [{"market": "Over 2.5"}]},
+                "missing": [],
+            },
+            {"snapshots": {"prematch_odds": {"payload": {"markets": []}}}},
+        )
+
+        self.assertEqual(state["primary"], "provider_snapshots")
+        self.assertIn("team_intelligence_stale", state["warnings"])
+
+    def test_stage11_provider_snapshot_failure_falls_back_to_league_priors(self):
+        state = analysis_data_fallback_state(
+            {
+                "available": False,
+                "status": "missing",
+                "home": None,
+                "away": None,
+                "league": {
+                    "coverage": {"status": "fresh"},
+                    "market_profiles": [{"market_family": "total_goals", "market": "Over 2.5"}],
+                },
+                "missing": ["home_team_profile", "away_team_profile"],
+            },
+            {"snapshots": {}},
+        )
+
+        self.assertEqual(state["primary"], "league_priors")
+        self.assertIn("team_intelligence_missing", state["warnings"])
+        self.assertIn("provider_snapshots_missing", state["warnings"])
 
     def test_overall_corner_recommendation_does_not_use_unbookable_low_line(self):
         selected = {

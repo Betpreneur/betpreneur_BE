@@ -18,9 +18,14 @@ from betpreneur.modules.catalog.interface.serializers import (
     StatPalFixtureRefreshRequestSerializer,
     StatPalReadinessQuerySerializer,
     StatPalReadinessResponseSerializer,
+    TeamIntelligenceDebugQuerySerializer,
+    TeamIntelligenceDebugResponseSerializer,
 )
 from betpreneur.modules.catalog.services.search import FixtureSearchService
 from betpreneur.modules.catalog.services.snapshots import statpal_snapshot_service
+from betpreneur.modules.catalog.services.team_intelligence_debug import (
+    team_intelligence_debug_service,
+)
 from betpreneur.platform.db.json import json_safe
 
 log = logging.getLogger(__name__)
@@ -214,3 +219,29 @@ class StatPalReadinessView(APIView):
             minimum_average_coverage=float(data.get("min_coverage") or 70.0),
         )
         return Response(api_response_payload(result))
+
+
+class TeamIntelligenceDebugView(APIView):
+    permission_classes = [IsAdminUser]
+    serializer_class = TeamIntelligenceDebugResponseSerializer
+
+    @extend_schema(
+        summary="Inspect team intelligence coverage",
+        description=(
+            "Admin-only endpoint. Shows stored team intelligence coverage, last refresh, profile counts, "
+            "recent season/form/market samples, and league priors for one team or a small team search."
+        ),
+        tags=["Admin Algo"],
+        parameters=[TeamIntelligenceDebugQuerySerializer],
+        responses={200: TeamIntelligenceDebugResponseSerializer},
+    )
+    def get(self, request):
+        query = TeamIntelligenceDebugQuerySerializer(data=request.query_params)
+        query.is_valid(raise_exception=True)
+        data = query.validated_data
+        result = team_intelligence_debug_service.inspect_team(
+            team_id=data.get("team_id"),
+            query=str(data.get("q") or ""),
+            limit=data.get("limit", 10),
+        )
+        return Response(result)

@@ -55,6 +55,23 @@ BEAT_SCHEDULE = {
         },
         "options": {"expires": timedelta(hours=8).total_seconds()},
     },
+    # Nightly Team Intelligence refresh. This chains fixture sync -> season
+    # baselines -> recent form -> market profiles -> coverage before the daily
+    # products read the intelligence store.
+    "refresh-team-intelligence-nightly": {
+        "task": "betpreneur.modules.analytics.tasks.refresh_team_intelligence_nightly",
+        "schedule": crontab(
+            hour=os.environ.get("TEAM_INTELLIGENCE_REFRESH_HOUR", "22"),
+            minute=os.environ.get("TEAM_INTELLIGENCE_REFRESH_MINUTE", "30"),
+        ),
+        "kwargs": {
+            "days": int(os.environ.get("TEAM_INTELLIGENCE_REFRESH_DAYS", "3")),
+            "recent_form_sync_matches": _env_bool("TEAM_INTELLIGENCE_RECENT_FORM_SYNC_MATCHES", "0"),
+            "market_min_attempts": int(os.environ.get("TEAM_INTELLIGENCE_MARKET_MIN_ATTEMPTS", "1")),
+            "coverage_ttl_hours": int(os.environ.get("TEAM_INTELLIGENCE_COVERAGE_TTL_HOURS", "24")),
+        },
+        "options": {"expires": timedelta(hours=7).total_seconds()},
+    },
     # Private Match Checker warm cache. This can cover the broad StatPal fixture
     # universe without changing the restricted public all-games/top-picks feed.
     "build-slip-review-market-cache": {
@@ -149,3 +166,5 @@ if not _env_bool("SLIP_REVIEW_MARKET_CACHE_BUILD_ENABLED", "1"):
     BEAT_SCHEDULE.pop("build-slip-review-market-cache", None)
 if not _env_bool("SLIP_REVIEW_MARKET_CACHE_CLEANUP_ENABLED", "1"):
     BEAT_SCHEDULE.pop("cleanup-slip-review-market-cache", None)
+if not _env_bool("TEAM_INTELLIGENCE_REFRESH_ENABLED", "1"):
+    BEAT_SCHEDULE.pop("refresh-team-intelligence-nightly", None)

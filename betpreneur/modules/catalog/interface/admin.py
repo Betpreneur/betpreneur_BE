@@ -12,7 +12,9 @@ from django.utils.html import format_html, format_html_join
 
 from betpreneur.modules.catalog.models import (
     BookmakerLeagueMap,
+    DataCoverage,
     FixtureCache,
+    LeagueMarketProfile,
     ProviderFixtureMap,
     ProviderPlayerMap,
     ProviderTeamMap,
@@ -20,6 +22,10 @@ from betpreneur.modules.catalog.models import (
     StatPalFixtureCoverage,
     StatPalFixtureSnapshot,
     TeamAliasMap,
+    TeamMarketProfile,
+    TeamProfile,
+    TeamRecentFormProfile,
+    TeamSeasonProfile,
 )
 from betpreneur.modules.catalog.services.daily_build import (
     StatPalDailyBuildService,
@@ -53,6 +59,91 @@ class FixtureCacheAdmin(admin.ModelAdmin):
         "league",
         "country",
     )
+    readonly_fields = ("created_at", "updated_at")
+
+
+@admin.register(TeamProfile)
+class TeamProfileAdmin(admin.ModelAdmin):
+    list_display = (
+        "canonical_name",
+        "country",
+        "primary_league_name",
+        "intelligence_coverage_status",
+        "intelligence_last_refresh",
+        "active",
+        "updated_at",
+    )
+    list_filter = ("active", "country", "primary_league_key")
+    search_fields = ("canonical_name", "canonical_normalized", "country", "primary_league_name", "provider_ids", "aliases")
+    readonly_fields = ("created_at", "updated_at", "intelligence_coverage_status", "intelligence_last_refresh")
+
+    @admin.display(description="Coverage")
+    def intelligence_coverage_status(self, obj):
+        row = (
+            DataCoverage.objects.filter(team=obj)
+            .order_by(
+                "status",
+                "-last_success_at",
+                "-updated_at",
+            )
+            .first()
+        )
+        return row.status if row else "missing"
+
+    @admin.display(description="Last intelligence refresh")
+    def intelligence_last_refresh(self, obj):
+        latest = (
+            DataCoverage.objects.filter(team=obj)
+            .exclude(last_success_at__isnull=True)
+            .order_by("-last_success_at")
+            .values_list("last_success_at", flat=True)
+            .first()
+        )
+        if latest:
+            return latest
+        season_profile = TeamSeasonProfile.objects.filter(team=obj).order_by("-updated_at").first()
+        if season_profile:
+            return season_profile.computed_at or season_profile.fetched_at or season_profile.updated_at
+        return obj.updated_at
+
+
+@admin.register(TeamSeasonProfile)
+class TeamSeasonProfileAdmin(admin.ModelAdmin):
+    list_display = ("team", "league_name", "season", "matches_played", "data_quality", "updated_at")
+    list_filter = ("league_key", "season", "country", "data_quality", "source")
+    search_fields = ("team__canonical_name", "league_name", "country", "provider_ids", "stats")
+    readonly_fields = ("created_at", "updated_at")
+
+
+@admin.register(TeamRecentFormProfile)
+class TeamRecentFormProfileAdmin(admin.ModelAdmin):
+    list_display = ("team", "league_name", "season", "window", "scope", "matches", "updated_at")
+    list_filter = ("league_key", "season", "window", "scope", "source")
+    search_fields = ("team__canonical_name", "league_name", "stats", "form")
+    readonly_fields = ("created_at", "updated_at")
+
+
+@admin.register(TeamMarketProfile)
+class TeamMarketProfileAdmin(admin.ModelAdmin):
+    list_display = ("team", "league_name", "season", "market", "scope", "attempts", "hit_rate", "data_quality")
+    list_filter = ("league_key", "season", "market_family", "scope", "data_quality", "source")
+    search_fields = ("team__canonical_name", "league_name", "market", "market_family", "stats")
+    readonly_fields = ("created_at", "updated_at")
+
+
+@admin.register(LeagueMarketProfile)
+class LeagueMarketProfileAdmin(admin.ModelAdmin):
+    list_display = ("league_name", "season", "market", "attempts", "hit_rate", "fairness_score", "data_quality")
+    list_filter = ("league_key", "season", "market_family", "data_quality", "source")
+    search_fields = ("league_name", "country", "market", "market_family", "provider_ids", "stats")
+    readonly_fields = ("created_at", "updated_at")
+
+
+@admin.register(DataCoverage)
+class DataCoverageAdmin(admin.ModelAdmin):
+    list_display = ("subject_type", "subject_key", "provider", "coverage_key", "status", "last_success_at", "expires_at")
+    list_filter = ("subject_type", "provider", "coverage_key", "status", "league_key", "season")
+    search_fields = ("subject_key", "league_name", "team__canonical_name", "coverage_key", "error", "metadata")
     readonly_fields = ("created_at", "updated_at")
 
 

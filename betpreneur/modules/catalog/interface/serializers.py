@@ -40,6 +40,24 @@ class FixtureSearchResponseSerializer(serializers.Serializer):
     results = serializers.JSONField()
 
 
+class TeamIntelligenceDebugQuerySerializer(serializers.Serializer):
+    team_id = serializers.IntegerField(required=False, min_value=1)
+    q = serializers.CharField(required=False, allow_blank=True, max_length=255)
+    limit = serializers.IntegerField(required=False, min_value=1, max_value=25, default=10)
+
+    def validate(self, attrs):
+        if not attrs.get("team_id") and not str(attrs.get("q") or "").strip():
+            raise serializers.ValidationError("Provide team_id or q.")
+        return attrs
+
+
+class TeamIntelligenceDebugResponseSerializer(serializers.Serializer):
+    query = serializers.CharField(required=False, allow_blank=True)
+    team_id = serializers.IntegerField(required=False, allow_null=True)
+    count = serializers.IntegerField()
+    teams = serializers.JSONField()
+
+
 class StatPalReadinessQuerySerializer(serializers.Serializer):
     start_date = serializers.DateField(
         required=False,

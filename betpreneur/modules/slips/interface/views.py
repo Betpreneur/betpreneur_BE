@@ -36,6 +36,7 @@ from betpreneur.modules.catalog.api import (
     api_response_payload,
     plan_slip_hydration,
     provider_mapping_service,
+    team_intelligence_service,
 )
 from betpreneur.modules.explanations.api import generate as explanation_service
 from betpreneur.modules.markets.api import (
@@ -146,6 +147,7 @@ from betpreneur.modules.slips.domain.slip_analysis import (
     _with_smart_randomize,
     _without_blocked_replacement_recommendation,
     _without_remove_recommendation,
+    analysis_data_fallback_state,
 )
 from betpreneur.modules.slips.interface.serializers import (
     BetanoSlipImportRequestSerializer,
@@ -2541,6 +2543,8 @@ def _analyse_manual_selection(
         "statpal_away_team_id": statpal_away_team_id,
         "provider_merge": game.get("provider_merge") or {},
     }
+    team_intelligence = team_intelligence_service.for_fixture(scoring_game)
+    scoring_game["team_intelligence"] = team_intelligence
     matched_fixture_payload = _matched_fixture_with_statpal(
         candidate,
         scoring_game,
@@ -2561,6 +2565,14 @@ def _analyse_manual_selection(
     )
     statpal_refresh = statpal_bundle.get("refreshed") or {}
     statpal_context = statpal_bundle.get("context") or {}
+    analysis_data_source = analysis_data_fallback_state(team_intelligence, statpal_context)
+    statpal_context = {
+        **statpal_context,
+        "team_intelligence": team_intelligence,
+        "analysis_data_source": analysis_data_source,
+    }
+    scoring_game["statpal_context"] = statpal_context
+    scoring_game["analysis_data_source"] = analysis_data_source
 
     # Snapshot coverage is only the right yardstick for the StatPal advisory path;
     # matrix- and count-model markets are judged on the data that actually serves them.
@@ -2569,7 +2581,7 @@ def _analyse_manual_selection(
     )
     statpal_advisory = statpal_market_advisory.evaluate_market(
         market_descriptor,
-        fixture={**scoring_game, "statpal_context": statpal_context},
+        fixture=scoring_game,
         provider_payload=selection.get("provider_payload") or {},
         statpal_payload=selection.get("statpal_payload"),
     )
@@ -2632,6 +2644,8 @@ def _analyse_manual_selection(
             },
             "statpal_refresh": statpal_refresh,
             "statpal_context": statpal_context,
+            "team_intelligence": team_intelligence,
+            "analysis_data_source": analysis_data_source,
             "statpal_advisory": statpal_advisory,
             "market_capability": market_capability,
         }
@@ -2673,6 +2687,8 @@ def _analyse_manual_selection(
         "generated_markets": generated_markets,
         "statpal_refresh": statpal_refresh,
         "statpal_context": statpal_context,
+        "team_intelligence": team_intelligence,
+        "analysis_data_source": analysis_data_source,
         "statpal_advisory": statpal_advisory,
         "market_capability": market_capability,
         "possible_matches": candidates,

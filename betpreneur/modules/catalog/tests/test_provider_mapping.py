@@ -8,6 +8,7 @@ from betpreneur.modules.catalog.models import (
     ProviderPlayerMap,
     ProviderTeamMap,
     TeamAliasMap,
+    TeamProfile,
 )
 from betpreneur.modules.catalog.services.resolution import provider_mapping_service
 
@@ -177,6 +178,74 @@ class ProviderMappingServiceTests(TestCase):
             TeamAliasMap.objects.filter(
                 provider="statpal",
                 alias_normalized="liverpool",
+                canonical_normalized="liverpool",
+            ).exists()
+        )
+
+    def test_learn_team_links_api_football_and_statpal_to_one_team_profile(self):
+        api_mapping = provider_mapping_service.learn_team(
+            provider="api_football",
+            provider_team_id="42",
+            provider_team_name="Arsenal",
+            internal_team_name="Arsenal",
+            country="England",
+            league_key="england-premier-league",
+            league_name="English Premier League",
+            provider_league_id="39",
+            season="2026",
+            aliases=["Arsenal FC"],
+            confidence=100,
+            resolution_method="api_football_registry",
+        )
+        statpal_mapping = provider_mapping_service.learn_team(
+            provider="statpal",
+            provider_team_id="3001",
+            provider_team_name="Arsenal FC",
+            internal_team_name="Arsenal",
+            country="England",
+            league_key="england-premier-league",
+            league_name="English Premier League",
+            provider_league_id="3037",
+            season="2026-2027",
+            aliases=["Arsenal"],
+            confidence=96,
+            resolution_method="statpal_registry",
+        )
+
+        team = TeamProfile.objects.get(canonical_normalized="arsenal")
+        self.assertEqual(api_mapping.internal_team_id, str(team.pk))
+        self.assertEqual(statpal_mapping.internal_team_id, str(team.pk))
+        self.assertEqual(team.provider_ids["api_football"]["team_id"], "42")
+        self.assertEqual(team.provider_ids["api_football"]["league_id"], "39")
+        self.assertEqual(team.provider_ids["statpal"]["team_id"], "3001")
+        self.assertEqual(team.provider_ids["statpal"]["league_id"], "3037")
+        self.assertEqual(team.primary_league_key, "england-premier-league")
+        self.assertIn("Arsenal FC", team.aliases)
+
+    def test_link_provider_team_identity_updates_legacy_provider_maps_and_aliases(self):
+        mapping = provider_mapping_service.learn_team(
+            provider="statpal",
+            provider_team_id="2341082",
+            provider_team_name="Liverpool FC",
+            internal_team_name="Liverpool",
+            country="England",
+            league_key="england-premier-league",
+            provider_league_id="3037",
+            season="2026-2027",
+            confidence=95,
+            resolution_method="statpal_snapshot",
+        )
+
+        team = TeamProfile.objects.get(canonical_normalized="liverpool")
+        self.assertEqual(mapping.internal_team_id, str(team.pk))
+        self.assertEqual(mapping.internal_team_name, "Liverpool")
+        self.assertEqual(mapping.internal_team_normalized, "liverpool")
+        self.assertEqual(mapping.payload["team_profile_id"], team.pk)
+        self.assertEqual(team.provider_ids["statpal"]["season"], "2026-2027")
+        self.assertTrue(
+            TeamAliasMap.objects.filter(
+                provider="statpal",
+                alias_normalized="liverpool fc",
                 canonical_normalized="liverpool",
             ).exists()
         )

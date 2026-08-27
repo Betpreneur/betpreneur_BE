@@ -54,5 +54,149 @@ def build_statpal_daily_cache(self, start_date=None, days=3, include_optional=Fa
         raise
 
 
+@shared_task(
+    bind=True,
+    ignore_result=False,
+    max_retries=2,
+    default_retry_delay=600,
+    soft_time_limit=3600,
+    time_limit=4200,
+)
+def hydrate_team_intelligence_history(self, league_keys=None, seasons=None, max_teams=None):
+    """
+    Hydrate current/previous season team profiles for the Team Intelligence Store.
+
+    This is the historical baseline for slip-review analysis, so runtime analysis can
+    use stored team facts and reserve provider calls for live/recent context.
+    """
+    from betpreneur.modules.catalog.services.historical_hydrator import HistoricalTeamHydrator
+
+    try:
+        return HistoricalTeamHydrator().hydrate(
+            league_keys=league_keys,
+            seasons=seasons,
+            max_teams=max_teams,
+        )
+    except Exception as exc:
+        if self.request.retries < self.max_retries:
+            raise self.retry(exc=exc, countdown=600 * (self.request.retries + 1))
+        raise
 
 
+@shared_task(
+    bind=True,
+    ignore_result=False,
+    max_retries=2,
+    default_retry_delay=600,
+    soft_time_limit=3600,
+    time_limit=4200,
+)
+def build_team_recent_form(self, league_keys=None, seasons=None, windows=None, sync_matches=True, max_matches=None):
+    """
+    Build last-5/10/15 all/home/away team-form profiles for top intelligence leagues.
+    """
+    from betpreneur.modules.catalog.services.recent_form import RecentFormBuilder
+
+    try:
+        return RecentFormBuilder().build(
+            league_keys=league_keys,
+            seasons=seasons,
+            windows=windows or (5, 10, 15),
+            sync_matches=sync_matches,
+            max_matches=max_matches,
+        )
+    except Exception as exc:
+        if self.request.retries < self.max_retries:
+            raise self.retry(exc=exc, countdown=600 * (self.request.retries + 1))
+        raise
+
+
+@shared_task(
+    bind=True,
+    ignore_result=False,
+    max_retries=2,
+    default_retry_delay=600,
+    soft_time_limit=3600,
+    time_limit=4200,
+)
+def build_team_market_profiles(self, league_keys=None, seasons=None, min_attempts=1):
+    """
+    Build historical team/league market behaviour profiles for top intelligence leagues.
+    """
+    from betpreneur.modules.catalog.services.market_profiles import MarketProfileBuilder
+
+    try:
+        return MarketProfileBuilder().build(
+            league_keys=league_keys,
+            seasons=seasons,
+            min_attempts=min_attempts,
+        )
+    except Exception as exc:
+        if self.request.retries < self.max_retries:
+            raise self.retry(exc=exc, countdown=600 * (self.request.retries + 1))
+        raise
+
+
+@shared_task(
+    bind=True,
+    ignore_result=False,
+    max_retries=2,
+    default_retry_delay=300,
+    soft_time_limit=900,
+    time_limit=1200,
+)
+def refresh_team_data_coverage(self, league_keys=None, seasons=None, ttl_hours=24):
+    """
+    Refresh derived readiness rows for Team Intelligence coverage.
+    """
+    from betpreneur.modules.catalog.services.coverage_tracker import DataCoverageTracker
+
+    try:
+        return DataCoverageTracker().refresh(
+            league_keys=league_keys,
+            seasons=seasons,
+            ttl_hours=ttl_hours,
+        )
+    except Exception as exc:
+        if self.request.retries < self.max_retries:
+            raise self.retry(exc=exc, countdown=300 * (self.request.retries + 1))
+        raise
+
+
+@shared_task(
+    bind=True,
+    ignore_result=False,
+    max_retries=1,
+    default_retry_delay=900,
+    soft_time_limit=7200,
+    time_limit=7800,
+)
+def backfill_team_intelligence(
+    self,
+    league_keys=None,
+    max_teams=None,
+    max_matches=None,
+    min_attempts=1,
+    ttl_hours=24,
+    sync_recent_matches=True,
+):
+    """
+    One-time top-league Team Intelligence backfill with monitoring output.
+    """
+    from betpreneur.modules.catalog.services.team_intelligence_backfill import (
+        team_intelligence_backfill_service,
+    )
+
+    try:
+        return team_intelligence_backfill_service.backfill(
+            league_keys=league_keys,
+            max_teams=max_teams,
+            max_matches=max_matches,
+            min_attempts=min_attempts,
+            ttl_hours=ttl_hours,
+            sync_recent_matches=sync_recent_matches,
+        )
+    except Exception as exc:
+        if self.request.retries < self.max_retries:
+            raise self.retry(exc=exc, countdown=900)
+        raise
