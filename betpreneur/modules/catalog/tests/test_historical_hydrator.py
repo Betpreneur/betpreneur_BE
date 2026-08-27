@@ -172,6 +172,88 @@ class HistoricalHydratorPersistenceTests(TestCase):
         coverage = DataCoverage.objects.get(team=team, coverage_key=HistoricalTeamHydrator.COVERAGE_KEY)
         self.assertEqual(coverage.status, DataCoverage.Status.FRESH)
 
+    def test_statpal_success_prunes_prior_api_football_fallback_profiles_for_scope(self):
+        fallback_team = TeamProfile.objects.create(
+            canonical_name="Arsenal FC",
+            canonical_normalized="arsenal fc",
+            country="England",
+            primary_league_key="england-premier-league",
+            primary_league_name="English Premier League",
+            provider_ids={"api_football": {"team_id": "33"}},
+        )
+        TeamSeasonProfile.objects.create(
+            team=fallback_team,
+            league_key="england-premier-league",
+            league_name="English Premier League",
+            country="England",
+            season="2026-2027",
+            source="api_football",
+            matches_played=1,
+            data_quality=TeamSeasonProfile.DataQuality.LIMITED,
+        )
+        DataCoverage.objects.create(
+            subject_type=DataCoverage.SubjectType.TEAM,
+            subject_key="arsenal fc:england-premier-league:2026-2027",
+            team=fallback_team,
+            provider="api_football",
+            coverage_key=HistoricalTeamHydrator.COVERAGE_KEY,
+            league_key="england-premier-league",
+            league_name="English Premier League",
+            season="2026-2027",
+            status=DataCoverage.Status.FRESH,
+        )
+        DataCoverage.objects.create(
+            subject_type=DataCoverage.SubjectType.LEAGUE,
+            subject_key="england-premier-league:2026-2027",
+            provider="api_football",
+            coverage_key=HistoricalTeamHydrator.COVERAGE_KEY,
+            league_key="england-premier-league",
+            league_name="English Premier League",
+            season="2026-2027",
+            status=DataCoverage.Status.FRESH,
+        )
+
+        result = HistoricalTeamHydrator(client=DummyHistoricalClient()).hydrate(
+            league_keys=["england-premier-league"],
+            seasons=["2026-2027"],
+        )
+
+        scope_result = result["results"][0]
+        self.assertEqual(scope_result["provider"], "statpal")
+        self.assertEqual(scope_result["fallback_profiles_pruned"], 1)
+        self.assertFalse(
+            TeamSeasonProfile.objects.filter(
+                league_key="england-premier-league",
+                season="2026-2027",
+                source="api_football",
+            ).exists()
+        )
+        self.assertEqual(
+            TeamSeasonProfile.objects.filter(
+                league_key="england-premier-league",
+                season="2026-2027",
+                source="statpal",
+            ).count(),
+            1,
+        )
+        self.assertFalse(
+            DataCoverage.objects.filter(
+                subject_type=DataCoverage.SubjectType.TEAM,
+                league_key="england-premier-league",
+                season="2026-2027",
+                provider="api_football",
+                coverage_key=HistoricalTeamHydrator.COVERAGE_KEY,
+            ).exists()
+        )
+        fallback_league_coverage = DataCoverage.objects.get(
+            subject_type=DataCoverage.SubjectType.LEAGUE,
+            subject_key="england-premier-league:2026-2027",
+            provider="api_football",
+            coverage_key=HistoricalTeamHydrator.COVERAGE_KEY,
+        )
+        self.assertEqual(fallback_league_coverage.status, DataCoverage.Status.STALE)
+        self.assertEqual(fallback_league_coverage.error, "superseded by statpal")
+
     def test_team_endpoint_failure_still_saves_limited_standings_profile(self):
         hydrator = HistoricalTeamHydrator(client=DummyHistoricalClient(team_failures={"42"}))
 

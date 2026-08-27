@@ -169,6 +169,14 @@ class HistoricalTeamHydrator:
             coverage_failed=coverage_failed,
             errors=errors,
         )
+        fallback_profiles_pruned = 0
+        fallback_coverage_pruned = 0
+        if provider == "statpal" and saved:
+            fallback_profiles_pruned, fallback_coverage_pruned = self._prune_fallback_scope_rows(
+                scope,
+                preferred_provider=provider,
+                fallback_provider="api_football",
+            )
         return {
             "status": "complete" if not errors else "partial",
             "league_key": league.key,
@@ -180,6 +188,8 @@ class HistoricalTeamHydrator:
             "profiles_saved": saved,
             "coverage_fresh": coverage_fresh,
             "coverage_failed": coverage_failed,
+            "fallback_profiles_pruned": fallback_profiles_pruned,
+            "fallback_coverage_pruned": fallback_coverage_pruned,
             "errors": errors[:25],
         }
 
@@ -516,6 +526,41 @@ class HistoricalTeamHydrator:
                 },
             },
         )
+
+    def _prune_fallback_scope_rows(
+        self,
+        scope: HistoricalHydrationScope,
+        *,
+        preferred_provider: str,
+        fallback_provider: str,
+    ) -> tuple[int, int]:
+        """Retire fallback historical rows once the preferred provider owns a scope."""
+        profile_delete_count, _ = TeamSeasonProfile.objects.filter(
+            league_key=scope.league.key,
+            season=scope.season,
+            source=fallback_provider,
+        ).delete()
+        coverage_delete_count, _ = DataCoverage.objects.filter(
+            league_key=scope.league.key,
+            season=scope.season,
+            provider=fallback_provider,
+            coverage_key=self.COVERAGE_KEY,
+        ).exclude(
+            subject_type=DataCoverage.SubjectType.LEAGUE,
+            subject_key=f"{scope.league.key}:{scope.season}",
+            status=DataCoverage.Status.FRESH,
+        ).delete()
+        DataCoverage.objects.filter(
+            subject_type=DataCoverage.SubjectType.LEAGUE,
+            subject_key=f"{scope.league.key}:{scope.season}",
+            provider=fallback_provider,
+            coverage_key=self.COVERAGE_KEY,
+        ).update(
+            status=DataCoverage.Status.STALE,
+            error=f"superseded by {preferred_provider}",
+            missing_requirements=[],
+        )
+        return profile_delete_count, coverage_delete_count
 
     def _scope_failed(
         self,
