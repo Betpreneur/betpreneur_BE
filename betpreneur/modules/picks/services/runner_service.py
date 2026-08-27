@@ -307,24 +307,43 @@ class AlgoRunnerService:
         item["provider_merge"] = provider_merge
         return item
 
-    def _enrich_statpal_fixtures_with_api_football(self, fixtures, target_date):
+    def _merge_statpal_and_api_football_fixtures(self, fixtures, target_date):
         api_rows = self._api_enrichment_rows(target_date)
         enriched = []
+        matched_api_match_ids = set()
         matched = 0
         for fixture in fixtures or []:
             match = self._api_enrichment_match(fixture, api_rows)
             if match:
                 score, orientation, row = match
                 enriched.append(self._merge_api_football_enrichment(fixture, row, score=score, orientation=orientation))
+                matched_api_match_ids.add(str(row.match_id or ""))
                 matched += 1
             else:
                 enriched.append(self._merge_api_football_enrichment(fixture, None))
+        unmatched_api_rows = [
+            row
+            for row in api_rows
+            if str(row.match_id or "") not in matched_api_match_ids
+        ]
+        for row in unmatched_api_rows:
+            payload = self._cached_fixture_runner_payload(row)
+            provider_merge = dict(payload.get("provider_merge") or {})
+            provider_merge.setdefault("primary", payload.get("source") or row.source or "api_football")
+            provider_merge.setdefault("api_football", {
+                "matched": False,
+                "match_id": str(row.match_id or ""),
+                "used_for": ["fixture_source", "odds", "team_form", "prediction"],
+            })
+            payload["provider_merge"] = provider_merge
+            enriched.append(payload)
         log.info(
-            "Daily StatPal/API-Football provider merge date=%s statpal_fixtures=%s api_candidates=%s matched=%s",
+            "Daily StatPal/API-Football provider merge date=%s statpal_fixtures=%s api_candidates=%s matched=%s api_added=%s",
             target_date,
             len(fixtures or []),
             len(api_rows),
             matched,
+            len(unmatched_api_rows),
         )
         return enriched
 
@@ -445,10 +464,10 @@ class AlgoRunnerService:
             if fixtures:
                 api_sync = self._sync_api_football_enrichment_cache(target_date)
                 statpal_errors.extend(api_sync.get("errors") or [])
-                fixtures = self._enrich_statpal_fixtures_with_api_football(fixtures, target_date)
+                fixtures = self._merge_statpal_and_api_football_fixtures(fixtures, target_date)
                 return {
                     "fixtures": fixtures,
-                    "source": "statpal",
+                    "source": "statpal_api_football",
                     "fallback_used": False,
                     "errors": statpal_errors,
                 }

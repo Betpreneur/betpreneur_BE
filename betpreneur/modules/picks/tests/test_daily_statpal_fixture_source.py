@@ -517,6 +517,51 @@ class DailyStatPalFixtureSourceTests(SimpleTestCase):
 
 
 class DailyStatPalFixtureSourceDbTests(TestCase):
+    def test_statpal_daily_fixture_source_keeps_unmatched_api_football_games(self):
+        target_date = datetime(2026, 8, 27, tzinfo=UTC).date()
+        matched_api = FixtureCache.objects.create(
+            match_date=target_date,
+            fixture="Alpha FC vs Beta FC",
+            home_team="Alpha FC",
+            away_team="Beta FC",
+            home_team_normalized="alpha fc",
+            away_team_normalized="beta fc",
+            fixture_normalized="alpha fc vs beta fc",
+            match_id="api-matched",
+            source="api_football",
+            api_payload={"provider_competition_id": "39"},
+        )
+        FixtureCache.objects.create(
+            match_date=target_date,
+            fixture="Gamma FC vs Delta FC",
+            home_team="Gamma FC",
+            away_team="Delta FC",
+            home_team_normalized="gamma fc",
+            away_team_normalized="delta fc",
+            fixture_normalized="gamma fc vs delta fc",
+            match_id="api-extra",
+            source="api_football",
+            api_payload={"provider_competition_id": "39"},
+        )
+        statpal_fixture = {
+            "fixture": "Alpha FC vs Beta FC",
+            "hname": "Alpha FC",
+            "aname": "Beta FC",
+            "match_id": "statpal:alpha-beta",
+            "source": "statpal_daily_cache",
+        }
+
+        fixtures = AlgoRunnerService()._merge_statpal_and_api_football_fixtures(
+            [statpal_fixture],
+            target_date,
+        )
+
+        self.assertEqual([fixture["fixture"] for fixture in fixtures], ["Alpha FC vs Beta FC", "Gamma FC vs Delta FC"])
+        self.assertEqual(fixtures[0]["match_id"], "statpal:alpha-beta")
+        self.assertEqual(fixtures[0]["api_football_fixture_id"], matched_api.match_id)
+        self.assertEqual(fixtures[1]["match_id"], "api-extra")
+        self.assertEqual(fixtures[1]["provider_merge"]["primary"], "api_football")
+
     @override_settings(CELERY_TASK_ALWAYS_EAGER=True)
     def test_statpal_daily_fixture_source_respects_tracked_league_allowlist(self):
         target_date = datetime(2026, 8, 11, tzinfo=UTC).date()
