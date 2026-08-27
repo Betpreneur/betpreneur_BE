@@ -214,3 +214,51 @@ class HistoricalHydratorPersistenceTests(TestCase):
         self.assertEqual(profile.away_goals_for, 47)
         self.assertEqual(profile.away_goals_against, 21)
         self.assertEqual(profile.provider_ids["api_football"]["team_id"], "529")
+
+    @patch("betpreneur.modules.catalog.services.historical_hydrator.aps_get")
+    def test_successful_hydration_replaces_stale_failed_league_coverage(self, aps_get):
+        DataCoverage.objects.create(
+            subject_type=DataCoverage.SubjectType.LEAGUE,
+            subject_key="spain-la-liga:2026-2027",
+            provider="api_football",
+            coverage_key=HistoricalTeamHydrator.COVERAGE_KEY,
+            league_key="spain-la-liga",
+            league_name="Spanish La Liga",
+            season="2026-2027",
+            status=DataCoverage.Status.FAILED,
+            missing_requirements=["standings"],
+            error="no_standings_rows",
+        )
+        aps_get.return_value = [
+            {
+                "league": {
+                    "standings": [
+                        [
+                            {
+                                "rank": 1,
+                                "team": {"id": 529, "name": "Barcelona"},
+                                "points": 88,
+                                "goalsDiff": 63,
+                                "all": {"played": 38, "goals": {"for": 102, "against": 39}},
+                            }
+                        ]
+                    ]
+                }
+            }
+        ]
+
+        result = HistoricalTeamHydrator(client=DummyHistoricalClient()).hydrate(
+            league_keys=["spain-la-liga"],
+            seasons=["2026-2027"],
+        )
+
+        self.assertEqual(result["profiles_saved"], 1)
+        coverage = DataCoverage.objects.get(
+            subject_type=DataCoverage.SubjectType.LEAGUE,
+            subject_key="spain-la-liga:2026-2027",
+            provider="api_football",
+            coverage_key=HistoricalTeamHydrator.COVERAGE_KEY,
+        )
+        self.assertEqual(coverage.status, DataCoverage.Status.FRESH)
+        self.assertEqual(coverage.error, "")
+        self.assertEqual(coverage.missing_requirements, [])

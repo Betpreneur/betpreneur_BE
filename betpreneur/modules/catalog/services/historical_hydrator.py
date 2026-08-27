@@ -161,6 +161,14 @@ class HistoricalTeamHydrator:
                 coverage_failed += 1
                 errors.append({"team_id": team_id, "team_name": standing.get("team_name"), "error": str(exc)[:300]})
 
+        self._save_scope_coverage(
+            scope,
+            provider=provider,
+            provider_league_id=provider_league_id,
+            saved=saved,
+            coverage_failed=coverage_failed,
+            errors=errors,
+        )
         return {
             "status": "complete" if not errors else "partial",
             "league_key": league.key,
@@ -459,6 +467,44 @@ class HistoricalTeamHydrator:
         if provider == "api_football":
             return ["standings"]
         return ["standings"] if team_error else ["standings", "team_stats"]
+
+    def _save_scope_coverage(
+        self,
+        scope: HistoricalHydrationScope,
+        *,
+        provider: str,
+        provider_league_id: str,
+        saved: int,
+        coverage_failed: int,
+        errors: list[dict[str, Any]],
+    ) -> None:
+        now = timezone.now()
+        status = DataCoverage.Status.PARTIAL if coverage_failed else DataCoverage.Status.FRESH
+        DataCoverage.objects.update_or_create(
+            subject_type=DataCoverage.SubjectType.LEAGUE,
+            subject_key=f"{scope.league.key}:{scope.season}",
+            provider=provider,
+            coverage_key=self.COVERAGE_KEY,
+            defaults={
+                "league_key": scope.league.key,
+                "league_name": scope.league.name,
+                "season": scope.season,
+                "status": status,
+                "available_requirements": ["standings"] if saved else [],
+                "missing_requirements": [] if saved else ["standings"],
+                "last_attempted_at": now,
+                "last_success_at": now if saved else None,
+                "error": "" if not errors else "; ".join(str(item.get("error") or "") for item in errors[:3])[:1000],
+                "metadata": {
+                    "provider": provider,
+                    "provider_league_id": provider_league_id
+                    or scope.league.statpal_league_id
+                    or scope.league.api_football_league_id,
+                    "profiles_saved": saved,
+                    "coverage_failed": coverage_failed,
+                },
+            },
+        )
 
     def _scope_failed(
         self,
