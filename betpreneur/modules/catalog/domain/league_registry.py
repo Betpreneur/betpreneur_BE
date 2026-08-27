@@ -56,6 +56,7 @@ TOP_EUROPEAN_INTELLIGENCE_LEAGUES: tuple[IntelligenceLeague, ...] = (
         current_season=CURRENT_EUROPEAN_SEASON,
         previous_season=PREVIOUS_EUROPEAN_SEASON,
         api_football_league_id="140",
+        statpal_league_id="3232",
     ),
     IntelligenceLeague(
         key="italy-serie-a",
@@ -65,6 +66,7 @@ TOP_EUROPEAN_INTELLIGENCE_LEAGUES: tuple[IntelligenceLeague, ...] = (
         current_season=CURRENT_EUROPEAN_SEASON,
         previous_season=PREVIOUS_EUROPEAN_SEASON,
         api_football_league_id="135",
+        statpal_league_id="3102",
     ),
     IntelligenceLeague(
         key="germany-bundesliga",
@@ -74,6 +76,7 @@ TOP_EUROPEAN_INTELLIGENCE_LEAGUES: tuple[IntelligenceLeague, ...] = (
         current_season=CURRENT_EUROPEAN_SEASON,
         previous_season=PREVIOUS_EUROPEAN_SEASON,
         api_football_league_id="78",
+        statpal_league_id="3062",
     ),
     IntelligenceLeague(
         key="france-ligue-1",
@@ -83,6 +86,7 @@ TOP_EUROPEAN_INTELLIGENCE_LEAGUES: tuple[IntelligenceLeague, ...] = (
         current_season=CURRENT_EUROPEAN_SEASON,
         previous_season=PREVIOUS_EUROPEAN_SEASON,
         api_football_league_id="61",
+        statpal_league_id="3054",
     ),
     IntelligenceLeague(
         key="england-championship",
@@ -92,6 +96,7 @@ TOP_EUROPEAN_INTELLIGENCE_LEAGUES: tuple[IntelligenceLeague, ...] = (
         current_season=CURRENT_EUROPEAN_SEASON,
         previous_season=PREVIOUS_EUROPEAN_SEASON,
         api_football_league_id="40",
+        statpal_league_id="3038",
     ),
     IntelligenceLeague(
         key="netherlands-eredivisie",
@@ -101,6 +106,7 @@ TOP_EUROPEAN_INTELLIGENCE_LEAGUES: tuple[IntelligenceLeague, ...] = (
         current_season=CURRENT_EUROPEAN_SEASON,
         previous_season=PREVIOUS_EUROPEAN_SEASON,
         api_football_league_id="88",
+        statpal_league_id="3155",
     ),
     IntelligenceLeague(
         key="portugal-primeira-liga",
@@ -110,6 +116,7 @@ TOP_EUROPEAN_INTELLIGENCE_LEAGUES: tuple[IntelligenceLeague, ...] = (
         current_season=CURRENT_EUROPEAN_SEASON,
         previous_season=PREVIOUS_EUROPEAN_SEASON,
         api_football_league_id="94",
+        statpal_league_id="3185",
     ),
     IntelligenceLeague(
         key="belgium-pro-league",
@@ -119,6 +126,7 @@ TOP_EUROPEAN_INTELLIGENCE_LEAGUES: tuple[IntelligenceLeague, ...] = (
         current_season=CURRENT_EUROPEAN_SEASON,
         previous_season=PREVIOUS_EUROPEAN_SEASON,
         api_football_league_id="144",
+        statpal_league_id="2935",
     ),
     IntelligenceLeague(
         key="scotland-premiership",
@@ -128,6 +136,7 @@ TOP_EUROPEAN_INTELLIGENCE_LEAGUES: tuple[IntelligenceLeague, ...] = (
         current_season=CURRENT_EUROPEAN_SEASON,
         previous_season=PREVIOUS_EUROPEAN_SEASON,
         api_football_league_id="179",
+        statpal_league_id="3203",
     ),
 )
 

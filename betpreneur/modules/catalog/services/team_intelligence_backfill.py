@@ -100,6 +100,7 @@ class TeamIntelligenceBackfillService:
                 "refresh_coverage": coverage,
             },
             "monitoring": monitoring,
+            "warnings": self._warnings([hydration, recent_form, market_profiles, coverage]),
         }
         log.info("team_intelligence_backfill_finished status=%s monitoring=%s", result["status"], monitoring)
         return json_safe(result)
@@ -183,9 +184,36 @@ class TeamIntelligenceBackfillService:
     def _status(results: list[dict[str, Any]]) -> str:
         if any(result.get("status") == "failed" for result in results):
             return "failed"
-        if any(result.get("status") in {"partial", "skipped"} for result in results):
+        if any(
+            result.get("status") in {"partial", "skipped"}
+            or result.get("skipped", 0)
+            or result.get("failed", 0)
+            or result.get("coverage_failed", 0)
+            or result.get("errors")
+            for result in results
+        ):
             return "partial"
         return "complete"
+
+    @staticmethod
+    def _warnings(results: list[dict[str, Any]]) -> list[str]:
+        warnings = []
+        skipped = sum(int(result.get("skipped") or 0) for result in results)
+        failed = sum(int(result.get("failed") or result.get("coverage_failed") or 0) for result in results)
+        errors = sum(len(result.get("errors") or []) for result in results)
+        team_profiles_saved = sum(
+            int(result.get("profiles_saved") or result.get("team_profiles_saved") or 0)
+            for result in results
+        )
+        if skipped:
+            warnings.append(f"{skipped} scopes were skipped")
+        if failed:
+            warnings.append(f"{failed} scopes or rows failed")
+        if errors:
+            warnings.append(f"{errors} errors were reported")
+        if not team_profiles_saved:
+            warnings.append("no team intelligence profiles were saved")
+        return warnings
 
     @staticmethod
     def _log_step(step: str, result: dict[str, Any]) -> None:

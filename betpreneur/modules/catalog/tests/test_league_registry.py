@@ -26,7 +26,10 @@ class TeamIntelligenceLeagueRegistryTests(SimpleTestCase):
             team_intelligence_league_ids("api_football"),
             {"39", "40", "61", "78", "88", "94", "135", "140", "144", "179"},
         )
-        self.assertEqual(team_intelligence_league_ids("statpal"), {"3037"})
+        self.assertEqual(
+            team_intelligence_league_ids("statpal"),
+            {"2935", "3037", "3038", "3054", "3062", "3102", "3155", "3185", "3203", "3232"},
+        )
 
     def test_registry_payload_includes_provider_ids(self):
         payload = team_intelligence_registry_payload()

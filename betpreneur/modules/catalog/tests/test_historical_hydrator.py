@@ -1,3 +1,5 @@
+from unittest.mock import patch
+
 from django.test import SimpleTestCase, TestCase
 
 from betpreneur.modules.catalog.api import (
@@ -128,7 +130,48 @@ class HistoricalHydratorPersistenceTests(TestCase):
         self.assertEqual(coverage.status, DataCoverage.Status.PARTIAL)
         self.assertEqual(coverage.missing_requirements, ["team_stats"])
 
-    def test_league_without_statpal_id_is_skipped(self):
+    @patch("betpreneur.modules.catalog.services.historical_hydrator.aps_get")
+    def test_league_without_statpal_id_uses_api_football_standings(self, aps_get):
+        aps_get.return_value = [
+            {
+                "league": {
+                    "standings": [
+                        [
+                            {
+                                "rank": 1,
+                                "team": {"id": 529, "name": "Barcelona"},
+                                "points": 88,
+                                "goalsDiff": 63,
+                                "all": {
+                                    "played": 38,
+                                    "win": 28,
+                                    "draw": 4,
+                                    "lose": 6,
+                                    "goals": {
+                                        "for": {"total": 102},
+                                        "against": {"total": 39},
+                                    },
+                                },
+                                "home": {
+                                    "played": 19,
+                                    "goals": {
+                                        "for": {"total": 55},
+                                        "against": {"total": 18},
+                                    },
+                                },
+                                "away": {
+                                    "played": 19,
+                                    "goals": {
+                                        "for": {"total": 47},
+                                        "against": {"total": 21},
+                                    },
+                                },
+                            }
+                        ]
+                    ]
+                }
+            }
+        ]
         hydrator = HistoricalTeamHydrator(client=DummyHistoricalClient())
 
         result = hydrator.hydrate(
@@ -136,5 +179,11 @@ class HistoricalHydratorPersistenceTests(TestCase):
             seasons=["2026-2027"],
         )
 
-        self.assertEqual(result["skipped"], 1)
-        self.assertEqual(result["profiles_saved"], 0)
+        self.assertEqual(result["skipped"], 0)
+        self.assertEqual(result["profiles_saved"], 1)
+        self.assertEqual(result["results"][0]["provider"], "api_football")
+        aps_get.assert_called_once_with("/standings", {"league": "140", "season": "2026"}, timeout=20)
+        profile = TeamSeasonProfile.objects.get(team__canonical_normalized="barcelona")
+        self.assertEqual(profile.source, "api_football")
+        self.assertEqual(profile.matches_played, 38)
+        self.assertEqual(profile.provider_ids["api_football"]["team_id"], "529")

@@ -11,6 +11,7 @@ from betpreneur.modules.catalog.domain.league_registry import (
     team_intelligence_leagues,
 )
 from betpreneur.modules.catalog.models import DataCoverage, TeamSeasonProfile
+from betpreneur.modules.catalog.services.legacy_runner import aps_get
 from betpreneur.modules.catalog.services.provider_client import (
     StatPalClient,
     StatPalConfigurationError,
@@ -32,7 +33,7 @@ from betpreneur.platform.db.json import json_safe
 class HistoricalHydrationScope:
     league: IntelligenceLeague
     season: str
-    provider: str = "statpal"
+    provider: str = "auto"
 
 
 class HistoricalTeamHydrator:
@@ -79,33 +80,48 @@ class HistoricalTeamHydrator:
     ) -> dict[str, Any]:
         league = scope.league
         statpal_league_id = str(league.statpal_league_id or "").strip()
-        if not statpal_league_id:
-            return {
-                "status": "skipped",
-                "reason": "missing_statpal_league_id",
-                "league_key": league.key,
-                "league_name": league.name,
-                "season": scope.season,
-                "teams_considered": 0,
-                "profiles_saved": 0,
-                "coverage_fresh": 0,
-                "coverage_failed": 0,
-                "errors": [],
-            }
+        provider = "statpal"
+        provider_league_id = statpal_league_id
+        source_errors = []
+        standings = []
+        if statpal_league_id:
+            try:
+                standings_payload = self.client.soccer_league_standings(
+                    statpal_league_id,
+                    params={"season": scope.season},
+                )
+                standings = [
+                    row
+                    for row in normalize_league_standings(standings_payload)
+                    if self._row_matches_scope(
+                        row,
+                        league=league,
+                        season=scope.season,
+                        provider_league_id=statpal_league_id,
+                    )
+                ]
+            except (StatPalConfigurationError, StatPalError) as exc:
+                source_errors.append({"provider": "statpal", "error": str(exc)[:300]})
 
-        try:
-            standings_payload = self.client.soccer_league_standings(
-                statpal_league_id,
-                params={"season": scope.season},
+        if not standings and league.api_football_league_id:
+            provider = "api_football"
+            provider_league_id = str(league.api_football_league_id or "").strip()
+            try:
+                standings = self._api_football_standings(scope)
+            except Exception as exc:
+                source_errors.append({"provider": "api_football", "error": str(exc)[:300]})
+
+        if not standings:
+            reason = "no_standings_rows"
+            if not league.statpal_league_id and not league.api_football_league_id:
+                reason = "missing_provider_league_id"
+            return self._scope_failed(
+                scope,
+                reason,
+                provider=provider,
+                provider_league_id=provider_league_id,
+                errors=source_errors,
             )
-        except (StatPalConfigurationError, StatPalError) as exc:
-            return self._scope_failed(scope, str(exc))
-
-        standings = [
-            row
-            for row in normalize_league_standings(standings_payload)
-            if self._row_matches_scope(row, league=league, season=scope.season, statpal_league_id=statpal_league_id)
-        ]
         if max_teams is not None:
             standings = standings[: max(0, int(max_teams))]
 
@@ -117,7 +133,7 @@ class HistoricalTeamHydrator:
             team_id = str(standing.get("team_id") or "").strip()
             team_payload = {}
             team_error = ""
-            if team_id:
+            if team_id and provider == "statpal":
                 try:
                     team_payload = normalize_team(self.client.soccer_team(team_id)) or {}
                 except (StatPalConfigurationError, StatPalError) as exc:
@@ -131,7 +147,8 @@ class HistoricalTeamHydrator:
                     season=scope.season,
                     standing=standing,
                     team_payload=team_payload,
-                    provider_league_id=statpal_league_id,
+                    provider=provider,
+                    provider_league_id=provider_league_id,
                     team_error=team_error,
                 )
                 saved += 1
@@ -149,7 +166,8 @@ class HistoricalTeamHydrator:
             "league_key": league.key,
             "league_name": league.name,
             "season": scope.season,
-            "provider_league_id": statpal_league_id,
+            "provider": provider,
+            "provider_league_id": provider_league_id,
             "teams_considered": len(standings),
             "profiles_saved": saved,
             "coverage_fresh": coverage_fresh,
@@ -165,6 +183,7 @@ class HistoricalTeamHydrator:
         standing: dict[str, Any],
         team_payload: dict[str, Any] | None,
         provider_league_id: str,
+        provider: str = "statpal",
         team_error: str = "",
     ) -> TeamSeasonProfile:
         team_payload = team_payload or {}
@@ -185,7 +204,7 @@ class HistoricalTeamHydrator:
 
         with transaction.atomic():
             team = self.mapping_service.link_provider_team_identity(
-                provider="statpal",
+                provider=provider,
                 provider_team_id=team_id,
                 provider_team_name=team_name,
                 canonical_name=team_name,
@@ -208,12 +227,14 @@ class HistoricalTeamHydrator:
                     "provider_ids": json_safe(
                         {
                             "statpal": {
-                                "team_id": team_id,
-                                "league_id": provider_league_id,
-                                "season": season,
+                                "team_id": team_id if provider == "statpal" else "",
+                                "league_id": provider_league_id if provider == "statpal" else league.statpal_league_id,
+                                "season": season if provider == "statpal" else "",
                             },
                             "api_football": {
+                                "team_id": team_id if provider == "api_football" else "",
                                 "league_id": league.api_football_league_id,
+                                "season": self._api_football_season(season),
                             },
                         }
                     ),
@@ -244,12 +265,12 @@ class HistoricalTeamHydrator:
                         }
                     ),
                     "data_quality": data_quality,
-                    "source": "statpal",
+                    "source": provider,
                     "fetched_at": timezone.now(),
                     "computed_at": timezone.now(),
                 },
             )
-            self._save_coverage(profile, team_error=team_error)
+            self._save_coverage(profile, team_error=team_error, provider=provider)
         return profile
 
     def _scopes(
@@ -274,15 +295,78 @@ class HistoricalTeamHydrator:
         *,
         league: IntelligenceLeague,
         season: str,
-        statpal_league_id: str,
+        provider_league_id: str,
     ) -> bool:
         row_league_id = str(row.get("provider_competition_id") or "").strip()
         row_season = str(row.get("season") or "").strip()
-        if row_league_id and row_league_id != statpal_league_id:
+        if row_league_id and row_league_id != provider_league_id:
             return False
         if row_season and row_season != str(season):
             return False
         return bool(row.get("team_id") or row.get("team_name"))
+
+    def _api_football_standings(self, scope: HistoricalHydrationScope) -> list[dict[str, Any]]:
+        response = aps_get(
+            "/standings",
+            {
+                "league": scope.league.api_football_league_id,
+                "season": self._api_football_season(scope.season),
+            },
+            timeout=20,
+        )
+        rows = []
+        for item in response or []:
+            league_payload = item.get("league") if isinstance(item, dict) else {}
+            tables = league_payload.get("standings") if isinstance(league_payload, dict) else []
+            for table in tables or []:
+                for standing in table or []:
+                    if not isinstance(standing, dict):
+                        continue
+                    team = standing.get("team") if isinstance(standing.get("team"), dict) else {}
+                    team_id = str(team.get("id") or "").strip()
+                    team_name = str(team.get("name") or "").strip()
+                    if not team_id and not team_name:
+                        continue
+                    rows.append(
+                        {
+                            "provider": "api_football",
+                            "source": "api_football",
+                            "id": f"api_football:{scope.league.api_football_league_id}:{scope.season}:{team_id}",
+                            "provider_competition_id": str(scope.league.api_football_league_id),
+                            "league": scope.league.name,
+                            "country": scope.league.country,
+                            "season": scope.season,
+                            "team_id": team_id,
+                            "team_name": team_name,
+                            "position": self._int(standing.get("rank")),
+                            "position_raw": str(standing.get("rank") or "").strip(),
+                            "movement_status": str(standing.get("status") or "").strip(),
+                            "recent_form": str(standing.get("form") or "").strip(),
+                            "overall": self._api_football_scope_stats(standing.get("all") or {}),
+                            "home": self._api_football_scope_stats(standing.get("home") or {}),
+                            "away": self._api_football_scope_stats(standing.get("away") or {}),
+                            "goal_difference": self._int(standing.get("goalsDiff")),
+                            "goal_difference_raw": str(standing.get("goalsDiff") or "").strip(),
+                            "points": self._int(standing.get("points")),
+                            "description": str(standing.get("description") or "").strip(),
+                            "raw": standing,
+                        }
+                    )
+        return rows
+
+    @classmethod
+    def _api_football_scope_stats(cls, stats: dict[str, Any]) -> dict[str, Any]:
+        goals = stats.get("goals") if isinstance(stats.get("goals"), dict) else {}
+        goals_for = goals.get("for") if isinstance(goals.get("for"), dict) else {}
+        goals_against = goals.get("against") if isinstance(goals.get("against"), dict) else {}
+        return {
+            "games_played": cls._int(stats.get("played")),
+            "wins": cls._int(stats.get("win")),
+            "draws": cls._int(stats.get("draw")),
+            "losses": cls._int(stats.get("lose")),
+            "goals_scored": cls._num(goals_for.get("total")),
+            "goals_allowed": cls._num(goals_against.get("total")),
+        }
 
     @staticmethod
     def _team_league_stats_row(
@@ -340,13 +424,16 @@ class HistoricalTeamHydrator:
         return TeamSeasonProfile.DataQuality.MISSING
 
     @staticmethod
-    def _save_coverage(profile: TeamSeasonProfile, *, team_error: str = "") -> None:
+    def _api_football_season(self, season: str) -> str:
+        return str(season or "").replace("/", "-").split("-", 1)[0]
+
+    def _save_coverage(self, profile: TeamSeasonProfile, *, team_error: str = "", provider: str = "statpal") -> None:
         now = timezone.now()
         status = DataCoverage.Status.PARTIAL if team_error else DataCoverage.Status.FRESH
         DataCoverage.objects.update_or_create(
             subject_type=DataCoverage.SubjectType.TEAM,
             subject_key=f"{profile.team.canonical_normalized}:{profile.league_key}:{profile.season}",
-            provider="statpal",
+            provider=provider,
             coverage_key=HistoricalTeamHydrator.COVERAGE_KEY,
             defaults={
                 "team": profile.team,
@@ -354,20 +441,34 @@ class HistoricalTeamHydrator:
                 "league_name": profile.league_name,
                 "season": profile.season,
                 "status": status,
-                "available_requirements": ["standings"] if team_error else ["standings", "team_stats"],
-                "missing_requirements": ["team_stats"] if team_error else [],
+                "available_requirements": self._coverage_requirements(provider, team_error=team_error),
+                "missing_requirements": ["team_stats"] if team_error and provider == "statpal" else [],
                 "last_attempted_at": now,
                 "last_success_at": now,
                 "error": team_error[:1000],
-                "metadata": {"team_season_profile_id": profile.pk},
+                "metadata": {"team_season_profile_id": profile.pk, "provider": provider},
             },
         )
 
-    def _scope_failed(self, scope: HistoricalHydrationScope, error: str) -> dict[str, Any]:
+    @staticmethod
+    def _coverage_requirements(provider: str, *, team_error: str) -> list[str]:
+        if provider == "api_football":
+            return ["standings"]
+        return ["standings"] if team_error else ["standings", "team_stats"]
+
+    def _scope_failed(
+        self,
+        scope: HistoricalHydrationScope,
+        error: str,
+        *,
+        provider: str = "statpal",
+        provider_league_id: str = "",
+        errors: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
         DataCoverage.objects.update_or_create(
             subject_type=DataCoverage.SubjectType.LEAGUE,
             subject_key=f"{scope.league.key}:{scope.season}",
-            provider="statpal",
+            provider=provider,
             coverage_key=self.COVERAGE_KEY,
             defaults={
                 "league_key": scope.league.key,
@@ -378,9 +479,16 @@ class HistoricalTeamHydrator:
                 "missing_requirements": ["standings"],
                 "last_attempted_at": timezone.now(),
                 "error": error[:1000],
-                "metadata": {"provider_league_id": scope.league.statpal_league_id},
+                "metadata": {
+                    "provider_league_id": provider_league_id
+                    or scope.league.statpal_league_id
+                    or scope.league.api_football_league_id,
+                    "provider": provider,
+                },
             },
         )
+        reported_errors = list(errors or [])
+        reported_errors.append({"league_key": scope.league.key, "error": error[:300]})
         return {
             "status": "failed",
             "league_key": scope.league.key,
@@ -390,7 +498,9 @@ class HistoricalTeamHydrator:
             "profiles_saved": 0,
             "coverage_fresh": 0,
             "coverage_failed": 1,
-            "errors": [{"league_key": scope.league.key, "error": error[:300]}],
+            "provider": provider,
+            "provider_league_id": provider_league_id,
+            "errors": reported_errors[:25],
         }
 
     @staticmethod

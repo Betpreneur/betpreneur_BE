@@ -38,3 +38,17 @@ class TeamIntelligenceBackfillServiceTests(SimpleTestCase):
         recent_cls.return_value.build.assert_called_once()
         market_cls.return_value.build.assert_called_once()
         coverage_cls.return_value.refresh.assert_called_once()
+
+    def test_backfill_status_is_partial_when_steps_skip_or_fail(self):
+        service = TeamIntelligenceBackfillService()
+        results = [
+            {"status": "complete", "skipped": 18},
+            {"status": "complete", "coverage_failed": 1},
+            {"status": "complete", "team_profiles_saved": 0},
+        ]
+
+        self.assertEqual(service._status(results), "partial")
+        warnings = service._warnings(results)
+        self.assertIn("18 scopes were skipped", warnings)
+        self.assertIn("1 scopes or rows failed", warnings)
+        self.assertIn("no team intelligence profiles were saved", warnings)

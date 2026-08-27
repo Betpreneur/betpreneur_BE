@@ -72,8 +72,9 @@ class MarketProfileBuilder:
         }
 
     def build_scope(self, scope: MarketProfileScope, *, min_attempts: int = 1) -> dict[str, Any]:
-        if not scope.league.statpal_league_id:
-            return self._skipped(scope, "missing_statpal_league_id")
+        provider_league_id = self._provider_league_id(scope.league)
+        if not provider_league_id:
+            return self._skipped(scope, "missing_provider_league_id")
 
         fixtures = list(self._completed_fixtures(scope))
         league_profiles = self._save_league_profiles(scope, fixtures, min_attempts=min_attempts)
@@ -86,7 +87,7 @@ class MarketProfileBuilder:
             "league_key": scope.league.key,
             "league_name": scope.league.name,
             "season": scope.season,
-            "provider_league_id": scope.league.statpal_league_id,
+            "provider_league_id": provider_league_id,
             "fixtures_considered": len(fixtures),
             "team_profiles_saved": team_profiles,
             "league_profiles_saved": league_profiles,
@@ -268,15 +269,11 @@ class MarketProfileBuilder:
 
     def _team_occurrence(self, fixture: FixtureCache, team: TeamProfile) -> dict[str, Any] | None:
         payload = fixture.api_payload or {}
-        statpal_identity = (team.provider_ids or {}).get("statpal") or {}
-        statpal_id = str(
-            (statpal_identity.get("team_id") if isinstance(statpal_identity, dict) else statpal_identity)
-            or ""
-        )
+        team_ids = self._team_provider_ids(team)
         home_id = str(payload.get("provider_home_team_id") or payload.get("hid") or "")
         away_id = str(payload.get("provider_away_team_id") or payload.get("aid") or "")
-        home_match = bool(statpal_id and home_id == statpal_id) or fixture.home_team_normalized == team.canonical_normalized
-        away_match = bool(statpal_id and away_id == statpal_id) or fixture.away_team_normalized == team.canonical_normalized
+        home_match = bool(home_id and home_id in team_ids) or fixture.home_team_normalized == team.canonical_normalized
+        away_match = bool(away_id and away_id in team_ids) or fixture.away_team_normalized == team.canonical_normalized
         if not home_match and not away_match:
             return None
         home_goals = self._score(payload.get("home_goals"), payload.get("ft_home_goals"))
@@ -298,13 +295,35 @@ class MarketProfileBuilder:
         }
 
     def _completed_fixtures(self, scope: MarketProfileScope):
-        payload_filter = Q(api_payload__provider_competition_id=str(scope.league.statpal_league_id))
-        payload_filter |= Q(api_payload__code=str(scope.league.statpal_league_id))
+        provider_ids = self._provider_league_ids(scope.league)
+        payload_filter = Q()
+        for provider_id in provider_ids:
+            payload_filter |= Q(api_payload__provider_competition_id=str(provider_id))
+            payload_filter |= Q(api_payload__code=str(provider_id))
+            payload_filter |= Q(api_payload__league_id=str(provider_id))
         return (
-            FixtureCache.objects.filter(source="statpal")
+            FixtureCache.objects.filter(source__in=["statpal", "api_football", "aps_provider_lookup"])
             .filter(payload_filter)
             .order_by("-match_date", "-kickoff_utc", "-updated_at")
         )
+
+    @staticmethod
+    def _provider_league_id(league: IntelligenceLeague) -> str:
+        return str(league.statpal_league_id or league.api_football_league_id or "").strip()
+
+    @staticmethod
+    def _provider_league_ids(league: IntelligenceLeague) -> set[str]:
+        return {str(value).strip() for value in (league.statpal_league_id, league.api_football_league_id) if str(value or "").strip()}
+
+    @staticmethod
+    def _team_provider_ids(team: TeamProfile) -> set[str]:
+        values = set()
+        for identity in (team.provider_ids or {}).values():
+            if isinstance(identity, dict):
+                values.update(str(value).strip() for key, value in identity.items() if key.endswith("team_id") or key == "team_id")
+            else:
+                values.add(str(identity).strip())
+        return values - {""}
 
     @staticmethod
     def _teams_for_scope(scope: MarketProfileScope):

@@ -16,6 +16,7 @@ from betpreneur.modules.catalog.models import (
     TeamProfile,
     TeamRecentFormProfile,
 )
+from betpreneur.modules.catalog.services.legacy_runner import aps_get
 from betpreneur.modules.catalog.services.provider_client import (
     StatPalClient,
     StatPalConfigurationError,
@@ -92,9 +93,9 @@ class RecentFormBuilder:
         max_matches: int | None = None,
     ) -> dict[str, Any]:
         league = scope.league
-        provider_league_id = str(league.statpal_league_id or "").strip()
+        provider_league_id = self._provider_league_id(league)
         if not provider_league_id:
-            return self._skipped(scope, "missing_statpal_league_id")
+            return self._skipped(scope, "missing_provider_league_id")
 
         errors = []
         synced = 0
@@ -147,16 +148,20 @@ class RecentFormBuilder:
         }
 
     def sync_league_matches(self, scope: RecentFormScope, *, max_matches: int | None = None) -> int:
-        payload = self.client.soccer_league_matches(
-            scope.league.statpal_league_id,
-            params={"season": scope.season},
-        )
-        fixtures = normalize_daily_matches(payload, target_date=timezone.localdate())
-        filtered = [
-            fixture
-            for fixture in fixtures
-            if str(fixture.get("provider_competition_id") or fixture.get("code") or "") == str(scope.league.statpal_league_id)
-        ]
+        if scope.league.statpal_league_id:
+            payload = self.client.soccer_league_matches(
+                scope.league.statpal_league_id,
+                params={"season": scope.season},
+            )
+            fixtures = normalize_daily_matches(payload, target_date=timezone.localdate())
+            provider_league_id = str(scope.league.statpal_league_id)
+            filtered = [
+                fixture
+                for fixture in fixtures
+                if str(fixture.get("provider_competition_id") or fixture.get("code") or "") == provider_league_id
+            ]
+        else:
+            filtered = self._api_football_fixture_rows(scope)
         if max_matches is not None:
             filtered = filtered[: max(0, int(max_matches))]
 
@@ -212,10 +217,14 @@ class RecentFormBuilder:
         return profile
 
     def _completed_fixtures(self, scope: RecentFormScope):
-        payload_filter = Q(api_payload__provider_competition_id=str(scope.league.statpal_league_id))
-        payload_filter |= Q(api_payload__code=str(scope.league.statpal_league_id))
+        provider_ids = self._provider_league_ids(scope.league)
+        payload_filter = Q()
+        for provider_id in provider_ids:
+            payload_filter |= Q(api_payload__provider_competition_id=str(provider_id))
+            payload_filter |= Q(api_payload__code=str(provider_id))
+            payload_filter |= Q(api_payload__league_id=str(provider_id))
         return (
-            FixtureCache.objects.filter(source="statpal")
+            FixtureCache.objects.filter(source__in=["statpal", "api_football", "aps_provider_lookup"])
             .filter(payload_filter)
             .order_by("-match_date", "-kickoff_utc", "-updated_at")
         )
@@ -230,6 +239,7 @@ class RecentFormBuilder:
         ).distinct()
 
     def _team_rows(self, team: TeamProfile, fixtures: list[FixtureCache]) -> dict[str, list[dict[str, Any]]]:
+        provider_ids = self._team_provider_ids(team)
         statpal_identity = (team.provider_ids or {}).get("statpal") or {}
         statpal_id = str(
             (statpal_identity.get("team_id") if isinstance(statpal_identity, dict) else statpal_identity)
@@ -242,7 +252,7 @@ class RecentFormBuilder:
             TeamRecentFormProfile.Scope.AWAY: [],
         }
         for fixture in fixtures:
-            occurrence = self._fixture_occurrence(fixture, statpal_id=statpal_id, names=names)
+            occurrence = self._fixture_occurrence(fixture, team_ids=provider_ids | ({statpal_id} if statpal_id else set()), names=names)
             if not occurrence:
                 continue
             rows[TeamRecentFormProfile.Scope.ALL].append(occurrence)
@@ -250,12 +260,12 @@ class RecentFormBuilder:
         return rows
 
     @staticmethod
-    def _fixture_occurrence(fixture: FixtureCache, *, statpal_id: str, names: set[str]) -> dict[str, Any] | None:
+    def _fixture_occurrence(fixture: FixtureCache, *, team_ids: set[str], names: set[str]) -> dict[str, Any] | None:
         payload = fixture.api_payload or {}
         home_id = str(payload.get("provider_home_team_id") or payload.get("hid") or "")
         away_id = str(payload.get("provider_away_team_id") or payload.get("aid") or "")
-        home_match = bool(statpal_id and home_id == statpal_id) or fixture.home_team_normalized in names
-        away_match = bool(statpal_id and away_id == statpal_id) or fixture.away_team_normalized in names
+        home_match = bool(home_id and home_id in team_ids) or fixture.home_team_normalized in names
+        away_match = bool(away_id and away_id in team_ids) or fixture.away_team_normalized in names
         if not home_match and not away_match:
             return None
         if not RecentFormBuilder._is_final(payload):
@@ -358,6 +368,81 @@ class RecentFormBuilder:
         from betpreneur.modules.catalog.domain.text import normalize_fixture_text
 
         return {normalize_fixture_text(alias) for alias in (team.aliases or []) if normalize_fixture_text(alias)}
+
+    @staticmethod
+    def _team_provider_ids(team: TeamProfile) -> set[str]:
+        values = set()
+        for identity in (team.provider_ids or {}).values():
+            if isinstance(identity, dict):
+                values.update(str(value).strip() for key, value in identity.items() if key.endswith("team_id") or key == "team_id")
+            else:
+                values.add(str(identity).strip())
+        return values - {""}
+
+    @staticmethod
+    def _provider_league_id(league: IntelligenceLeague) -> str:
+        return str(league.statpal_league_id or league.api_football_league_id or "").strip()
+
+    @staticmethod
+    def _provider_league_ids(league: IntelligenceLeague) -> set[str]:
+        return {str(value).strip() for value in (league.statpal_league_id, league.api_football_league_id) if str(value or "").strip()}
+
+    def _api_football_fixture_rows(self, scope: RecentFormScope) -> list[dict[str, Any]]:
+        response = aps_get(
+            "/fixtures",
+            {
+                "league": scope.league.api_football_league_id,
+                "season": self._api_football_season(scope.season),
+            },
+            timeout=30,
+        )
+        rows = []
+        for item in response or []:
+            if not isinstance(item, dict):
+                continue
+            fixture = item.get("fixture") if isinstance(item.get("fixture"), dict) else {}
+            league = item.get("league") if isinstance(item.get("league"), dict) else {}
+            teams = item.get("teams") if isinstance(item.get("teams"), dict) else {}
+            goals = item.get("goals") if isinstance(item.get("goals"), dict) else {}
+            home = teams.get("home") if isinstance(teams.get("home"), dict) else {}
+            away = teams.get("away") if isinstance(teams.get("away"), dict) else {}
+            fixture_id = fixture.get("id")
+            if not fixture_id or not home.get("name") or not away.get("name"):
+                continue
+            kickoff = fixture.get("date") or ""
+            rows.append(
+                {
+                    "fixture": f"{home.get('name')} vs {away.get('name')}",
+                    "hname": home.get("name") or "",
+                    "aname": away.get("name") or "",
+                    "home_logo": home.get("logo") or "",
+                    "away_logo": away.get("logo") or "",
+                    "hid": home.get("id"),
+                    "aid": away.get("id"),
+                    "league": league.get("name") or scope.league.name,
+                    "league_logo": league.get("logo") or "",
+                    "country": league.get("country") or scope.league.country,
+                    "country_flag": league.get("flag") or "",
+                    "round": league.get("round") or "",
+                    "league_type": league.get("type") or "",
+                    "code": str(league.get("id") or scope.league.api_football_league_id),
+                    "kickoff": "",
+                    "kickoff_utc": kickoff,
+                    "match_id": fixture_id,
+                    "source": "api_football",
+                    "aps_id": fixture_id,
+                    "date": (kickoff or "")[:10] or timezone.localdate().isoformat(),
+                    "season": league.get("season") or self._api_football_season(scope.season),
+                    "status": (fixture.get("status") or {}).get("short") or "",
+                    "home_goals": goals.get("home"),
+                    "away_goals": goals.get("away"),
+                }
+            )
+        return rows
+
+    @staticmethod
+    def _api_football_season(season: str) -> str:
+        return str(season or "").replace("/", "-").split("-", 1)[0]
 
     @staticmethod
     def _windows(windows: list[int] | tuple[int, ...]) -> tuple[int, ...]:
