@@ -3,6 +3,7 @@
 Lifted verbatim from the old config/celery.py so the running cadence is
 unchanged; only the task paths moved to their owning modules.
 """
+
 import os
 from datetime import timedelta
 
@@ -30,6 +31,17 @@ BEAT_SCHEDULE = {
         ),
         "options": {"expires": timedelta(hours=6).total_seconds()},
     },
+    "evaluate-strategy-memory": {
+        "task": "betpreneur.modules.analytics.tasks.evaluate_strategy_memory",
+        "schedule": crontab(
+            hour=os.environ.get("STRATEGY_MEMORY_EVALUATE_HOUR", "7"),
+            minute=os.environ.get("STRATEGY_MEMORY_EVALUATE_MINUTE", "10"),
+        ),
+        "kwargs": {
+            "evaluation_days": int(os.environ.get("STRATEGY_MEMORY_EVALUATION_DAYS", "14")),
+        },
+        "options": {"expires": timedelta(hours=6).total_seconds()},
+    },
     # Four times a day: ~1,000 calls a sweep against a 50k daily quota, keeping the
     # Match Checker's 3-day fixture window warm so resolution never hits the provider.
     "sync-fixture-horizon": {
@@ -50,8 +62,10 @@ BEAT_SCHEDULE = {
         ),
         "kwargs": {
             "days": int(os.environ.get("STATPAL_DAILY_BUILD_DAYS", "3")),
-            "include_optional": os.environ.get("STATPAL_DAILY_BUILD_OPTIONAL", "0").lower() in {"1", "true", "yes"},
-            "force": os.environ.get("STATPAL_DAILY_BUILD_FORCE", "0").lower() in {"1", "true", "yes"},
+            "include_optional": os.environ.get("STATPAL_DAILY_BUILD_OPTIONAL", "0").lower()
+            in {"1", "true", "yes"},
+            "force": os.environ.get("STATPAL_DAILY_BUILD_FORCE", "0").lower()
+            in {"1", "true", "yes"},
         },
         "options": {"expires": timedelta(hours=8).total_seconds()},
     },
@@ -66,8 +80,12 @@ BEAT_SCHEDULE = {
         ),
         "kwargs": {
             "days": int(os.environ.get("TEAM_INTELLIGENCE_REFRESH_DAYS", "3")),
-            "recent_form_sync_matches": _env_bool("TEAM_INTELLIGENCE_RECENT_FORM_SYNC_MATCHES", "0"),
-            "market_min_attempts": int(os.environ.get("TEAM_INTELLIGENCE_MARKET_MIN_ATTEMPTS", "1")),
+            "recent_form_sync_matches": _env_bool(
+                "TEAM_INTELLIGENCE_RECENT_FORM_SYNC_MATCHES", "0"
+            ),
+            "market_min_attempts": int(
+                os.environ.get("TEAM_INTELLIGENCE_MARKET_MIN_ATTEMPTS", "1")
+            ),
             "coverage_ttl_hours": int(os.environ.get("TEAM_INTELLIGENCE_COVERAGE_TTL_HOURS", "24")),
         },
         "options": {"expires": timedelta(hours=7).total_seconds()},
@@ -122,9 +140,13 @@ BEAT_SCHEDULE = {
     },
     "cleanup-slip-review-market-cache": {
         "task": "betpreneur.modules.picks.tasks.cleanup_slip_review_market_cache",
-        "schedule": crontab(minute=os.environ.get("SLIP_REVIEW_MARKET_CACHE_CLEANUP_MINUTES", "55")),
+        "schedule": crontab(
+            minute=os.environ.get("SLIP_REVIEW_MARKET_CACHE_CLEANUP_MINUTES", "55")
+        ),
         "kwargs": {
-            "grace_seconds": int(os.environ.get("SLIP_REVIEW_MARKET_CACHE_CLEANUP_GRACE_SECONDS", "0")),
+            "grace_seconds": int(
+                os.environ.get("SLIP_REVIEW_MARKET_CACHE_CLEANUP_GRACE_SECONDS", "0")
+            ),
             "limit": int(os.environ.get("SLIP_REVIEW_MARKET_CACHE_CLEANUP_LIMIT", "0")),
         },
         "options": {"expires": timedelta(minutes=50).total_seconds()},

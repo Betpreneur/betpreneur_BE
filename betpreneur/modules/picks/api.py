@@ -8,12 +8,13 @@ This module is the only importable surface. Nothing outside the module
 may reach into picks.models, .services, .domain, .interface or .tasks —
 the R2 import contract enforces that.
 """
+
 from __future__ import annotations
 
 from betpreneur.platform.cache.http import cached_response
 
 from .interface.serializers import PickSerializer
-from .models import AlgoFixture, AlgoRun, MarketPrediction, Pick
+from .models import AlgoFixture, AlgoRun, MarketPrediction, Pick, StrategyReview
 from .services.presentation import (
     EXCLUDED_MARKETS,
     decimal_or_none,
@@ -34,6 +35,7 @@ __all__ = [
     "MarketPrediction",
     "Pick",
     "PickSerializer",
+    "StrategyReview",
     "algo_runner_service",
     "decimal_or_none",
     "format_game_form_line",

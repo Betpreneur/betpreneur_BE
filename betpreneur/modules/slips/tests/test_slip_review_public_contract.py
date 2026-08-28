@@ -301,11 +301,21 @@ class MatchedFixtureStatPalPayloadTests(SimpleTestCase):
         self.assertTrue(_has_statpal_hydration_identity({"statpal_home_team_id": "home-1"}))
         self.assertTrue(_has_statpal_hydration_identity({}, {"home_team_id": "home-1"}))
         self.assertTrue(_has_statpal_hydration_identity({}, {"provider_match_id": "202608091"}))
-        self.assertTrue(_has_statpal_hydration_identity({}, {}, {"provider": "statpal", "provider_event_id": "202608091"}))
+        self.assertTrue(
+            _has_statpal_hydration_identity(
+                {}, {}, {"provider": "statpal", "provider_event_id": "202608091"}
+            )
+        )
 
     def test_statpal_hydration_identity_rejects_plain_api_fixture_only(self):
-        self.assertFalse(_has_statpal_hydration_identity({"match_id": "1494240", "home_team": "A", "away_team": "B"}))
-        self.assertFalse(_has_statpal_hydration_identity({"match_id": "1494240", "home_team_id": "api-home"}))
+        self.assertFalse(
+            _has_statpal_hydration_identity(
+                {"match_id": "1494240", "home_team": "A", "away_team": "B"}
+            )
+        )
+        self.assertFalse(
+            _has_statpal_hydration_identity({"match_id": "1494240", "home_team_id": "api-home"})
+        )
 
     def test_skip_core_requires_existing_game_or_statpal_identity_for_any_skip_market(self):
         for market in ["Home Win", "Cards Over 3.5", "Florian Wirtz To Score"]:
@@ -331,7 +341,9 @@ class MatchedFixtureStatPalPayloadTests(SimpleTestCase):
 class SlipReviewPublicContractTests(SimpleTestCase):
     def setUp(self):
         super().setUp()
-        bands = {name: {"wins": 0, "settled": 0, "hit_rate_percent": None} for name, _, _ in SCORE_BANDS}
+        bands = {
+            name: {"wins": 0, "settled": 0, "hit_rate_percent": None} for name, _, _ in SCORE_BANDS
+        }
         self._calibration_patch = patch(
             "betpreneur.modules.pricing.api.ticket_risk_service.calibration",
             return_value=Calibration(basis="prior", sample_size=0, bands=bands),
@@ -397,7 +409,10 @@ class SlipReviewPublicContractTests(SimpleTestCase):
         self.assertIn("decision_score", selection["your_pick"])
         self.assertIn("data_confidence_score", selection["your_pick"])
         self.assertIn("confidence_label", selection["your_pick"])
-        self.assertNotEqual(selection["your_pick"]["model_probability_percent"], selection["your_pick"]["decision_score"])
+        self.assertNotEqual(
+            selection["your_pick"]["model_probability_percent"],
+            selection["your_pick"]["decision_score"],
+        )
         self.assertIn("value_rating", selection["your_pick"])
         self.assertIn("market_consensus", selection)
         self.assertIn("model_fair_odds", public["comparison"]["original"])
@@ -419,7 +434,9 @@ class SlipReviewPublicContractTests(SimpleTestCase):
         self.assertEqual(selection["technical_ref"]["market_support_level"], "full")
         self.assertEqual(selection["technical_ref"]["market_data_quality"], "strong")
         self.assertEqual(selection["technical_ref"]["statpal_snapshot_types"], ["lineups"])
-        self.assertEqual(selection["technical_ref"]["statpal_hydration_source"], "statpal_daily_cache")
+        self.assertEqual(
+            selection["technical_ref"]["statpal_hydration_source"], "statpal_daily_cache"
+        )
         self.assertEqual(selection["technical_ref"]["statpal_snapshot_cache_status"], "hit")
         self.assertEqual(selection["technical_ref"]["statpal_required_snapshot_types"], ["lineups"])
         self.assertEqual(selection["technical_ref"]["statpal_missing_snapshot_types"], [])
@@ -569,10 +586,20 @@ class SlipReviewPublicContractTests(SimpleTestCase):
             ]
         }
 
-        with patch("betpreneur.modules.catalog.services.legacy_runner.llm_reasoning_enabled", return_value=True), patch(
-            "betpreneur.modules.catalog.services.legacy_runner._deepseek_chat_completion",
-            return_value="{}",
-        ), patch("betpreneur.modules.catalog.services.legacy_runner._parse_llm_json", return_value=parsed):
+        with (
+            patch(
+                "betpreneur.modules.catalog.services.legacy_runner.llm_reasoning_enabled",
+                return_value=True,
+            ),
+            patch(
+                "betpreneur.modules.catalog.services.legacy_runner._deepseek_chat_completion",
+                return_value="{}",
+            ),
+            patch(
+                "betpreneur.modules.catalog.services.legacy_runner._parse_llm_json",
+                return_value=parsed,
+            ),
+        ):
             enhanced = _enhance_bettor_public_with_deepseek(payload)
 
         self.assertEqual(enhanced["games"][0]["user_pick"]["summary"], "DeepSeek summary.")
@@ -594,6 +621,10 @@ class SlipReviewPublicContractTests(SimpleTestCase):
             "line": 2.5,
             "selection": "over",
         }
+        result["replacement_market"]["explanation_facts"] = [
+            "Projected total goals: 3.30.",
+            "Line 2.5 is below the model projection of 3.30 goals.",
+        ]
         result["replacement_market"]["market_taxonomy"] = describe_market("Over 2.5").to_dict()
 
         payload = _build_bettor_public_payload(
@@ -605,6 +636,7 @@ class SlipReviewPublicContractTests(SimpleTestCase):
 
         self.assertEqual(game["recommendation"]["action"], "replace")
         self.assertEqual(game["recommendation"]["pick"]["market"], "Over 2.5")
+        self.assertEqual(game["recommendation"]["why"][0], "Projected total goals: 3.30.")
         joined = " ".join(game["recommendation"]["why"])
         self.assertIn("Expected goals", joined)
         self.assertNotIn("Result probabilities", joined)
@@ -667,7 +699,16 @@ class SlipReviewPublicContractTests(SimpleTestCase):
         # a smaller ticket can be built and at what sizes.
         self.assertEqual(
             set(payload.keys()),
-            {"id", "source", "status", "ticket", "games", "recommended_ticket", "disclaimer", "smart_randomize"},
+            {
+                "id",
+                "source",
+                "status",
+                "ticket",
+                "games",
+                "recommended_ticket",
+                "disclaimer",
+                "smart_randomize",
+            },
         )
         self.assertIn("user_picks", payload["ticket"])
         self.assertIn("recommended_picks", payload["ticket"])
@@ -787,7 +828,9 @@ class SlipReviewPublicContractTests(SimpleTestCase):
         )
 
         self.assertEqual(payload["ticket"]["user_picks"]["estimated_success_display"], "<0.01%")
-        self.assertEqual(payload["ticket"]["recommended_picks"]["estimated_success_display"], "<0.01%")
+        self.assertEqual(
+            payload["ticket"]["recommended_picks"]["estimated_success_display"], "<0.01%"
+        )
         self.assertEqual(payload["recommended_ticket"]["estimated_success_display"], "<0.01%")
 
     def test_market_not_found_with_replacement_counts_as_analysed(self):
@@ -855,7 +898,11 @@ class SlipReviewPublicContractTests(SimpleTestCase):
         )
 
         game = payload["games"][0]
-        joined = " ".join(game["analysis"]["positive_evidence"] + game["analysis"]["risk_evidence"] + game["recommendation"]["why"])
+        joined = " ".join(
+            game["analysis"]["positive_evidence"]
+            + game["analysis"]["risk_evidence"]
+            + game["recommendation"]["why"]
+        )
         self.assertIn("Home: 3W-3D-2L in 8", joined)
         self.assertIn("Away: 4W-2D-2L in 8", joined)
         self.assertNotIn("StatPal reference", joined)
@@ -944,7 +991,9 @@ class SlipReviewPublicContractTests(SimpleTestCase):
         self.assertNotIn("recommended_ticket", payload)
 
     def test_market_not_found_without_replacement_but_scored_counts_as_analysed(self):
-        summary = _manual_review_summary([_sample_market_not_found_without_replacement_but_scored()])
+        summary = _manual_review_summary(
+            [_sample_market_not_found_without_replacement_but_scored()]
+        )
         public = summary["public"]
 
         self.assertEqual(summary["analysed_count"], 1)
@@ -998,7 +1047,11 @@ class SlipReviewPublicContractTests(SimpleTestCase):
             "advisory_score": 54.9,
             "market_taxonomy": describe_market("Corners Under 12.5").to_dict(),
             "market_capability": {"data_quality": "medium"},
-            "advisory_evidence": {"expected_total_corners": 10.8, "line": 12.5, "selection": "under"},
+            "advisory_evidence": {
+                "expected_total_corners": 10.8,
+                "line": 12.5,
+                "selection": "under",
+            },
         }
         strong_broad = {
             "market": "Corners Over 8.5",
@@ -1060,8 +1113,14 @@ class SlipReviewPayloadDbTests(TestCase):
         # These assert the persisted-event path. A reachable Redis -- shared across runs
         # and keyed by review id -- otherwise serves stale snapshots for ids the tests
         # happen to reuse, making the results depend on whatever ran before.
-        snapshot = patch("betpreneur.modules.slips.interface.views.slip_review_redis.get_snapshot", return_value=None)
-        events = patch("betpreneur.modules.slips.interface.views.slip_review_redis.get_events_after", return_value=None)
+        snapshot = patch(
+            "betpreneur.modules.slips.interface.views.slip_review_redis.get_snapshot",
+            return_value=None,
+        )
+        events = patch(
+            "betpreneur.modules.slips.interface.views.slip_review_redis.get_events_after",
+            return_value=None,
+        )
         snapshot.start()
         events.start()
         self.addCleanup(snapshot.stop)
@@ -1258,7 +1317,9 @@ class SlipReviewPayloadDbTests(TestCase):
         self.assertIn("positive_evidence", payload["games"][0]["analysis"])
         self.assertIn("risk_evidence", payload["games"][0]["analysis"])
         self.assertIn("recommendation", payload["games"][0])
-        self.assertEqual(payload["recommended_ticket"]["picks"][0]["match"], payload["games"][0]["match"])
+        self.assertEqual(
+            payload["recommended_ticket"]["picks"][0]["match"], payload["games"][0]["match"]
+        )
         self.assertNotIn("summary", payload)
         self.assertNotIn("intelligence", payload)
         self.assertNotIn("api_usage", payload)
@@ -1294,18 +1355,23 @@ class SlipReviewPayloadDbTests(TestCase):
         client = APIClient()
         client.force_authenticate(user=user)
 
-        response = client.post(f"/api/algo/slip-reviews/{review.id}/randomize/", {"games": 4}, format="json")
+        response = client.post(
+            f"/api/algo/slip-reviews/{review.id}/randomize/", {"games": 4}, format="json"
+        )
 
         self.assertEqual(response.status_code, 200)
         payload = response.json()
         self.assertEqual(payload["requested_games"], 4)
         self.assertEqual(payload["available_options"], [2, 4])
-        self.assertEqual([pick["match"] for pick in payload["picks"]], [
-            "Gamma vs Delta",
-            "Lambda vs Mu",
-            "Alpha vs Beta",
-            "Eta vs Theta",
-        ])
+        self.assertEqual(
+            [pick["match"] for pick in payload["picks"]],
+            [
+                "Gamma vs Delta",
+                "Lambda vs Mu",
+                "Eta vs Theta",
+                "Alpha vs Beta",
+            ],
+        )
         self.assertEqual(payload["picks"][0]["market"], "DC: X2")
         self.assertTrue(payload["picks"][0]["changed_from_user_pick"])
         self.assertEqual(payload["ticket"]["total_games"], 4)
@@ -1333,7 +1399,9 @@ class SlipReviewPayloadDbTests(TestCase):
         client = APIClient()
         client.force_authenticate(user=user)
 
-        response = client.post(f"/api/algo/slip-reviews/{review.id}/randomize/", {"games": 4}, format="json")
+        response = client.post(
+            f"/api/algo/slip-reviews/{review.id}/randomize/", {"games": 4}, format="json"
+        )
 
         self.assertEqual(response.status_code, 402)
         payload = response.json()
@@ -1357,7 +1425,9 @@ class SlipReviewPayloadDbTests(TestCase):
         client = APIClient()
         client.force_authenticate(user=user)
 
-        response = client.post(f"/api/algo/slip-reviews/{review.id}/randomize/", {"games": 6}, format="json")
+        response = client.post(
+            f"/api/algo/slip-reviews/{review.id}/randomize/", {"games": 6}, format="json"
+        )
 
         self.assertEqual(response.status_code, 400)
         self.assertEqual(response.json()["available_options"], [2, 4])
@@ -1376,14 +1446,18 @@ class SlipReviewPayloadDbTests(TestCase):
         client = APIClient()
         client.force_authenticate(user=user)
 
-        response = client.post(f"/api/algo/slip-reviews/{review.id}/randomize/", {"games": 2}, format="json")
+        response = client.post(
+            f"/api/algo/slip-reviews/{review.id}/randomize/", {"games": 2}, format="json"
+        )
 
         self.assertEqual(response.status_code, 409)
         self.assertEqual(response.json()["status"], "analysing")
 
     def test_public_only_partial_review_is_reported_as_completed(self):
         user = get_user_model().objects.create_user(username="partial-user")
-        summary = _manual_review_summary([_sample_replace_result(), _sample_market_not_found_without_score()])
+        summary = _manual_review_summary(
+            [_sample_replace_result(), _sample_market_not_found_without_score()]
+        )
         review = SlipReview.objects.create(
             user=user,
             source=SlipReview.Source.SPORTYBET,
@@ -1494,7 +1568,9 @@ class SlipReviewPayloadDbTests(TestCase):
         self.assertEqual(payload["progress"]["final_status"], SlipReview.Status.COMPLETED)
         self.assertEqual(payload["events"][0]["id"], event.id)
         self.assertEqual(payload["events"][0]["payload"]["status"], SlipReview.Status.COMPLETED)
-        self.assertEqual(payload["events"][0]["payload"]["progress"]["final_status"], SlipReview.Status.COMPLETED)
+        self.assertEqual(
+            payload["events"][0]["payload"]["progress"]["final_status"], SlipReview.Status.COMPLETED
+        )
 
     def test_streamed_leg_payload_contains_public_game_card(self):
         user = get_user_model().objects.create_user(username="stream-card")
@@ -1717,7 +1793,9 @@ class SlipReviewPayloadDbTests(TestCase):
 
         self.assertEqual(result["recovered"], 1)
         self.assertIn(review.status, {SlipReview.Status.COMPLETED, SlipReview.Status.PARTIAL})
-        self.assertTrue(SlipReviewEvent.objects.filter(review=review, event_type="review.completed").exists())
+        self.assertTrue(
+            SlipReviewEvent.objects.filter(review=review, event_type="review.completed").exists()
+        )
 
     def test_stale_recovery_fails_review_without_completed_legs(self):
         user = get_user_model().objects.create_user(username="stale-fail")
@@ -1737,4 +1815,6 @@ class SlipReviewPayloadDbTests(TestCase):
         self.assertEqual(result["failed"], 1)
         self.assertEqual(review.status, SlipReview.Status.FAILED)
         self.assertEqual(review.summary["error_code"], "stale_review_timeout")
-        self.assertTrue(SlipReviewEvent.objects.filter(review=review, event_type="review.failed").exists())
+        self.assertTrue(
+            SlipReviewEvent.objects.filter(review=review, event_type="review.failed").exists()
+        )

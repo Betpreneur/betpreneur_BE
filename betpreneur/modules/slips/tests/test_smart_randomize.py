@@ -14,6 +14,7 @@ from betpreneur.modules.slips.domain.slip_analysis import (
     SMART_RANDOMIZE_MIN_CONFIDENCE,
     _smart_randomize_candidates,
     _smart_randomize_pick_for_game,
+    _smart_randomize_select_candidates,
 )
 
 
@@ -59,9 +60,7 @@ class EligibilityTests(SimpleTestCase):
     def test_the_floor_matches_the_avoid_boundary(self):
         """Below this the review says avoid; the two must not disagree."""
         self.assertEqual(SMART_RANDOMIZE_MIN_CONFIDENCE, 55.0)
-        self.assertIsNone(
-            _smart_randomize_pick_for_game(_game(confidence=54.9, verdict="caution"))
-        )
+        self.assertIsNone(_smart_randomize_pick_for_game(_game(confidence=54.9, verdict="caution")))
         self.assertIsNotNone(
             _smart_randomize_pick_for_game(_game(confidence=55.0, verdict="caution"))
         )
@@ -99,6 +98,18 @@ class EvidenceAwareRankingTests(SimpleTestCase):
         pick = _smart_randomize_pick_for_game(_game(confidence=72.0, verdict="keep"))
 
         self.assertEqual(pick["ranking_score"], 72.0)
+
+    def test_selection_spreads_market_families_when_scores_are_comparable(self):
+        candidates = [
+            {"id": 1, "match": "A", "market": "Over 1.5", "ranking_score": 82.0},
+            {"id": 2, "match": "B", "market": "Over 2.5", "ranking_score": 81.0},
+            {"id": 3, "match": "C", "market": "Under 3.5", "ranking_score": 80.0},
+            {"id": 4, "match": "D", "market": "Home Win", "ranking_score": 79.0},
+        ]
+
+        selected = _smart_randomize_select_candidates(candidates, 3)
+
+        self.assertIn("Home Win", [item["market"] for item in selected])
 
 
 class ReplacementTests(SimpleTestCase):

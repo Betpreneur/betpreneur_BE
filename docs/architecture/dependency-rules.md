@@ -5,7 +5,7 @@ Enforced by `.importlinter`; run with `make verify-imports`.
 | | Rule | Contract |
 |---|---|---|
 | **R1** | `platform` imports nothing of ours. | `platform-is-bottom` |
-| **R2** | Only `<module>.api` / `.contracts` / `.events` cross a boundary. A module reaches its own internals freely. | `private-<module>` ×11 |
+| **R2** | Only `<module>.api` / `.contracts` / `.events` cross a boundary. A module reaches its own internals freely. | `private-<module>` ×12 |
 | **R3** | Calls go **down**. Peers on the same layer may not import each other. | `layers` |
 | **R5** | `domain/` imports no django, DRF, celery or redis. | `domain-purity` |
 | **R7** | Integrations import no module and no django. Config is passed in. | `integrations-are-leaves` |

@@ -107,6 +107,7 @@ class StatPalMarketAdvisoryService:
             payload = engine.evaluate(descriptor, fixture=fixture)
             payload["assessment_type"] = spec.assessment_type
             payload["market_family"] = descriptor.family
+            payload = self._with_explanation_facts(descriptor, payload)
             payload = self._apply_odds_overlay(
                 payload,
                 descriptor=descriptor,
@@ -123,7 +124,7 @@ class StatPalMarketAdvisoryService:
                     fallback.setdefault("warnings", []).append("score_matrix_fit_missing")
                     fallback["assessment_type"] = spec.assessment_type
                     fallback["market_family"] = descriptor.family
-                    return fallback
+                    return self._with_explanation_facts(descriptor, fallback)
             return payload
 
         if spec.handler == "_evaluate_player_market":
@@ -154,7 +155,7 @@ class StatPalMarketAdvisoryService:
             # A constant-plus-nudges score is not a probability and must not be shown
             # as one. Consumers key off assessment_type to decide what they may claim.
             payload.setdefault("warnings", []).append("heuristic_assessment")
-        return payload
+        return self._with_explanation_facts(descriptor, payload)
 
     @staticmethod
     def _player_team_hint(descriptor, fixture) -> str:
@@ -230,8 +231,12 @@ class StatPalMarketAdvisoryService:
             "market_family": descriptor.family,
         }
 
-    def _evaluate_player_market(self, descriptor: MarketDescriptor, *, fixture=None, statpal_payload=None) -> StatPalAdvisory:
-        payload = statpal_payload or self._player_payload_from_mapping(descriptor.subject or descriptor.raw)
+    def _evaluate_player_market(
+        self, descriptor: MarketDescriptor, *, fixture=None, statpal_payload=None
+    ) -> StatPalAdvisory:
+        payload = statpal_payload or self._player_payload_from_mapping(
+            descriptor.subject or descriptor.raw
+        )
         if not payload:
             return StatPalAdvisory(
                 available=False,
@@ -263,8 +268,12 @@ class StatPalMarketAdvisoryService:
             "goals_per_appearance": _safe_rate(totals.get("goals"), appearances),
             "assists_per_appearance": _safe_rate(totals.get("assists"), appearances),
             "shots_per_appearance": _safe_rate(totals.get("shots_total"), appearances),
-            "shots_on_target_per_appearance": _safe_rate(totals.get("shots_on_target"), appearances),
-            "cards_per_appearance": _safe_rate(_num(totals.get("yellowcards")) + _num(totals.get("redcards")), appearances),
+            "shots_on_target_per_appearance": _safe_rate(
+                totals.get("shots_on_target"), appearances
+            ),
+            "cards_per_appearance": _safe_rate(
+                _num(totals.get("yellowcards")) + _num(totals.get("redcards")), appearances
+            ),
             "saves_per_appearance": _safe_rate(totals.get("saves"), appearances),
             "rating": _num(current.get("rating"), None),
             "current_league": current.get("league") or "",
@@ -318,11 +327,19 @@ class StatPalMarketAdvisoryService:
             message=self._player_message(descriptor, evidence, score),
         )
 
-    def _evaluate_cards_market(self, descriptor: MarketDescriptor, *, fixture=None, provider_payload=None) -> StatPalAdvisory:
+    def _evaluate_cards_market(
+        self, descriptor: MarketDescriptor, *, fixture=None, provider_payload=None
+    ) -> StatPalAdvisory:
         line = _num(descriptor.line, 3.5)
-        expected_total, evidence, warnings = self._expected_card_profile(fixture, descriptor=descriptor)
-        probability = self._goal_line_probability(expected_total, line, descriptor.selection or descriptor.side or "over")
-        score = self._probability_score(probability, line=line, market_side=descriptor.selection or descriptor.side or "over")
+        expected_total, evidence, warnings = self._expected_card_profile(
+            fixture, descriptor=descriptor
+        )
+        probability = self._goal_line_probability(
+            expected_total, line, descriptor.selection or descriptor.side or "over"
+        )
+        score = self._probability_score(
+            probability, line=line, market_side=descriptor.selection or descriptor.side or "over"
+        )
         evidence = {
             **evidence,
             "line": line,
@@ -357,10 +374,14 @@ class StatPalMarketAdvisoryService:
             message=self._cards_message(descriptor, expected_total, line, probability),
         )
 
-    def _evaluate_corners_market(self, descriptor: MarketDescriptor, *, fixture=None, provider_payload=None) -> StatPalAdvisory:
+    def _evaluate_corners_market(
+        self, descriptor: MarketDescriptor, *, fixture=None, provider_payload=None
+    ) -> StatPalAdvisory:
         line = _num(descriptor.line, 9.5)
         corner_profile = ((fixture or {}).get("corner_profile") or {}) if fixture else {}
-        expected_total, statpal_evidence, statpal_warnings = self._expected_corner_profile(fixture, descriptor=descriptor)
+        expected_total, statpal_evidence, statpal_warnings = self._expected_corner_profile(
+            fixture, descriptor=descriptor
+        )
         if not expected_total:
             expected_total = _num(corner_profile.get("expected_total"), 0)
         evidence = {
@@ -371,14 +392,24 @@ class StatPalMarketAdvisoryService:
             "recognized": True,
         }
         if expected_total:
-            probability = self._goal_line_probability(expected_total, line, descriptor.selection or descriptor.side or "over")
-            score = self._probability_score(probability, line=line, market_side=descriptor.selection or descriptor.side or "over")
+            probability = self._goal_line_probability(
+                expected_total, line, descriptor.selection or descriptor.side or "over"
+            )
+            score = self._probability_score(
+                probability,
+                line=line,
+                market_side=descriptor.selection or descriptor.side or "over",
+            )
             evidence["estimated_probability"] = probability
             warnings = list(statpal_warnings)
             if abs(expected_total - line) < 0.8:
                 warnings.append("thin_corner_edge")
                 score -= 5
-            basis = "statpal_corner_market_model" if statpal_evidence.get("corner_model_sources") else "fixture_corner_profile"
+            basis = (
+                "statpal_corner_market_model"
+                if statpal_evidence.get("corner_model_sources")
+                else "fixture_corner_profile"
+            )
         else:
             score = 52
             warnings = ["corner_profile_missing", *statpal_warnings]
@@ -399,20 +430,32 @@ class StatPalMarketAdvisoryService:
             basis=basis,
             evidence=evidence,
             warnings=list(dict.fromkeys(warnings)),
-            message=self._corners_message(descriptor, expected_total, line, evidence.get("estimated_probability")),
+            message=self._corners_message(
+                descriptor, expected_total, line, evidence.get("estimated_probability")
+            ),
         )
 
-    def _evaluate_total_goal_market(self, descriptor: MarketDescriptor, *, fixture=None, provider_payload=None) -> StatPalAdvisory:
+    def _evaluate_total_goal_market(
+        self, descriptor: MarketDescriptor, *, fixture=None, provider_payload=None
+    ) -> StatPalAdvisory:
         line = _num(descriptor.line, 2.5)
-        expected_total, evidence, warnings = self._expected_total_goals(fixture, period=descriptor.period)
-        probability = self._goal_line_probability(expected_total, line, descriptor.selection or descriptor.side)
-        score = self._probability_score(probability, line=line, market_side=descriptor.selection or descriptor.side)
-        evidence.update({
-            "line": line,
-            "selection": descriptor.selection or descriptor.side,
-            "market_family": descriptor.family,
-            "recognized": True,
-        })
+        expected_total, evidence, warnings = self._expected_total_goals(
+            fixture, period=descriptor.period
+        )
+        probability = self._goal_line_probability(
+            expected_total, line, descriptor.selection or descriptor.side
+        )
+        score = self._probability_score(
+            probability, line=line, market_side=descriptor.selection or descriptor.side
+        )
+        evidence.update(
+            {
+                "line": line,
+                "selection": descriptor.selection or descriptor.side,
+                "market_family": descriptor.family,
+                "recognized": True,
+            }
+        )
         if expected_total <= 0:
             warnings.append("goal_profile_missing")
             return StatPalAdvisory(
@@ -447,12 +490,24 @@ class StatPalMarketAdvisoryService:
             message=self._goal_message(descriptor, expected_total, line, probability),
         )
 
-    def _evaluate_team_goal_market(self, descriptor: MarketDescriptor, *, fixture=None, provider_payload=None) -> StatPalAdvisory:
-        team_side = descriptor.team or ("home" if "home" in normalize_market_text(descriptor.raw) else "away" if "away" in normalize_market_text(descriptor.raw) else "")
+    def _evaluate_team_goal_market(
+        self, descriptor: MarketDescriptor, *, fixture=None, provider_payload=None
+    ) -> StatPalAdvisory:
+        team_side = descriptor.team or (
+            "home"
+            if "home" in normalize_market_text(descriptor.raw)
+            else "away"
+            if "away" in normalize_market_text(descriptor.raw)
+            else ""
+        )
         line = _num(descriptor.line, 0.5)
         expected_team, evidence, warnings = self._expected_team_goals(fixture, team_side=team_side)
-        probability = self._goal_line_probability(expected_team, line, descriptor.selection or descriptor.side or "over")
-        score = self._probability_score(probability, line=line, market_side=descriptor.selection or descriptor.side or "over")
+        probability = self._goal_line_probability(
+            expected_team, line, descriptor.selection or descriptor.side or "over"
+        )
+        score = self._probability_score(
+            probability, line=line, market_side=descriptor.selection or descriptor.side or "over"
+        )
         evidence = {
             **evidence,
             "line": line,
@@ -492,19 +547,29 @@ class StatPalMarketAdvisoryService:
             basis="statpal_team_goal_market_model",
             evidence=evidence,
             warnings=warnings,
-            message=self._team_goal_message(descriptor, expected_team, line, probability, team_side),
+            message=self._team_goal_message(
+                descriptor, expected_team, line, probability, team_side
+            ),
         )
 
-    def _evaluate_both_halves_total_goal_market(self, descriptor: MarketDescriptor, *, fixture=None, provider_payload=None) -> StatPalAdvisory:
+    def _evaluate_both_halves_total_goal_market(
+        self, descriptor: MarketDescriptor, *, fixture=None, provider_payload=None
+    ) -> StatPalAdvisory:
         line = _num(descriptor.line, 0.5)
         side = str(descriptor.selection or descriptor.side or "").lower()
         direction, _, answer = side.partition("_")
         direction = direction if direction in {"over", "under"} else "over"
         answer = answer if answer in {"yes", "no"} else "yes"
 
-        first_expected, first_evidence, first_warnings = self._expected_total_goals(fixture, period="first_half")
-        second_expected, second_evidence, second_warnings = self._expected_total_goals(fixture, period="second_half")
-        warnings = list(dict.fromkeys([*first_warnings, *second_warnings, "period_split_approximation"]))
+        first_expected, first_evidence, first_warnings = self._expected_total_goals(
+            fixture, period="first_half"
+        )
+        second_expected, second_evidence, second_warnings = self._expected_total_goals(
+            fixture, period="second_half"
+        )
+        warnings = list(
+            dict.fromkeys([*first_warnings, *second_warnings, "period_split_approximation"])
+        )
 
         if first_expected <= 0 or second_expected <= 0:
             return StatPalAdvisory(
@@ -531,7 +596,10 @@ class StatPalMarketAdvisoryService:
         probability = yes_probability if answer == "yes" else 1.0 - yes_probability
         score = round(max(0, min(100, probability * 100)), 1)
         basis = self._goal_model_basis(
-            [*first_evidence.get("goal_model_sources", []), *second_evidence.get("goal_model_sources", [])],
+            [
+                *first_evidence.get("goal_model_sources", []),
+                *second_evidence.get("goal_model_sources", []),
+            ],
             "both_halves_goal_model",
         )
         payload = {
@@ -582,24 +650,41 @@ class StatPalMarketAdvisoryService:
 
     @staticmethod
     def _goal_model_basis(sources: list[str], fallback: str) -> str:
-        return f"statpal_{fallback}" if any(str(source).startswith("statpal_") for source in sources or []) else f"fixture_{fallback}"
+        return (
+            f"statpal_{fallback}"
+            if any(str(source).startswith("statpal_") for source in sources or [])
+            else f"fixture_{fallback}"
+        )
 
-    def _score_matrix_fallback(self, descriptor: MarketDescriptor, *, fixture=None, provider_payload=None) -> dict[str, Any] | None:
+    def _score_matrix_fallback(
+        self, descriptor: MarketDescriptor, *, fixture=None, provider_payload=None
+    ) -> dict[str, Any] | None:
         if descriptor.family == "total_goals":
-            advisory = self._evaluate_total_goal_market(descriptor, fixture=fixture, provider_payload=provider_payload)
+            advisory = self._evaluate_total_goal_market(
+                descriptor, fixture=fixture, provider_payload=provider_payload
+            )
         elif descriptor.family == "team_total_goals":
-            advisory = self._evaluate_team_goal_market(descriptor, fixture=fixture, provider_payload=provider_payload)
+            advisory = self._evaluate_team_goal_market(
+                descriptor, fixture=fixture, provider_payload=provider_payload
+            )
         else:
-            advisory = self._evaluate_score_matrix_market(descriptor, fixture=fixture, provider_payload=provider_payload)
+            advisory = self._evaluate_score_matrix_market(
+                descriptor, fixture=fixture, provider_payload=provider_payload
+            )
         payload = advisory.to_dict()
-        if payload.get("score") is None or payload.get("basis") in {"score_matrix_no_fit", "no_model_for_family"}:
+        if payload.get("score") is None or payload.get("basis") in {
+            "score_matrix_no_fit",
+            "no_model_for_family",
+        }:
             return None
         return payload
 
-    def _prediction_percentage_fallback(self, descriptor: MarketDescriptor, *, fixture=None, provider_payload=None) -> StatPalAdvisory | None:
+    def _prediction_percentage_fallback(
+        self, descriptor: MarketDescriptor, *, fixture=None, provider_payload=None
+    ) -> StatPalAdvisory | None:
         if descriptor.family not in {"match_result", "double_chance", "draw_no_bet"}:
             return None
-        predictions = (self._statpal_summaries(fixture or {}).get("predictions") or {})
+        predictions = self._statpal_summaries(fixture or {}).get("predictions") or {}
         home = _num(predictions.get("home_win_percent"), None)
         draw = _num(predictions.get("draw_percent"), None)
         away = _num(predictions.get("away_win_percent"), None)
@@ -664,8 +749,12 @@ class StatPalMarketAdvisoryService:
             message=f"Statistical prediction support for {descriptor.canonical or descriptor.raw} is about {probability}%.",
         )
 
-    def _evaluate_score_matrix_market(self, descriptor: MarketDescriptor, *, fixture=None, provider_payload=None) -> StatPalAdvisory:
-        home_expected, away_expected, evidence, warnings = self._expected_score_rates(fixture, period=descriptor.period)
+    def _evaluate_score_matrix_market(
+        self, descriptor: MarketDescriptor, *, fixture=None, provider_payload=None
+    ) -> StatPalAdvisory:
+        home_expected, away_expected, evidence, warnings = self._expected_score_rates(
+            fixture, period=descriptor.period
+        )
 
         # Which side wins depends on relative strength, and the snapshot rates behind this
         # matrix are raw goals-for/against averages with no adjustment for the opposition
@@ -766,7 +855,9 @@ class StatPalMarketAdvisoryService:
     # though it were modelled. Those families are now derived from the fitted score
     # distribution (scoring.evaluators.score_matrix_evaluator, ADR-001).
 
-    def _expected_total_goals(self, fixture=None, *, period: str = "full_match") -> tuple[float, dict[str, Any], list[str]]:
+    def _expected_total_goals(
+        self, fixture=None, *, period: str = "full_match"
+    ) -> tuple[float, dict[str, Any], list[str]]:
         fixture = fixture or {}
         context = fixture.get("fixture_context") or {}
         goal_model = context.get("goal_model") or {}
@@ -782,9 +873,8 @@ class StatPalMarketAdvisoryService:
         if expected:
             sources.append("fixture_goal_model")
 
-        statpal_expected = (
-            _num(detailed.get("expected_goals"), 0)
-            or _num(predictions.get("expected_goals"), 0)
+        statpal_expected = _num(detailed.get("expected_goals"), 0) or _num(
+            predictions.get("expected_goals"), 0
         )
         home_xg = _num(detailed.get("home_xg"), 0) or _num(predictions.get("home_xg"), 0)
         away_xg = _num(detailed.get("away_xg"), 0) or _num(predictions.get("away_xg"), 0)
@@ -792,20 +882,37 @@ class StatPalMarketAdvisoryService:
             statpal_expected = round(home_xg + away_xg, 2)
         if statpal_expected:
             sources.append("statpal_expected_goals")
-            expected = round((expected * 0.55 + statpal_expected * 0.45), 2) if expected else statpal_expected
+            expected = (
+                round((expected * 0.55 + statpal_expected * 0.45), 2)
+                if expected
+                else statpal_expected
+            )
 
-        history = self._team_history_summary_for_descriptor(team_stats, MarketDescriptor(
-            raw="total_goals",
-            canonical="total_goals",
-            code="total_goals",
-            family="total_goals",
-            category="Goals",
-            selection="over",
-            side="over",
-            period=period or "full_match",
-        )) if team_stats else {}
+        history = (
+            self._team_history_summary_for_descriptor(
+                team_stats,
+                MarketDescriptor(
+                    raw="total_goals",
+                    canonical="total_goals",
+                    code="total_goals",
+                    family="total_goals",
+                    category="Goals",
+                    selection="over",
+                    side="over",
+                    period=period or "full_match",
+                ),
+            )
+            if team_stats
+            else {}
+        )
         history_expected = _num(history.get("avg_total_goals"), 0)
-        period_prefix = "firsthalf_" if period == "first_half" else "secondhalf_" if period == "second_half" else ""
+        period_prefix = (
+            "firsthalf_"
+            if period == "first_half"
+            else "secondhalf_"
+            if period == "second_half"
+            else ""
+        )
         if period_prefix:
             scored = _num(history.get(f"{period_prefix}avg_goals_for"), None)
             conceded = _num(history.get(f"{period_prefix}avg_goals_against"), None)
@@ -813,15 +920,20 @@ class StatPalMarketAdvisoryService:
                 history_expected = round((scored or 0) + (conceded or 0), 2)
         if history_expected:
             sources.append("statpal_team_history")
-            expected = round((expected * 0.6 + history_expected * 0.4), 2) if expected else history_expected
+            expected = (
+                round((expected * 0.6 + history_expected * 0.4), 2)
+                if expected
+                else history_expected
+            )
 
-        form_expected = (
-            _num(home_form.get("avg_scored") or home_form.get("goals_for_avg"), 0)
-            + _num(away_form.get("avg_scored") or away_form.get("goals_for_avg"), 0)
-        )
+        form_expected = _num(
+            home_form.get("avg_scored") or home_form.get("goals_for_avg"), 0
+        ) + _num(away_form.get("avg_scored") or away_form.get("goals_for_avg"), 0)
         if form_expected:
             sources.append("recent_scoring_form")
-            expected = round((expected * 0.7 + form_expected * 0.3), 2) if expected else form_expected
+            expected = (
+                round((expected * 0.7 + form_expected * 0.3), 2) if expected else form_expected
+            )
         if period_prefix and expected and "statpal_team_history" not in sources:
             expected = round(expected * (0.45 if period == "first_half" else 0.55), 2)
             sources.append(f"{period}_period_factor")
@@ -840,14 +952,22 @@ class StatPalMarketAdvisoryService:
         warnings = [] if expected else ["expected_goals_unavailable"]
         return round(expected, 2), evidence, warnings
 
-    def _expected_score_rates(self, fixture=None, *, period: str = "full_match") -> tuple[float, float, dict[str, Any], list[str]]:
+    def _expected_score_rates(
+        self, fixture=None, *, period: str = "full_match"
+    ) -> tuple[float, float, dict[str, Any], list[str]]:
         fixture = fixture or {}
         statpal = self._statpal_summaries(fixture)
         predictions = statpal.get("predictions") or {}
         detailed = statpal.get("detailed_stats") or {}
         team_stats = statpal.get("team_stats") or {}
         period = period or "full_match"
-        period_prefix = "firsthalf_" if period == "first_half" else "secondhalf_" if period == "second_half" else ""
+        period_prefix = (
+            "firsthalf_"
+            if period == "first_half"
+            else "secondhalf_"
+            if period == "second_half"
+            else ""
+        )
         sources = []
 
         home_expected = _num(detailed.get("home_xg"), 0) or _num(predictions.get("home_xg"), 0)
@@ -855,49 +975,73 @@ class StatPalMarketAdvisoryService:
         if home_expected or away_expected:
             sources.append("statpal_expected_goals")
 
-        home_history = self._team_history_summary_for_descriptor(
-            team_stats,
-            MarketDescriptor(
-                raw="home_score_matrix",
-                canonical="home_score_matrix",
-                code="home_score_matrix",
-                family="team_total_goals",
-                category="Goals",
-                selection="over",
-                side="over",
-                team="home",
-                period=period,
-            ),
-        ) if team_stats else {}
-        away_history = self._team_history_summary_for_descriptor(
-            team_stats,
-            MarketDescriptor(
-                raw="away_score_matrix",
-                canonical="away_score_matrix",
-                code="away_score_matrix",
-                family="team_total_goals",
-                category="Goals",
-                selection="over",
-                side="over",
-                team="away",
-                period=period,
-            ),
-        ) if team_stats else {}
+        home_history = (
+            self._team_history_summary_for_descriptor(
+                team_stats,
+                MarketDescriptor(
+                    raw="home_score_matrix",
+                    canonical="home_score_matrix",
+                    code="home_score_matrix",
+                    family="team_total_goals",
+                    category="Goals",
+                    selection="over",
+                    side="over",
+                    team="home",
+                    period=period,
+                ),
+            )
+            if team_stats
+            else {}
+        )
+        away_history = (
+            self._team_history_summary_for_descriptor(
+                team_stats,
+                MarketDescriptor(
+                    raw="away_score_matrix",
+                    canonical="away_score_matrix",
+                    code="away_score_matrix",
+                    family="team_total_goals",
+                    category="Goals",
+                    selection="over",
+                    side="over",
+                    team="away",
+                    period=period,
+                ),
+            )
+            if team_stats
+            else {}
+        )
 
         home_history_expected = _num(
-            home_history.get(f"{period_prefix}avg_goals_for") if period_prefix else home_history.get("avg_goals_for"),
+            home_history.get(f"{period_prefix}avg_goals_for")
+            if period_prefix
+            else home_history.get("avg_goals_for"),
             0,
         )
         away_history_expected = _num(
-            away_history.get(f"{period_prefix}avg_goals_for") if period_prefix else away_history.get("avg_goals_for"),
+            away_history.get(f"{period_prefix}avg_goals_for")
+            if period_prefix
+            else away_history.get("avg_goals_for"),
             0,
         )
         if home_history_expected or away_history_expected:
             sources.append("statpal_team_history")
-            home_expected = round(home_expected * 0.55 + home_history_expected * 0.45, 2) if home_expected else home_history_expected
-            away_expected = round(away_expected * 0.55 + away_history_expected * 0.45, 2) if away_expected else away_history_expected
+            home_expected = (
+                round(home_expected * 0.55 + home_history_expected * 0.45, 2)
+                if home_expected
+                else home_history_expected
+            )
+            away_expected = (
+                round(away_expected * 0.55 + away_history_expected * 0.45, 2)
+                if away_expected
+                else away_history_expected
+            )
 
-        if period_prefix and (home_expected or away_expected) and "statpal_team_history" not in sources:
+        if (
+            period_prefix
+            and (home_expected or away_expected)
+            and "statpal_team_history" not in sources
+        ):
             factor = 0.45 if period == "first_half" else 0.55
             home_expected = round(home_expected * factor, 2)
             away_expected = round(away_expected * factor, 2)
@@ -924,12 +1068,19 @@ class StatPalMarketAdvisoryService:
                 "away": round(away_expected, 2),
                 "ceiling": MAX_PLAUSIBLE_TEAM_EXPECTED_GOALS,
             }
-            return 0.0, 0.0, evidence, ["implausible_expected_goals", "expected_score_rates_unavailable"]
+            return (
+                0.0,
+                0.0,
+                evidence,
+                ["implausible_expected_goals", "expected_score_rates_unavailable"],
+            )
 
         warnings = [] if home_expected and away_expected else ["expected_score_rates_unavailable"]
         return round(home_expected, 2), round(away_expected, 2), evidence, warnings
 
-    def _expected_team_goals(self, fixture=None, *, team_side="") -> tuple[float, dict[str, Any], list[str]]:
+    def _expected_team_goals(
+        self, fixture=None, *, team_side=""
+    ) -> tuple[float, dict[str, Any], list[str]]:
         fixture = fixture or {}
         statpal = self._statpal_summaries(fixture)
         predictions = statpal.get("predictions") or {}
@@ -949,7 +1100,11 @@ class StatPalMarketAdvisoryService:
             team=team_side,
             period="full_match",
         )
-        history = self._team_history_summary_for_descriptor(team_stats, history_descriptor) if team_stats else {}
+        history = (
+            self._team_history_summary_for_descriptor(team_stats, history_descriptor)
+            if team_stats
+            else {}
+        )
         history_expected = _num(history.get("avg_goals_for"), 0)
 
         home_expected = (
@@ -976,7 +1131,11 @@ class StatPalMarketAdvisoryService:
             "home_expected_goals": round(home_expected, 2) if home_expected else None,
             "away_expected_goals": round(away_expected, 2) if away_expected else None,
             "statpal_team_history_goals_for": history_expected or None,
-            "team_goal_model_source": "statpal_xg" if (_num(detailed.get("home_xg"), 0) or _num(detailed.get("away_xg"), 0)) else "statpal_team_history" if history_expected else "recent_form",
+            "team_goal_model_source": "statpal_xg"
+            if (_num(detailed.get("home_xg"), 0) or _num(detailed.get("away_xg"), 0))
+            else "statpal_team_history"
+            if history_expected
+            else "recent_form",
         }
         warnings = []
         if not expected:
@@ -985,7 +1144,9 @@ class StatPalMarketAdvisoryService:
             warnings.append("team_side_inferred_from_best_profile")
         return round(expected, 2), evidence, warnings
 
-    def _expected_corner_profile(self, fixture=None, *, descriptor: MarketDescriptor) -> tuple[float, dict[str, Any], list[str]]:
+    def _expected_corner_profile(
+        self, fixture=None, *, descriptor: MarketDescriptor
+    ) -> tuple[float, dict[str, Any], list[str]]:
         detailed = self._statpal_summaries(fixture).get("detailed_stats") or {}
         home_corners = _num(detailed.get("home_corners"), 0)
         away_corners = _num(detailed.get("away_corners"), 0)
@@ -1009,7 +1170,9 @@ class StatPalMarketAdvisoryService:
         warnings = [] if expected else ["statpal_corner_profile_missing"]
         return round(expected, 2), evidence, warnings
 
-    def _expected_card_profile(self, fixture=None, *, descriptor: MarketDescriptor) -> tuple[float, dict[str, Any], list[str]]:
+    def _expected_card_profile(
+        self, fixture=None, *, descriptor: MarketDescriptor
+    ) -> tuple[float, dict[str, Any], list[str]]:
         detailed = self._statpal_summaries(fixture).get("detailed_stats") or {}
         home_yellows = _num(detailed.get("home_yellow_cards"), 0)
         away_yellows = _num(detailed.get("away_yellow_cards"), 0)
@@ -1045,8 +1208,15 @@ class StatPalMarketAdvisoryService:
 
     @staticmethod
     def _team_form_expectation(attacking_form, defending_form) -> float:
-        scored = _num((attacking_form or {}).get("avg_scored") or (attacking_form or {}).get("goals_for_avg"), 0)
-        conceded = _num((defending_form or {}).get("avg_conceded") or (defending_form or {}).get("goals_against_avg"), 0)
+        scored = _num(
+            (attacking_form or {}).get("avg_scored") or (attacking_form or {}).get("goals_for_avg"),
+            0,
+        )
+        conceded = _num(
+            (defending_form or {}).get("avg_conceded")
+            or (defending_form or {}).get("goals_against_avg"),
+            0,
+        )
         if scored and conceded:
             return round(scored * 0.65 + conceded * 0.35, 2)
         return scored or 0
@@ -1075,7 +1245,7 @@ class StatPalMarketAdvisoryService:
 
     @staticmethod
     def _statpal_summaries(fixture=None) -> dict[str, Any]:
-        snapshots = (((fixture or {}).get("statpal_context") or {}).get("snapshots") or {})
+        snapshots = ((fixture or {}).get("statpal_context") or {}).get("snapshots") or {}
         return {
             key: (value.get("summary") or {})
             for key, value in snapshots.items()
@@ -1083,7 +1253,9 @@ class StatPalMarketAdvisoryService:
         }
 
     @staticmethod
-    def _goal_message(descriptor: MarketDescriptor, expected_total: float, line: float, probability: float) -> str:
+    def _goal_message(
+        descriptor: MarketDescriptor, expected_total: float, line: float, probability: float
+    ) -> str:
         side = (descriptor.selection or descriptor.side or "over").title()
         return (
             f"{side} {line} is rated from an expected-goals profile of {round(expected_total, 2)} "
@@ -1091,7 +1263,13 @@ class StatPalMarketAdvisoryService:
         )
 
     @staticmethod
-    def _team_goal_message(descriptor: MarketDescriptor, expected_team: float, line: float, probability: float, team_side: str) -> str:
+    def _team_goal_message(
+        descriptor: MarketDescriptor,
+        expected_team: float,
+        line: float,
+        probability: float,
+        team_side: str,
+    ) -> str:
         side = team_side.title() if team_side else "Selected team"
         selection = (descriptor.selection or descriptor.side or "over").title()
         return (
@@ -1100,7 +1278,9 @@ class StatPalMarketAdvisoryService:
         )
 
     @staticmethod
-    def _corners_message(descriptor: MarketDescriptor, expected_total: float, line: float, probability: float | None) -> str:
+    def _corners_message(
+        descriptor: MarketDescriptor, expected_total: float, line: float, probability: float | None
+    ) -> str:
         side = (descriptor.selection or descriptor.side or "over").title()
         if probability is None:
             return "Corners market recognized, but corner profiles are not available yet."
@@ -1110,7 +1290,9 @@ class StatPalMarketAdvisoryService:
         )
 
     @staticmethod
-    def _cards_message(descriptor: MarketDescriptor, expected_total: float, line: float, probability: float) -> str:
+    def _cards_message(
+        descriptor: MarketDescriptor, expected_total: float, line: float, probability: float
+    ) -> str:
         side = (descriptor.selection or descriptor.side or "over").title()
         unit = "booking points" if descriptor.family == "booking_points" else "cards"
         if expected_total <= 0:
@@ -1120,9 +1302,132 @@ class StatPalMarketAdvisoryService:
             f"{round(expected_total, 2)} and an estimated hit probability of {probability}%."
         )
 
+    def _with_explanation_facts(
+        self, descriptor: MarketDescriptor, payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        payload = dict(payload)
+        existing = list(payload.get("explanation_facts") or payload.get("supporting_facts") or [])
+        facts = [*existing, *self._advisory_explanation_facts(descriptor, payload)]
+        if facts:
+            payload["explanation_facts"] = list(dict.fromkeys(facts))[:6]
+            payload["supporting_facts"] = payload["explanation_facts"]
+        return payload
+
+    @staticmethod
+    def _advisory_explanation_facts(
+        descriptor: MarketDescriptor, payload: dict[str, Any]
+    ) -> list[str]:
+        evidence = payload.get("evidence") or {}
+        facts = []
+        family = descriptor.family
+        line = _num(evidence.get("line") or descriptor.line, None)
+        side = str(
+            evidence.get("selection") or descriptor.selection or descriptor.side or ""
+        ).lower()
+
+        home_xg = _num(
+            evidence.get("expected_goals_home") or evidence.get("home_expected_goals"), None
+        )
+        away_xg = _num(
+            evidence.get("expected_goals_away") or evidence.get("away_expected_goals"), None
+        )
+        total_goals = _num(evidence.get("expected_total_goals"), None)
+        if total_goals is None and home_xg is not None and away_xg is not None:
+            total_goals = round(home_xg + away_xg, 2)
+        if family in {
+            "total_goals",
+            "team_total_goals",
+            "btts",
+            "double_chance",
+            "draw_no_bet",
+            "match_result",
+            "asian_handicap",
+            "handicap",
+        }:
+            if total_goals is not None:
+                facts.append(f"Projected total goals: {total_goals:.2f}.")
+            if home_xg is not None:
+                facts.append(f"Home average: {home_xg:.2f} xG.")
+            if away_xg is not None:
+                facts.append(f"Away average: {away_xg:.2f} xG.")
+            if line is not None and total_goals is not None and side in {"over", "under"}:
+                direction = "below" if line < total_goals else "above"
+                facts.append(
+                    f"Line {line:g} is {direction} the model projection of {total_goals:.2f} goals."
+                )
+
+        home_probability = _num(evidence.get("home_probability"), None)
+        draw_probability = _num(evidence.get("draw_probability"), None)
+        away_probability = _num(evidence.get("away_probability"), None)
+        if family in {"match_result", "double_chance", "draw_no_bet"}:
+            if home_probability is not None:
+                facts.append(f"Home win probability: {round(home_probability * 100)}%.")
+            if draw_probability is not None:
+                facts.append(f"Draw probability: {round(draw_probability * 100)}%.")
+            if away_probability is not None:
+                facts.append(f"Away win probability: {round(away_probability * 100)}%.")
+            edge = _num(evidence.get("edge_points"), None)
+            if edge is not None:
+                facts.append(f"Model edge versus league reference: {edge:+.1f} points.")
+
+        count_kind = ""
+        if "corners" in family:
+            count_kind = "corners"
+        elif "cards" in family or family == "booking_points":
+            count_kind = "cards"
+        elif "shots_on_target" in family:
+            count_kind = "shots on target"
+        if count_kind:
+            expected_total = _num(
+                evidence.get("expected_total_corners")
+                or evidence.get("expected_total_cards")
+                or evidence.get("expected_total_sot"),
+                None,
+            )
+            home_count = _num(
+                evidence.get("home_expected_corners")
+                or evidence.get("expected_home_corners")
+                or evidence.get("expected_home_cards")
+                or evidence.get("expected_home_shots_on_target"),
+                None,
+            )
+            away_count = _num(
+                evidence.get("away_expected_corners")
+                or evidence.get("expected_away_corners")
+                or evidence.get("expected_away_cards")
+                or evidence.get("expected_away_shots_on_target"),
+                None,
+            )
+            if expected_total is None and home_count is not None and away_count is not None:
+                expected_total = round(home_count + away_count, 2)
+            if expected_total is not None:
+                facts.append(f"Projected {count_kind}: {expected_total:.2f}.")
+            if home_count is not None:
+                facts.append(f"Home team averages {home_count:.2f} {count_kind}.")
+            if away_count is not None:
+                facts.append(f"Away team averages {away_count:.2f} {count_kind}.")
+            if line is not None and expected_total is not None and side in {"over", "under"}:
+                direction = "below" if line < expected_total else "above"
+                facts.append(
+                    f"Line {line:g} is {direction} the model projection of {expected_total:.2f} {count_kind}."
+                )
+
+        fair_odds = _num(evidence.get("fair_odds"), None)
+        available_odds = _num(payload.get("odds") or evidence.get("available_odds"), None)
+        if fair_odds is not None:
+            facts.append(f"Model fair odds: {fair_odds:.2f}.")
+        if available_odds is not None:
+            facts.append(f"Available odds: {available_odds:.2f}.")
+        return facts
+
     def _player_payload_from_mapping(self, subject: str) -> dict[str, Any] | None:
         normalized = normalize_market_text(subject)
-        tokens = [token for token in normalized.split() if token not in {"player", "to", "score", "shots", "shot", "target", "assist", "carded", "card"}]
+        tokens = [
+            token
+            for token in normalized.split()
+            if token
+            not in {"player", "to", "score", "shots", "shot", "target", "assist", "carded", "card"}
+        ]
         if not tokens:
             return None
         query = " ".join(tokens)
@@ -1147,7 +1452,7 @@ class StatPalMarketAdvisoryService:
         fixture: dict[str, Any] | None = None,
         provider_payload: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        snapshots = (((fixture or {}).get("statpal_context") or {}).get("snapshots") or {})
+        snapshots = ((fixture or {}).get("statpal_context") or {}).get("snapshots") or {}
         odds_snapshot = snapshots.get("prematch_odds") or {}
         odds_summary = odds_snapshot.get("summary") or {}
         if not odds_summary or not payload.get("available"):
@@ -1235,14 +1540,18 @@ class StatPalMarketAdvisoryService:
         context = (fixture or {}).get("statpal_context") or {}
         snapshots = context.get("snapshots") or {}
         if not snapshots:
-            return score, {"statpal_snapshots_available": False}, ["statpal_fixture_snapshots_missing"]
+            return (
+                score,
+                {"statpal_snapshots_available": False},
+                ["statpal_fixture_snapshots_missing"],
+            )
 
         evidence = {
             "statpal_snapshots_available": True,
             "statpal_snapshot_types": sorted(snapshots.keys()),
         }
         warnings = []
-        injuries = ((snapshots.get("injuries_suspensions") or {}).get("summary") or {})
+        injuries = (snapshots.get("injuries_suspensions") or {}).get("summary") or {}
         if injuries:
             injury_adjustment, injury_evidence, injury_warnings = self._injury_adjustment(
                 injuries,
@@ -1255,7 +1564,7 @@ class StatPalMarketAdvisoryService:
             evidence["injuries"] = injury_evidence
             warnings.extend(injury_warnings)
 
-        lineups = ((snapshots.get("lineups") or {}).get("summary") or {})
+        lineups = (snapshots.get("lineups") or {}).get("summary") or {}
         if lineups:
             adjustment = self._lineup_adjustment(lineups)
             score += adjustment
@@ -1282,9 +1591,11 @@ class StatPalMarketAdvisoryService:
                 warnings.append("odds_snapshot_caution")
             warnings.extend(odds_warnings)
 
-        team_stats = ((snapshots.get("team_stats") or {}).get("summary") or {})
+        team_stats = (snapshots.get("team_stats") or {}).get("summary") or {}
         if team_stats:
-            adjustment, team_evidence, team_warnings = self._team_history_adjustment(team_stats, descriptor=descriptor)
+            adjustment, team_evidence, team_warnings = self._team_history_adjustment(
+                team_stats, descriptor=descriptor
+            )
             score += adjustment
             evidence["team_stats_snapshot"] = team_stats
             evidence["team_history_adjustment"] = round(adjustment, 1)
@@ -1324,8 +1635,20 @@ class StatPalMarketAdvisoryService:
                 target_side = "away"
 
         if descriptor.requires_player_stats:
-            missing = home_missing if target_side == "home" else away_missing if target_side == "away" else max(home_missing, away_missing)
-            questionable = home_questionable if target_side == "home" else away_questionable if target_side == "away" else max(home_questionable, away_questionable)
+            missing = (
+                home_missing
+                if target_side == "home"
+                else away_missing
+                if target_side == "away"
+                else max(home_missing, away_missing)
+            )
+            questionable = (
+                home_questionable
+                if target_side == "home"
+                else away_questionable
+                if target_side == "away"
+                else max(home_questionable, away_questionable)
+            )
             adjustment -= min(10, missing * 2 + questionable)
             if missing or questionable:
                 warnings.append("player_team_availability_risk")
@@ -1347,13 +1670,21 @@ class StatPalMarketAdvisoryService:
     def _team_history_adjustment(team_stats: dict[str, Any], *, descriptor: MarketDescriptor):
         if not isinstance(team_stats, dict):
             return 0.0, {}, []
-        team_stats = StatPalMarketAdvisoryService._team_history_summary_for_descriptor(team_stats, descriptor)
+        team_stats = StatPalMarketAdvisoryService._team_history_summary_for_descriptor(
+            team_stats, descriptor
+        )
 
         warnings = []
         sample_size = _num(team_stats.get("sample_size"))
         selection = (descriptor.selection or descriptor.side or "").lower()
         line = _num(descriptor.line, 0.0)
-        period_prefix = "firsthalf_" if descriptor.period == "first_half" else "secondhalf_" if descriptor.period == "second_half" else ""
+        period_prefix = (
+            "firsthalf_"
+            if descriptor.period == "first_half"
+            else "secondhalf_"
+            if descriptor.period == "second_half"
+            else ""
+        )
         evidence = {
             "team_id": team_stats.get("team_id") or "",
             "team_name": team_stats.get("team_name") or "",
@@ -1381,7 +1712,11 @@ class StatPalMarketAdvisoryService:
         family = descriptor.family
         adjustment = 0.0
         if family == "total_goals":
-            metric = team_stats.get(f"{period_prefix}avg_total_goals") if period_prefix else team_stats.get("avg_total_goals")
+            metric = (
+                team_stats.get(f"{period_prefix}avg_total_goals")
+                if period_prefix
+                else team_stats.get("avg_total_goals")
+            )
             if metric is None and period_prefix:
                 scored = _num(team_stats.get(f"{period_prefix}avg_goals_for"), None)
                 conceded = _num(team_stats.get(f"{period_prefix}avg_goals_against"), None)
@@ -1392,7 +1727,11 @@ class StatPalMarketAdvisoryService:
             evidence["line"] = line
             adjustment = directional(metric, line, cushion=0.35, scale=1.15, cap=3.0)
         elif family == "team_total_goals":
-            metric = team_stats.get(f"{period_prefix}avg_goals_for") if period_prefix else team_stats.get("avg_goals_for")
+            metric = (
+                team_stats.get(f"{period_prefix}avg_goals_for")
+                if period_prefix
+                else team_stats.get("avg_goals_for")
+            )
             evidence["metric"] = "avg_goals_for"
             evidence["metric_value"] = round(_num(metric), 2) if metric is not None else None
             evidence["line"] = line
@@ -1450,7 +1789,9 @@ class StatPalMarketAdvisoryService:
         return adjustment, evidence, warnings
 
     @staticmethod
-    def _team_history_summary_for_descriptor(team_stats: dict[str, Any], descriptor: MarketDescriptor) -> dict[str, Any]:
+    def _team_history_summary_for_descriptor(
+        team_stats: dict[str, Any], descriptor: MarketDescriptor
+    ) -> dict[str, Any]:
         teams = team_stats.get("teams") if isinstance(team_stats.get("teams"), list) else []
         if not teams:
             return team_stats
@@ -1458,7 +1799,11 @@ class StatPalMarketAdvisoryService:
         target_side = descriptor.team if descriptor.team in {"home", "away"} else ""
         if target_side:
             side_summary = team_stats.get(target_side) or next(
-                (team for team in teams if isinstance(team, dict) and team.get("fixture_side") == target_side),
+                (
+                    team
+                    for team in teams
+                    if isinstance(team, dict) and team.get("fixture_side") == target_side
+                ),
                 {},
             )
             if side_summary:
@@ -1469,7 +1814,11 @@ class StatPalMarketAdvisoryService:
             return team_stats
 
         def values(key):
-            return [_num(team.get(key), None) for team in usable if _num(team.get(key), None) is not None]
+            return [
+                _num(team.get(key), None)
+                for team in usable
+                if _num(team.get(key), None) is not None
+            ]
 
         def avg(key):
             nums = values(key)
@@ -1482,16 +1831,26 @@ class StatPalMarketAdvisoryService:
         sample_sizes = values("sample_size")
         return {
             "team_id": "fixture",
-            "team_name": " + ".join(team.get("team_name") or "" for team in usable if team.get("team_name")),
+            "team_name": " + ".join(
+                team.get("team_name") or "" for team in usable if team.get("team_name")
+            ),
             "fixture_side": "fixture",
             "sample_size": int(min(sample_sizes)) if sample_sizes else None,
-            "current_league": next((team.get("current_league") for team in usable if team.get("current_league")), ""),
-            "current_season": next((team.get("current_season") for team in usable if team.get("current_season")), ""),
+            "current_league": next(
+                (team.get("current_league") for team in usable if team.get("current_league")), ""
+            ),
+            "current_season": next(
+                (team.get("current_season") for team in usable if team.get("current_season")), ""
+            ),
             "avg_goals_for": avg("avg_goals_for"),
             "avg_goals_against": avg("avg_goals_against"),
             "avg_total_goals": avg("avg_total_goals"),
-            "avg_corners": total("avg_corners") if descriptor.family == "corners_total" else avg("avg_corners"),
-            "avg_yellowcards": total("avg_yellowcards") if descriptor.family in {"cards_total", "booking_points"} else avg("avg_yellowcards"),
+            "avg_corners": total("avg_corners")
+            if descriptor.family == "corners_total"
+            else avg("avg_corners"),
+            "avg_yellowcards": total("avg_yellowcards")
+            if descriptor.family in {"cards_total", "booking_points"}
+            else avg("avg_yellowcards"),
             "firsthalf_avg_goals_for": avg("firsthalf_avg_goals_for"),
             "firsthalf_avg_goals_against": avg("firsthalf_avg_goals_against"),
             "secondhalf_avg_goals_for": avg("secondhalf_avg_goals_for"),
@@ -1510,9 +1869,20 @@ class StatPalMarketAdvisoryService:
         return -3.0 if unavailable else 0.0
 
     @classmethod
-    def _odds_adjustment(cls, summary, *, descriptor: MarketDescriptor | None = None, payload=None, provider_payload=None):
+    def _odds_adjustment(
+        cls,
+        summary,
+        *,
+        descriptor: MarketDescriptor | None = None,
+        payload=None,
+        provider_payload=None,
+    ):
         offered = cls._offered_odds(provider_payload or {})
-        reference = cls._statpal_reference_odds(descriptor, payload or {}) if descriptor and isinstance(payload, dict) else {}
+        reference = (
+            cls._statpal_reference_odds(descriptor, payload or {})
+            if descriptor and isinstance(payload, dict)
+            else {}
+        )
         reference_odds = _num(reference.get("odds"), None)
         evidence = {}
         warnings = []
@@ -1573,7 +1943,9 @@ class StatPalMarketAdvisoryService:
                     return parsed
         return None
 
-    def reference_price(self, descriptor: MarketDescriptor | None, *, fixture=None) -> dict[str, Any]:
+    def reference_price(
+        self, descriptor: MarketDescriptor | None, *, fixture=None
+    ) -> dict[str, Any]:
         """
         The bookmaker price for a market, aggregated across books.
 
@@ -1582,7 +1954,7 @@ class StatPalMarketAdvisoryService:
         with a double chance" could not be checked, and the ranking had nothing but raw
         probability to work with.
         """
-        snapshots = (((fixture or {}).get("statpal_context") or {}).get("snapshots") or {})
+        snapshots = ((fixture or {}).get("statpal_context") or {}).get("snapshots") or {}
         payload = (snapshots.get("prematch_odds") or {}).get("payload") or {}
         if not payload or not descriptor:
             return {}
@@ -1613,7 +1985,9 @@ class StatPalMarketAdvisoryService:
         return round(min(100.0, implied / overround), 1)
 
     @classmethod
-    def _statpal_reference_odds(cls, descriptor: MarketDescriptor | None, payload: dict[str, Any]) -> dict[str, Any]:
+    def _statpal_reference_odds(
+        cls, descriptor: MarketDescriptor | None, payload: dict[str, Any]
+    ) -> dict[str, Any]:
         if not descriptor:
             return {}
         for market in payload.get("markets") or []:
@@ -1625,7 +1999,9 @@ class StatPalMarketAdvisoryService:
         return {}
 
     @classmethod
-    def _reference_from_market(cls, market: dict[str, Any], descriptor: MarketDescriptor) -> dict[str, Any]:
+    def _reference_from_market(
+        cls, market: dict[str, Any], descriptor: MarketDescriptor
+    ) -> dict[str, Any]:
         line = _num(descriptor.line, None)
         outcome = cls._descriptor_outcome_name(descriptor)
         candidates = []
@@ -1638,11 +2014,17 @@ class StatPalMarketAdvisoryService:
             for bucket_name in ("totals", "handicaps"):
                 for bucket in bookmaker.get(bucket_name) or []:
                     bucket_line = _num(bucket.get("line"), None)
-                    if line is not None and bucket_line is not None and abs(bucket_line - line) > 0.01:
+                    if (
+                        line is not None
+                        and bucket_line is not None
+                        and abs(bucket_line - line) > 0.01
+                    ):
                         continue
                     result = cls._odd_from_items(bucket.get("odds") or [], outcome)
                     if result:
-                        candidates.append(cls._reference_candidate(market, bookmaker, result, outcome))
+                        candidates.append(
+                            cls._reference_candidate(market, bookmaker, result, outcome)
+                        )
                         # Each line is its own book: Over 2.5 and Under 2.5 together, not
                         # every line in the market summed.
                         overrounds.append(cls._overround(bucket.get("odds") or []))
@@ -1682,7 +2064,9 @@ class StatPalMarketAdvisoryService:
         return total
 
     @staticmethod
-    def _reference_candidate(market: dict[str, Any], bookmaker: dict[str, Any], odd: dict[str, Any], outcome: str) -> dict[str, Any]:
+    def _reference_candidate(
+        market: dict[str, Any], bookmaker: dict[str, Any], odd: dict[str, Any], outcome: str
+    ) -> dict[str, Any]:
         odds = _num((odd or {}).get("value"), None)
         if not odds or odds <= 1:
             return {}
@@ -1694,7 +2078,9 @@ class StatPalMarketAdvisoryService:
         }
 
     @staticmethod
-    def _aggregate_reference_candidates(candidates: list[dict[str, Any]], overrounds=None, units: float = 1.0) -> dict[str, Any]:
+    def _aggregate_reference_candidates(
+        candidates: list[dict[str, Any]], overrounds=None, units: float = 1.0
+    ) -> dict[str, Any]:
         rows = [row for row in candidates if row and _num(row.get("odds"), None)]
         if not rows:
             return {}
@@ -1703,7 +2089,9 @@ class StatPalMarketAdvisoryService:
         min_odds = float(odds[0])
         max_odds = float(odds[-1])
         spread_pct = round(((max_odds - min_odds) / reference) * 100, 1) if reference else 0
-        reliability = StatPalMarketAdvisoryService._odds_reference_reliability(len(rows), spread_pct)
+        reliability = StatPalMarketAdvisoryService._odds_reference_reliability(
+            len(rows), spread_pct
+        )
         first = rows[0]
         return {
             "odds": round(reference, 3),
@@ -1769,17 +2157,32 @@ class StatPalMarketAdvisoryService:
                 "1x": "Home/Draw",
                 "x2": "Draw/Away",
                 "12": "Home/Away",
-            }.get(str(descriptor.side or "").lower().replace("dc: ", ""), descriptor.selection or descriptor.side or "")
+            }.get(
+                str(descriptor.side or "").lower().replace("dc: ", ""),
+                descriptor.selection or descriptor.side or "",
+            )
         if descriptor.family in {"match_result", "draw_no_bet", "asian_handicap", "handicap"}:
-            return {"home": "Home", "draw": "Draw", "away": "Away"}.get(descriptor.side, descriptor.selection or descriptor.side or "")
-        if descriptor.family in {"total_goals", "team_total_goals", "corners_total", "team_corners", "cards_total", "team_cards", "booking_points"}:
+            return {"home": "Home", "draw": "Draw", "away": "Away"}.get(
+                descriptor.side, descriptor.selection or descriptor.side or ""
+            )
+        if descriptor.family in {
+            "total_goals",
+            "team_total_goals",
+            "corners_total",
+            "team_corners",
+            "cards_total",
+            "team_cards",
+            "booking_points",
+        }:
             return (descriptor.selection or descriptor.side or "over").title()
         if descriptor.family in {"btts", "clean_sheet", "team_clean_sheet"}:
             return (descriptor.selection or descriptor.side or "yes").title()
         return descriptor.selection or descriptor.side or ""
 
     @classmethod
-    def _market_matches_descriptor(cls, market: dict[str, Any], descriptor: MarketDescriptor) -> bool:
+    def _market_matches_descriptor(
+        cls, market: dict[str, Any], descriptor: MarketDescriptor
+    ) -> bool:
         name = normalize_market_text((market or {}).get("name") or "")
         if not cls._period_matches(name, descriptor.period):
             return False
@@ -1807,7 +2210,9 @@ class StatPalMarketAdvisoryService:
         if descriptor.family == "btts":
             return "both teams" in name or "btts" in name or "gg" in name or "ng" in name
         if descriptor.family in {"clean_sheet", "team_clean_sheet"}:
-            return "clean sheet" in name and cls._team_matches(name, descriptor.team or descriptor.side)
+            return "clean sheet" in name and cls._team_matches(
+                name, descriptor.team or descriptor.side
+            )
         if descriptor.family in {"corners_total", "team_corners"}:
             if "corner" not in name:
                 return False
@@ -1825,7 +2230,10 @@ class StatPalMarketAdvisoryService:
     @staticmethod
     def _period_matches(market_name: str, period: str) -> bool:
         period = str(period or "match")
-        first_half = any(token in market_name for token in ("1st half", "first half", "1h", "half time", "halftime"))
+        first_half = any(
+            token in market_name
+            for token in ("1st half", "first half", "1h", "half time", "halftime")
+        )
         second_half = any(token in market_name for token in ("2nd half", "second half", "2h"))
         if period in {"first_half", "1st_half"}:
             return first_half
@@ -1870,10 +2278,14 @@ class StatPalMarketAdvisoryService:
         }
         return {key: sum(_num(row.get(key)) for row in rows) for key in keys}
 
-    def _player_score(self, descriptor: MarketDescriptor, evidence: dict[str, Any]) -> tuple[float, dict[str, Any], list[str]]:
+    def _player_score(
+        self, descriptor: MarketDescriptor, evidence: dict[str, Any]
+    ) -> tuple[float, dict[str, Any], list[str]]:
         line = self._player_market_line(descriptor)
         expected = self._player_expected_metric(descriptor, evidence)
-        probability = self._goal_line_probability(expected, line, descriptor.selection or descriptor.side or "over")
+        probability = self._goal_line_probability(
+            expected, line, descriptor.selection or descriptor.side or "over"
+        )
         # The Poisson tail *is* the answer. It used to be rescaled as `40 + p * 0.55`,
         # which compressed every player market into a 40-95 band: a striker's To Score and
         # an outfielder's Saves Over 2.5 both came out at 38. That is not a probability,
@@ -1890,13 +2302,17 @@ class StatPalMarketAdvisoryService:
             warnings.append("thin_player_market_edge")
         if evidence.get("sample_appearances", 0) < 10:
             warnings.append("limited_player_sample")
-        return score, {
-            "line": line,
-            "selection": descriptor.selection or descriptor.side or "over",
-            "expected_player_metric": round(expected, 3),
-            "estimated_probability": probability,
-            "player_market_family": descriptor.family,
-        }, warnings
+        return (
+            score,
+            {
+                "line": line,
+                "selection": descriptor.selection or descriptor.side or "over",
+                "expected_player_metric": round(expected, 3),
+                "estimated_probability": probability,
+                "player_market_family": descriptor.family,
+            },
+            warnings,
+        )
 
     @staticmethod
     def _player_market_line(descriptor: MarketDescriptor) -> float:
@@ -1927,7 +2343,9 @@ class StatPalMarketAdvisoryService:
         return 0
 
     @staticmethod
-    def _player_message(descriptor: MarketDescriptor, evidence: dict[str, Any], score: float) -> str:
+    def _player_message(
+        descriptor: MarketDescriptor, evidence: dict[str, Any], score: float
+    ) -> str:
         player = evidence.get("player_name") or "This player"
         probability = evidence.get("estimated_probability")
         line = evidence.get("line")

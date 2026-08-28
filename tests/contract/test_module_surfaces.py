@@ -10,7 +10,7 @@ import unittest
 
 MODULES = [
     "markets", "identity", "catalog", "billing", "scoring", "pricing",
-    "explanations", "picks", "slips", "settlement", "analytics",
+    "prediction", "explanations", "picks", "slips", "settlement", "analytics",
 ]
 
 # Modules that own no tables are plain packages, not Django apps.

@@ -16,12 +16,17 @@ class TeamIntelligenceScheduleTests(SimpleTestCase):
         self.assertEqual(nightly["kwargs"]["days"], 3)
         self.assertIn("generate-daily-picks", BEAT_SCHEDULE)
         self.assertIn("build-slip-review-market-cache", BEAT_SCHEDULE)
+        self.assertIn("evaluate-strategy-memory", BEAT_SCHEDULE)
 
     def test_intelligence_tasks_are_routed_to_expected_queues(self):
         routes = settings.CELERY_TASK_ROUTES
 
         self.assertEqual(
             routes["betpreneur.modules.analytics.tasks.refresh_team_intelligence_nightly"]["queue"],
+            settings.ALGO_MAINTENANCE_QUEUE,
+        )
+        self.assertEqual(
+            routes["betpreneur.modules.analytics.tasks.evaluate_strategy_memory"]["queue"],
             settings.ALGO_MAINTENANCE_QUEUE,
         )
         self.assertEqual(
@@ -50,3 +55,4 @@ class TeamIntelligenceScheduleTests(SimpleTestCase):
 
         self.assertIn("team_intelligence_nightly", jobs)
         self.assertIn("team_intelligence_backfill", jobs)
+        self.assertIn("strategy_memory", jobs)

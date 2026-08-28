@@ -2,12 +2,14 @@
 
 Thin adapters — the work lives in services/.
 """
+
 from datetime import date
 
 from celery import chain, shared_task
 from django.conf import settings
 
 from .services.runner import run_monthly_auditor as run_monthly_auditor_service
+from .services.strategy_memory import evaluate_strategy_memory as evaluate_strategy_memory_service
 
 
 @shared_task(bind=True, ignore_result=False)
@@ -87,6 +89,16 @@ def run_monthly_auditor(self, from_date=None, to_date=None):
         to_date = date.fromisoformat(to_date)
 
     return run_monthly_auditor_service(from_date=from_date, to_date=to_date)
+
+
+@shared_task(bind=True, ignore_result=False)
+def evaluate_strategy_memory(self, decision_date=None, evaluation_days=14):
+    if decision_date is not None:
+        decision_date = date.fromisoformat(decision_date)
+    return evaluate_strategy_memory_service(
+        decision_date=decision_date,
+        evaluation_days=evaluation_days,
+    )
 
 
 def _signature(task_name: str, *, kwargs: dict, queue: str):

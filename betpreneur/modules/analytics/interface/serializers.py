@@ -105,3 +105,62 @@ class MaintenanceRunRequestSerializer(serializers.Serializer):
 class MaintenanceRunResponseSerializer(serializers.Serializer):
     queued = serializers.JSONField()
     poll = serializers.CharField()
+
+
+class ModelHealthMetricSerializer(serializers.Serializer):
+    key = serializers.CharField()
+    label = serializers.CharField()
+    value = serializers.FloatField(allow_null=True)
+    unit = serializers.CharField(allow_blank=True)
+    sample_size = serializers.IntegerField()
+    availability = serializers.CharField()
+    source = serializers.CharField(allow_blank=True)
+    breakdown = serializers.ListField(child=serializers.DictField(), required=False)
+    note = serializers.CharField(allow_blank=True, required=False)
+
+
+class ModelHealthResponseSerializer(serializers.Serializer):
+    window_days = serializers.IntegerField()
+    window_from = serializers.DateField()
+    window_to = serializers.DateField()
+    unavailable = serializers.ListField(child=serializers.CharField())
+    metrics = ModelHealthMetricSerializer(many=True)
+
+
+class PublicDatasetRoiSerializer(serializers.Serializer):
+    """A return figure always travels with the basis it was computed on."""
+
+    basis = serializers.CharField()
+    picks = serializers.IntegerField()
+    wins = serializers.IntegerField()
+    losses = serializers.IntegerField()
+    hit_rate = serializers.FloatField(allow_null=True)
+    roi = serializers.FloatField(allow_null=True)
+    stake = serializers.FloatField()
+    pnl = serializers.FloatField()
+    comparable = serializers.BooleanField()
+    reportable = serializers.BooleanField()
+    note = serializers.CharField(allow_blank=True)
+
+
+class PublicDatasetCalibrationSerializer(serializers.Serializer):
+    band = serializers.CharField()
+    stated_confidence = serializers.FloatField()
+    actual_hit_rate = serializers.FloatField(allow_null=True)
+    drift = serializers.FloatField(allow_null=True)
+    picks = serializers.IntegerField()
+    settled = serializers.IntegerField()
+    reportable = serializers.BooleanField()
+
+
+class PublicDatasetResponseSerializer(serializers.Serializer):
+    dataset_id = serializers.CharField()
+    frozen_at = serializers.CharField()
+    window = serializers.DictField()
+    headline = PublicDatasetRoiSerializer()
+    by_odds_provenance = PublicDatasetRoiSerializer(many=True)
+    calibration = PublicDatasetCalibrationSerializer(many=True)
+    voids = serializers.DictField()
+    hygiene = serializers.DictField()
+    caveats = serializers.ListField(child=serializers.CharField())
+    records = serializers.ListField(child=serializers.DictField(), required=False)

@@ -31,6 +31,12 @@ from betpreneur.modules.catalog.api import (
     token_side_score,
 )
 from betpreneur.modules.explanations.api import CAUTION, REJECT, council_review
+from betpreneur.modules.markets.api import (
+    daily_catalog_entry,
+    daily_market_family_payload,
+    daily_odds_key_map,
+    daily_scoring_market_names,
+)
 from betpreneur.modules.picks.models import (
     AlgoFixture,
     AlgoRun,
@@ -38,10 +44,17 @@ from betpreneur.modules.picks.models import (
     Pick,
     StrategyReview,
 )
+from betpreneur.modules.prediction.api import (
+    assess_market_value,
+    predict_fixture,
+    score_recommendation,
+)
 from betpreneur.modules.pricing.api import (
+    assess_all_games_policy,
     assess_calibration_trust,
     assess_league_market_trust,
     assess_recommendation,
+    assess_top_picks_policy,
 )
 from betpreneur.platform.config import temporary_env
 from betpreneur.platform.db.json import json_safe
@@ -789,6 +802,324 @@ class AlgoRunnerService:
                 "error": str(exc)[:500],
             }
 
+    def _prediction_fixture_payload(self, fixture):
+        payload = dict(fixture or {})
+        home = self._text(payload.get("home_team") or payload.get("hname"))
+        away = self._text(payload.get("away_team") or payload.get("aname"))
+        fixture_name = self._text(payload.get("fixture") or f"{home} vs {away}".strip())
+        match_id = self._text(payload.get("match_id") or payload.get("aps_id") or payload.get("id"))
+        payload.update(
+            {
+                "fixture": fixture_name,
+                "home_team": home,
+                "away_team": away,
+                "hname": self._text(payload.get("hname") or home),
+                "aname": self._text(payload.get("aname") or away),
+                "match_id": match_id,
+            }
+        )
+        return payload
+
+    def _remember_prediction_odd(self, odds, key, value, *, source="statpal"):
+        try:
+            odd = float(value)
+        except (TypeError, ValueError):
+            return
+        if odd <= 1:
+            return
+        current = odds.get(key)
+        if current is None or odd > float(current or 0):
+            odds[key] = odd
+        meta = odds.setdefault("_meta", {})
+        meta.setdefault(
+            key,
+            {
+                "bookmaker_count": 1,
+                "best": round(odd, 3),
+                "worst": round(odd, 3),
+                "average": round(odd, 3),
+                "spread_pct": 0.0,
+                "best_vs_average_pct": 0.0,
+                "source": source,
+            },
+        )
+
+    def _statpal_prediction_odds(self, fixture):
+        statpal_context = fixture.get("statpal_context") or {}
+        prematch = statpal_context.get("prematch_odds") or {}
+        odds = {}
+        mapping = {
+            "home_odds": "hw",
+            "draw_odds": "d",
+            "away_odds": "aw",
+            "over15_odds": "o15",
+            "under15_odds": "u15",
+            "over25_odds": "o25",
+            "under25_odds": "u25",
+            "over35_odds": "o35",
+            "under35_odds": "u35",
+            "btts_yes_odds": "btts_yes",
+            "btts_no_odds": "btts_no",
+            "double_chance_12_odds": "12",
+        }
+        for source_key, odds_key in mapping.items():
+            self._remember_prediction_odd(odds, odds_key, prematch.get(source_key), source="statpal")
+        return odds
+
+    def _daily_prediction_real_odds(self, fixture):
+        real_odds = {}
+        aps_id = self._text(fixture.get("aps_id") or fixture.get("api_football_fixture_id"))
+        if aps_id:
+            try:
+                from betpreneur.modules.catalog.api import legacy_runner as algo_runner
+
+                real_odds = dict(algo_runner.get_api_football_odds(aps_id) or {})
+            except Exception as exc:
+                log.warning(
+                    "Daily prediction odds fetch failed match_id=%s aps_id=%s error=%s",
+                    fixture.get("match_id"),
+                    aps_id,
+                    exc,
+                )
+        statpal_odds = self._statpal_prediction_odds(fixture)
+        if statpal_odds:
+            meta = {
+                **(real_odds.get("_meta") or {}),
+                **(statpal_odds.get("_meta") or {}),
+            }
+            real_odds = {
+                **{key: value for key, value in real_odds.items() if key != "_meta"},
+                **{key: value for key, value in statpal_odds.items() if key != "_meta"},
+            }
+            if meta:
+                real_odds["_meta"] = meta
+        return real_odds
+
+    def _daily_prediction_markets(self, real_odds):
+        markets = list(daily_scoring_market_names())
+        for market in sorted(key for key in (real_odds or {}) if str(key).startswith("Corners ")):
+            if market not in markets:
+                markets.append(market)
+        return tuple(markets)
+
+    def _prediction_market_real_odd(self, real_odds, market):
+        odds_key = daily_odds_key_map().get(market)
+        if odds_key and real_odds.get(odds_key):
+            return real_odds.get(odds_key), odds_key
+        if real_odds.get(market):
+            return real_odds.get(market), market
+        return None, odds_key or market
+
+    def _prediction_estimated_odds(self, probability):
+        if probability.fair_odds:
+            return round(float(probability.fair_odds) * 1.05, 2)
+        if probability.effective_probability:
+            return round(1 / max(float(probability.effective_probability), 0.05) * 1.05, 2)
+        return 0
+
+    def _prediction_sample_size(self, probability):
+        metadata = probability.diagnostics.metadata or {}
+        for key in ("calibration_sample_count", "sample_count", "league_sample_count"):
+            value = metadata.get(key)
+            if value is not None:
+                try:
+                    return int(value)
+                except (TypeError, ValueError):
+                    return None
+        return None
+
+    def _prediction_market_fit_score(self, probability):
+        support = str((probability.diagnostics.metadata or {}).get("market_support_level") or "").lower()
+        return {
+            "full": 82,
+            "strong": 82,
+            "medium": 68,
+            "partial": 58,
+            "weak": 46,
+            "unsupported": 20,
+        }.get(support)
+
+    def _prediction_policy_flags(self, probability, value, recommendation, top_picks):
+        flags = [
+            *list(probability.warnings or ()),
+            *list(value.pricing_warnings or ()),
+            *list(recommendation.warnings or ()),
+            *list(top_picks.reasons or ()),
+            *list(top_picks.warnings or ()),
+        ]
+        return list(dict.fromkeys(str(flag) for flag in flags if flag))
+
+    def _prediction_market_insights(self, probability, value, recommendation, all_games, top_picks):
+        family_payload = daily_market_family_payload(probability.market)
+        positive = list(dict.fromkeys([*probability.explanation_facts, *value.explanation_facts]))
+        risk = [
+            *list(probability.warnings or ()),
+            *list(value.pricing_warnings or ()),
+            *list(recommendation.warnings or ()),
+            *list(top_picks.reasons or ()),
+        ]
+        confidence = int(round(probability.confidence_score or 0))
+        source = ", ".join(probability.model_sources or (probability.model,)) or "prediction"
+        if top_picks.publishable:
+            conclusion = f"{probability.market} passes the Top Picks exposure policy."
+        elif probability.effective_probability is not None:
+            conclusion = f"{probability.market} is modelled, but product policy needs stronger price or reliability support."
+        else:
+            conclusion = f"{probability.market} does not have enough model support yet."
+        return {
+            **family_payload,
+            "prediction_engine": "prediction.api.predict_fixture",
+            "value_engine": "prediction.api.assess_market_value",
+            "recommendation_engine": "prediction.api.score_recommendation",
+            "product_policy_engine": "pricing.product_policies",
+            "raw_probability": probability.raw_probability,
+            "calibrated_probability": probability.calibrated_probability,
+            "fair_odds": probability.fair_odds,
+            "model": probability.model,
+            "model_sources": list(probability.model_sources or ()),
+            "data_quality": probability.data_quality,
+            "all_games_policy": all_games.to_dict(),
+            "top_picks_policy": top_picks.to_dict(),
+            "value_assessment": value.to_dict(),
+            "recommendation_score": recommendation.to_dict(),
+            "daily_evaluation_route": {
+                "family": family_payload.get("market_family"),
+                "assessment_type": family_payload.get("assessment_type"),
+                "engine": family_payload.get("evaluation_engine"),
+                "publishes_probability": family_payload.get("publishes_probability"),
+                "required_capabilities": family_payload.get("required_capabilities") or [],
+                "optional_capabilities": family_payload.get("optional_capabilities") or [],
+            },
+            "evidence": {
+                "positive": positive,
+                "risk": list(dict.fromkeys(str(item) for item in risk if item)),
+                "model_sources": list(probability.model_sources or ()),
+            },
+            "bettor_view": {
+                "summary": f"{probability.market} has {confidence}% calibrated model confidence from {source}.",
+                "conclusion": conclusion,
+                "pricing_warning": value.pricing_warning,
+                "tier": top_picks.tier,
+            },
+            "summary": f"{probability.market} has {confidence}% calibrated model confidence.",
+            "conclusion": conclusion,
+            "positive_evidence": positive,
+            "risk_evidence": list(dict.fromkeys(str(item) for item in risk if item)),
+        }
+
+    def _prediction_market_payload(self, probability, real_odds):
+        real_odd, odds_key = self._prediction_market_real_odd(real_odds, probability.market)
+        odds_meta = ((real_odds.get("_meta") or {}).get(odds_key) if odds_key else {}) or {}
+        odds_source = odds_meta.get("source") or ("api_football" if real_odd else "estimated")
+        value = assess_market_value(
+            probability,
+            available_odds=float(real_odd) if real_odd else None,
+            odds_source=odds_source if real_odd else "",
+            estimated_odds=not bool(real_odd),
+            sample_size=self._prediction_sample_size(probability),
+            context={
+                "data_quality": probability.data_quality,
+                "market": probability.market,
+            },
+        )
+        recommendation = score_recommendation(
+            probability,
+            value,
+            market_fit_score=self._prediction_market_fit_score(probability),
+            context={
+                "market": probability.market,
+                "data_quality": probability.data_quality,
+                "sample_size": self._prediction_sample_size(probability),
+            },
+        )
+        all_games = assess_all_games_policy(probability)
+        top_picks = assess_top_picks_policy(probability, value, recommendation)
+        odds = float(real_odd) if real_odd else self._prediction_estimated_odds(probability)
+        confidence = int(round(probability.confidence_score or 0))
+        insights = self._prediction_market_insights(
+            probability,
+            value,
+            recommendation,
+            all_games,
+            top_picks,
+        )
+        entry = daily_catalog_entry(probability.market)
+        family_payload = daily_market_family_payload(probability.market)
+        return {
+            "market": probability.market,
+            "meaning": entry.meaning if entry else "",
+            **family_payload,
+            "daily_evaluation_route": insights["daily_evaluation_route"],
+            "raw_confidence": int(round((probability.raw_probability or 0) * 100)),
+            "confidence": confidence,
+            "odds": odds,
+            "odds_meta": odds_meta,
+            "ev": value.ev,
+            "odds_source": odds_source,
+            "proven": bool(entry and entry.proven),
+            "eligible": bool(top_picks.publishable),
+            "risk_flags": self._prediction_policy_flags(probability, value, recommendation, top_picks),
+            "bettor_view": insights["bettor_view"],
+            "analysis_summary": insights["summary"],
+            "analysis_conclusion": insights["conclusion"],
+            "positive_evidence": insights["positive_evidence"],
+            "risk_evidence": insights["risk_evidence"],
+            "insights": insights,
+        }
+
+    def _score_fixture_with_prediction_engine(self, fixture):
+        source_payload = self._prediction_fixture_payload(fixture)
+        real_odds = self._daily_prediction_real_odds(source_payload)
+        markets = self._daily_prediction_markets(real_odds)
+        prediction = predict_fixture(
+            source_payload.get("match_id") or source_payload.get("fixture"),
+            fixture=source_payload,
+            markets=markets,
+        )
+        market_payloads = [
+            self._prediction_market_payload(probability, real_odds)
+            for probability in prediction.market_probabilities
+            if probability.confidence_score is not None
+        ]
+        fixture_context = dict(source_payload.get("fixture_context") or {})
+        if source_payload.get("statpal_context"):
+            fixture_context["statpal"] = source_payload.get("statpal_context") or {}
+        insights = {
+            "prediction_engine": "prediction.api.predict_fixture",
+            "prediction_diagnostics": prediction.diagnostics.to_dict(),
+            "model_sources": list(prediction.diagnostics.model_sources or ()),
+            "data_quality": prediction.diagnostics.data_quality,
+            "odds_markets": sorted(str(key) for key in real_odds if key != "_meta"),
+            "all_games_policy": "pricing.assess_all_games_policy",
+            "top_picks_policy": "pricing.assess_top_picks_policy",
+        }
+        return {
+            "fixture": source_payload.get("fixture", ""),
+            "home_team": source_payload.get("home_team", ""),
+            "away_team": source_payload.get("away_team", ""),
+            "home_logo": source_payload.get("home_logo", ""),
+            "away_logo": source_payload.get("away_logo", ""),
+            "league": source_payload.get("league", ""),
+            "league_logo": source_payload.get("league_logo", ""),
+            "country": source_payload.get("country", ""),
+            "country_flag": source_payload.get("country_flag", ""),
+            "round": source_payload.get("round", ""),
+            "league_type": source_payload.get("league_type", ""),
+            "kickoff": source_payload.get("kickoff") or source_payload.get("kickoff_utc") or "",
+            "match_id": source_payload.get("match_id", ""),
+            "home_recent_form": source_payload.get("home_recent_form") or {},
+            "away_recent_form": source_payload.get("away_recent_form") or {},
+            "fixture_context": fixture_context,
+            "team_news": source_payload.get("team_news") or {},
+            "corner_profile": source_payload.get("corner_profile") or {},
+            "market_count": len(market_payloads),
+            "markets_70_plus": sum(1 for market in market_payloads if (market.get("confidence") or 0) >= 70),
+            "markets_65_plus": sum(1 for market in market_payloads if (market.get("confidence") or 0) >= 65),
+            "markets": market_payloads,
+            "insights": insights,
+            "source_payload": source_payload,
+        }
+
     def _market_family_counts(self, markets):
         counts = defaultdict(int)
         for market in markets or []:
@@ -1113,6 +1444,14 @@ class AlgoRunnerService:
         }
 
     def _prediction_tier(self, prediction):
+        policy = ((prediction.insights or {}).get("top_picks_policy") or {})
+        policy_tier = str(policy.get("tier") or "").strip()
+        if policy.get("publishable") and policy_tier in {
+            Pick.Tier.BANKER,
+            Pick.Tier.VALUE_GEM,
+            Pick.Tier.WILD_CARD,
+        }:
+            return policy_tier
         if prediction.confidence >= 80:
             return Pick.Tier.BANKER
         if prediction.confidence >= 70:
@@ -1421,6 +1760,9 @@ class AlgoRunnerService:
         family_limit_rejections = set()
 
         def add_prediction(prediction, *, enforce_family_limit=True, enforce_mode=True):
+            product_policy = ((prediction.insights or {}).get("top_picks_policy") or {})
+            if not prediction.eligible or not product_policy.get("publishable"):
+                return False
             if prediction.match_id in used_matches:
                 return False
             if enforce_mode and not self._prediction_matches_optimization_mode(prediction, optimization_mode):
@@ -1431,8 +1773,6 @@ class AlgoRunnerService:
                 family_limit_rejections.add(prediction.id)
                 return False
             candidate = self._recommendation_candidate(prediction, performance)
-            if not assess_recommendation(candidate)["recommended"]:
-                return False
             tier = self._tier_after_council(prediction, candidate)
             if not tier:
                 return False
@@ -1861,18 +2201,9 @@ class AlgoRunnerService:
 
         try:
             with temporary_env(self._pipeline_env(algo_run)):
-                from betpreneur.modules.catalog.api import legacy_runner as algo_runner
-
-                algo_runner.clear_runtime_caches()
                 source_payload = dict(fixture.source_payload or {})
                 source_payload = self._hydrate_statpal_scoring_context(source_payload)
-                scored_fixture, confs, real_odds = algo_runner.score_aps_fixture_for_pipeline(source_payload)
-                summary = algo_runner.serialize_fixture_summaries(
-                    [scored_fixture],
-                    [confs],
-                    [real_odds],
-                )[0]
-                summary["source_payload"] = scored_fixture
+                summary = self._score_fixture_with_prediction_engine(source_payload)
                 summary = self._enrich_fixture_statpal_diagnostics(summary)
                 self._persist_fixture_summary(algo_run, summary)
                 market_count = self._persist_fixture_market_predictions(algo_run, summary)
@@ -1891,10 +2222,9 @@ class AlgoRunnerService:
                     market_count,
                     slip_cache,
                     family_counts,
-                    (scored_fixture.get("provider_merge") or {}),
+                    ((summary.get("source_payload") or {}).get("provider_merge") or {}),
                     statpal_family_coverage,
                 )
-                algo_runner.clear_runtime_caches()
             return {
                 "fixture_id": fixture.id,
                 "status": "scored",
@@ -2044,26 +2374,17 @@ class AlgoRunnerService:
                 "ALGO_STRATEGY_PROFILE": json.dumps(strategy_profile),
             })):
                 from betpreneur.modules.catalog.api import SlipReviewMarketCacheWriter
-                from betpreneur.modules.catalog.api import legacy_runner as algo_runner
 
-                algo_runner.clear_runtime_caches()
                 source_payload = self._cached_fixture_runner_payload(cached)
                 source_payload = self._enrich_fixture_for_cross_provider_scoring(source_payload, target_date)
                 source_payload = self._hydrate_statpal_scoring_context(source_payload)
-                scored_fixture, confs, real_odds = algo_runner.score_aps_fixture_for_pipeline(source_payload)
-                summary = algo_runner.serialize_fixture_summaries(
-                    [scored_fixture],
-                    [confs],
-                    [real_odds],
-                )[0]
+                summary = self._score_fixture_with_prediction_engine(source_payload)
                 summary["match_date"] = target_date
-                summary["source_payload"] = scored_fixture
                 summary = self._enrich_fixture_statpal_diagnostics(summary)
                 cache_summary = SlipReviewMarketCacheWriter().upsert_fixture_markets(
                     summary,
                     source=SlipReviewMarketCache.Source.MERGED,
                 )
-                algo_runner.clear_runtime_caches()
         except Exception as exc:
             close_old_connections()
             log.warning(
@@ -2089,7 +2410,7 @@ class AlgoRunnerService:
             "market_count": len(markets),
             "cache": cache_summary,
             "market_families": self._market_family_counts(markets),
-            "provider_merge": scored_fixture.get("provider_merge") or {},
+            "provider_merge": ((summary.get("source_payload") or {}).get("provider_merge") or {}),
         }
 
     def build_slip_review_market_cache(
@@ -2373,13 +2694,7 @@ class AlgoRunnerService:
                 for index, fixture in enumerate(fixtures, start=1):
                     try:
                         fixture = self._hydrate_statpal_scoring_context(fixture)
-                        scored_fixture, confs, real_odds = algo_runner.score_aps_fixture_for_pipeline(fixture)
-                        summary = algo_runner.serialize_fixture_summaries(
-                            [scored_fixture],
-                            [confs],
-                            [real_odds],
-                        )[0]
-                        summary["source_payload"] = scored_fixture
+                        summary = self._score_fixture_with_prediction_engine(fixture)
                         summary = self._enrich_fixture_statpal_diagnostics(summary)
                         for family, count in self._market_family_counts(summary.get("markets") or []).items():
                             market_family_counts[family] += count

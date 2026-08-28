@@ -13,3 +13,14 @@
 # method names unstable: reordering routes could swap them between the list and
 # detail endpoint. Now pinned explicitly. Paths and payloads are unchanged.
 operationId
+
+# Stage 20: staff-only model-health dashboard. Additive — a new path, no change
+# to any existing operation.
+/api/algo/model-health/
+
+# Stage 21: public reporting dataset. Additive. Two paths, deliberately split:
+# the public one is served with Cache-Control: public and carries aggregates
+# only, so the row-level export is staff-only on its own uncached path rather
+# than a query flag on the public one.
+/api/algo/public/dataset/
+/api/algo/public/dataset/export/

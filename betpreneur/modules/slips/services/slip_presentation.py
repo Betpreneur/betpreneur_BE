@@ -5,6 +5,7 @@ vocabulary, and picks owns tables — so importing its facade pulls Django in.
 R5 caught that, correctly: a domain module must be self-contained. They live
 here instead, one layer up.
 """
+
 from __future__ import annotations
 
 from betpreneur.modules.markets.api import market_matches
@@ -59,7 +60,9 @@ def _slip_review_market_cache_payload(row):
             "meaning": row.meaning,
             "raw_confidence": row.raw_confidence,
             "confidence": row.confidence,
-            "final_confidence": row.final_confidence if row.final_confidence is not None else council_review.get("final_confidence"),
+            "final_confidence": row.final_confidence
+            if row.final_confidence is not None
+            else council_review.get("final_confidence"),
             "council_review": payload.get("council_review") or council_review,
             "odds": float(row.odds) if row.odds is not None else payload.get("odds"),
             "odds_meta": row.odds_meta or payload.get("odds_meta") or {},
@@ -70,8 +73,12 @@ def _slip_review_market_cache_payload(row):
             "risk_flags": row.risk_flags or payload.get("risk_flags") or [],
             "bettor_view": insights.get("bettor_view") or payload.get("bettor_view") or {},
             "analysis_summary": insights.get("summary", payload.get("analysis_summary", "")),
-            "analysis_conclusion": insights.get("conclusion", payload.get("analysis_conclusion", "")),
-            "positive_evidence": insights.get("positive_evidence") or payload.get("positive_evidence") or [],
+            "analysis_conclusion": insights.get(
+                "conclusion", payload.get("analysis_conclusion", "")
+            ),
+            "positive_evidence": insights.get("positive_evidence")
+            or payload.get("positive_evidence")
+            or [],
             "risk_evidence": insights.get("risk_evidence") or payload.get("risk_evidence") or [],
             "insights": insights,
             "selected": False,
@@ -101,7 +108,9 @@ def _replacement_market_for_slip(
     ]
     markets.extend(generated_markets or [])
     team_intelligence = (game or {}).get("team_intelligence") or {}
-    markets = [enrich_market_with_team_intelligence(market, team_intelligence) for market in markets]
+    markets = [
+        enrich_market_with_team_intelligence(market, team_intelligence) for market in markets
+    ]
     allowed_markets = []
     blocked_markets = []
     for market in markets:
@@ -116,7 +125,9 @@ def _replacement_market_for_slip(
     markets = allowed_markets
     if selected_market:
         selected_name = selected_market.get("market")
-        markets = [market for market in markets if not market_matches(selected_name, market.get("market"))]
+        markets = [
+            market for market in markets if not market_matches(selected_name, market.get("market"))
+        ]
     candidates = [
         market
         for market in markets
@@ -135,14 +146,20 @@ def _replacement_market_for_slip(
     if selected_market:
         allowed = []
         selected_group = market_family_group(selected_market)
-        conflict_blocks_broad = _market_model_conflicted(selected_market) and selected_group == "result"
+        conflict_blocks_broad = (
+            _market_model_conflicted(selected_market) and selected_group == "result"
+        )
         for market in candidates:
             scope = replacement_scope(selected_market, market)
             if scope == "broad_fallback" and conflict_blocks_broad:
                 continue
-            if scope == "broad_fallback" and (not allow_safer_fallback or not allows_broad_replacement(selected_market)):
+            if scope == "broad_fallback" and (
+                not allow_safer_fallback or not allows_broad_replacement(selected_market)
+            ):
                 continue
-            if scope == "broad_fallback" and not broad_fallback_candidate_allowed(selected_market, market):
+            if scope == "broad_fallback" and not broad_fallback_candidate_allowed(
+                selected_market, market
+            ):
                 continue
             market["replacement_scope"] = scope
             if _replacement_is_meaningfully_better(selected_market, market):
@@ -150,12 +167,18 @@ def _replacement_market_for_slip(
         if not allowed:
             supported = []
             for market in candidates:
-                scope = market.get("replacement_scope") or replacement_scope(selected_market, market)
+                scope = market.get("replacement_scope") or replacement_scope(
+                    selected_market, market
+                )
                 if scope == "broad_fallback" and conflict_blocks_broad:
                     continue
-                if scope == "broad_fallback" and (not allow_safer_fallback or not allows_broad_replacement(selected_market)):
+                if scope == "broad_fallback" and (
+                    not allow_safer_fallback or not allows_broad_replacement(selected_market)
+                ):
                     continue
-                if scope == "broad_fallback" and not broad_fallback_candidate_allowed(selected_market, market):
+                if scope == "broad_fallback" and not broad_fallback_candidate_allowed(
+                    selected_market, market
+                ):
                     continue
                 market["replacement_scope"] = scope
                 if _replacement_is_supported_fit(selected_market, market):
@@ -223,7 +246,13 @@ def _team_intelligence_profile_line(evidence, *, market_payload=None):
 def _h2h_evidence_line(evidence):
     evidence = evidence or {}
     statpal = evidence.get("statpal") if isinstance(evidence.get("statpal"), dict) else {}
-    h2h = evidence.get("h2h") if isinstance(evidence.get("h2h"), dict) else statpal.get("h2h") if isinstance(statpal.get("h2h"), dict) else {}
+    h2h = (
+        evidence.get("h2h")
+        if isinstance(evidence.get("h2h"), dict)
+        else statpal.get("h2h")
+        if isinstance(statpal.get("h2h"), dict)
+        else {}
+    )
     for payload in (h2h, evidence, statpal):
         if not isinstance(payload, dict):
             continue
@@ -245,21 +274,31 @@ def _h2h_evidence_line(evidence):
     return ""
 
 
-def _stats_backed_evidence(selection, *, market_payload=None, include_context=True, owned_market_only=False):
+def _stats_backed_evidence(
+    selection, *, market_payload=None, include_context=True, owned_market_only=False
+):
     market_payload = market_payload or {}
     evidence = []
-    context_line = _public_market_context_line(selection, market_payload)
-    if include_context and context_line:
-        evidence.append(context_line)
 
     selected_evidence = (
-        market_payload.get("advisory_evidence")
-        or (selection or {}).get("evidence_payload")
-        or {}
+        market_payload.get("advisory_evidence") or (selection or {}).get("evidence_payload") or {}
     )
+    for item in (
+        market_payload.get("explanation_facts") or market_payload.get("supporting_facts") or []
+    ):
+        text = _clean_public_slip_evidence_text(item)
+        if text:
+            evidence.append(text)
+
+    context_line = _public_market_context_line(selection, market_payload)
+    if include_context and context_line and len(evidence) < 2:
+        evidence.append(context_line)
+
     if owned_market_only:
         evidence.extend(market_owned_model_lines(market_payload, selected_evidence))
-        profile_line = _team_intelligence_profile_line(selected_evidence, market_payload=market_payload)
+        profile_line = _team_intelligence_profile_line(
+            selected_evidence, market_payload=market_payload
+        )
         profile_source = str(selected_evidence.get("team_intelligence_source") or "")
         if profile_line and ("stored_league" not in profile_source or not evidence):
             evidence.append(profile_line)
@@ -275,7 +314,9 @@ def _stats_backed_evidence(selection, *, market_payload=None, include_context=Tr
             if line:
                 evidence.append(line)
 
-        count_line = count_model_line_from_evidence(selected_evidence, market_payload=market_payload)
+        count_line = count_model_line_from_evidence(
+            selected_evidence, market_payload=market_payload
+        )
         if count_line:
             evidence.append(count_line)
         goal_line = goal_model_line_from_evidence(selected_evidence)
@@ -284,7 +325,9 @@ def _stats_backed_evidence(selection, *, market_payload=None, include_context=Tr
 
     user_market = ((selection or {}).get("user_pick") or {}).get("market")
     payload_market = market_payload.get("market")
-    include_selected_raw_evidence = not payload_market or market_matches(user_market, payload_market)
+    include_selected_raw_evidence = not payload_market or market_matches(
+        user_market, payload_market
+    )
     if include_selected_raw_evidence and not owned_market_only:
         raw_evidence = list((selection or {}).get("evidence") or (selection or {}).get("why") or [])
         for item in raw_evidence:
@@ -292,7 +335,11 @@ def _stats_backed_evidence(selection, *, market_payload=None, include_context=Tr
             lowered = text.lower()
             if not text:
                 continue
-            if "statpal reference" in lowered or "your price is" in lowered or "reference price" in lowered:
+            if (
+                "statpal reference" in lowered
+                or "your price is" in lowered
+                or "reference price" in lowered
+            ):
                 continue
             evidence.append(text)
 
@@ -331,7 +378,9 @@ def _bettor_recommendation(selection):
     recommendation_pick = recommendation.get("pick") or {}
     simple_verdict = _simple_pick_verdict(selection)
     action = recommendation.get("action") or "review"
-    replacement_market = ai_pick.get("market") or recommendation_pick.get("market") or recommendation.get("market")
+    replacement_market = (
+        ai_pick.get("market") or recommendation_pick.get("market") or recommendation.get("market")
+    )
     replacement_score_source = (
         ai_pick.get("confidence_score")
         if ai_pick.get("confidence_score") is not None
@@ -356,11 +405,21 @@ def _bettor_recommendation(selection):
             effective_ai_pick["confidence_score"] = replacement_score
         if effective_ai_pick.get("confidence_label") is None and replacement_score is not None:
             effective_ai_pick["confidence_label"] = _public_confidence_label(replacement_score)
-        if effective_ai_pick.get("data_confidence_score") is None and recommendation_pick.get("data_confidence_score") is not None:
-            effective_ai_pick["data_confidence_score"] = recommendation_pick.get("data_confidence_score")
+        if (
+            effective_ai_pick.get("data_confidence_score") is None
+            and recommendation_pick.get("data_confidence_score") is not None
+        ):
+            effective_ai_pick["data_confidence_score"] = recommendation_pick.get(
+                "data_confidence_score"
+            )
         if effective_ai_pick.get("odds") is None and recommendation_pick.get("odds") is not None:
             effective_ai_pick["odds"] = recommendation_pick.get("odds")
-    if action == "replace" and effective_ai_pick.get("available") and replacement_market and replacement_score is not None:
+    if (
+        action == "replace"
+        and effective_ai_pick.get("available")
+        and replacement_market
+        and replacement_score is not None
+    ):
         pick = {
             "market": replacement_market,
             "odds": effective_ai_pick.get("odds"),
@@ -394,7 +453,9 @@ def _bettor_recommendation(selection):
             action = "review"
     why = _stats_backed_evidence(
         selection,
-        market_payload=effective_ai_pick if action == "replace" else ((selection or {}).get("ai_pick") or user_pick),
+        market_payload=effective_ai_pick
+        if action == "replace"
+        else ((selection or {}).get("ai_pick") or user_pick),
         include_context=True,
         owned_market_only=(
             action == "replace"
@@ -412,9 +473,13 @@ def _bettor_recommendation(selection):
         elif action == "keep":
             why = ["Your original selection already fits the statistical profile of the match."]
         elif action == "caution":
-            why = ["There is not enough evidence for a stronger replacement to be recommended confidently."]
+            why = [
+                "There is not enough evidence for a stronger replacement to be recommended confidently."
+            ]
         elif action == "no_replacement":
-            why = ["The original pick is risky, but no statistically supported replacement was found."]
+            why = [
+                "The original pick is risky, but no statistically supported replacement was found."
+            ]
         else:
             why = ["No confident recommendation is available from the current match data."]
     if action == "no_replacement":

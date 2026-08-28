@@ -27,6 +27,7 @@ INSTALLED_APPS = [
     "betpreneur.modules.billing",
     "betpreneur.modules.catalog",
     "betpreneur.modules.scoring",
+    "betpreneur.modules.prediction",
     "betpreneur.modules.picks",
     "betpreneur.modules.slips",
     "betpreneur.modules.settlement",

@@ -12,7 +12,15 @@ from __future__ import annotations
 
 from betpreneur.modules.markets.api import market_matches
 
-from .contracts import Calibration, LegState, SettledLeg
+from .contracts import (
+    AllGamesPolicyAssessment,
+    Calibration,
+    LegState,
+    SettledLeg,
+    SlipReviewAlternative,
+    SlipReviewPolicyAssessment,
+    TopPicksPolicyAssessment,
+)
 from .domain.leg_state import assess_leg, may_publish_probability
 from .domain.market_scoring import (
     SPECIALIST_REPLACEMENT_GROUPS,
@@ -54,6 +62,11 @@ from .services.gating import (
     setting_bool,
     with_match_checker_advisory,
 )
+from .services.product_policies import (
+    assess_all_games_policy,
+    assess_slip_review_policy,
+    assess_top_picks_policy,
+)
 from .services.recommendation_policy import (
     assess_calibration_trust,
     assess_league_market_trust,
@@ -70,17 +83,24 @@ __all__ = [
     "MAX_PLAUSIBLE_TEAM_EXPECTED_GOALS",
     "SCORE_BANDS",
     "SPECIALIST_REPLACEMENT_GROUPS",
+    "AllGamesPolicyAssessment",
     "Calibration",
     "LegState",
     "SettledLeg",
+    "SlipReviewAlternative",
+    "SlipReviewPolicyAssessment",
     "TicketRiskService",
     "Tier",
+    "TopPicksPolicyAssessment",
     "allows_broad_replacement",
     "annotations",
+    "assess_all_games_policy",
     "assess_calibration_trust",
     "assess_league_market_trust",
     "assess_leg",
     "assess_recommendation",
+    "assess_slip_review_policy",
+    "assess_top_picks_policy",
     "broad_fallback_candidate_allowed",
     "clear_calibration_source",
     "count_model_line_from_evidence",

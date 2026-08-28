@@ -26,6 +26,7 @@ layers =
     betpreneur.modules.slips
     betpreneur.modules.picks
     betpreneur.modules.pricing | betpreneur.modules.explanations
+    betpreneur.modules.prediction
     betpreneur.modules.scoring
     betpreneur.modules.catalog | betpreneur.modules.billing
     betpreneur.modules.markets | betpreneur.modules.identity
@@ -49,6 +50,7 @@ source_modules =
     betpreneur.modules.catalog
     betpreneur.modules.billing
     betpreneur.modules.scoring
+    betpreneur.modules.prediction
     betpreneur.modules.pricing
     betpreneur.modules.explanations
     betpreneur.modules.picks
@@ -73,6 +75,7 @@ source_modules =
     betpreneur.modules.catalog
     betpreneur.modules.billing
     betpreneur.modules.scoring
+    betpreneur.modules.prediction
     betpreneur.modules.pricing
     betpreneur.modules.explanations
     betpreneur.modules.picks
@@ -97,6 +100,7 @@ source_modules =
     betpreneur.modules.identity
     betpreneur.modules.billing
     betpreneur.modules.scoring
+    betpreneur.modules.prediction
     betpreneur.modules.pricing
     betpreneur.modules.explanations
     betpreneur.modules.picks
@@ -121,6 +125,7 @@ source_modules =
     betpreneur.modules.identity
     betpreneur.modules.catalog
     betpreneur.modules.scoring
+    betpreneur.modules.prediction
     betpreneur.modules.pricing
     betpreneur.modules.explanations
     betpreneur.modules.picks
@@ -145,6 +150,7 @@ source_modules =
     betpreneur.modules.identity
     betpreneur.modules.catalog
     betpreneur.modules.billing
+    betpreneur.modules.prediction
     betpreneur.modules.pricing
     betpreneur.modules.explanations
     betpreneur.modules.picks
@@ -170,6 +176,7 @@ source_modules =
     betpreneur.modules.catalog
     betpreneur.modules.billing
     betpreneur.modules.scoring
+    betpreneur.modules.prediction
     betpreneur.modules.explanations
     betpreneur.modules.picks
     betpreneur.modules.slips
@@ -183,6 +190,7 @@ forbidden_modules =
     betpreneur.modules.pricing.tasks
     betpreneur.modules.pricing.handlers
     betpreneur.modules.pricing.evaluators
+    betpreneur.modules.pricing.services.product_policies
 allow_indirect_imports = True
 
 [importlinter:contract:private-explanations]
@@ -194,6 +202,7 @@ source_modules =
     betpreneur.modules.catalog
     betpreneur.modules.billing
     betpreneur.modules.scoring
+    betpreneur.modules.prediction
     betpreneur.modules.pricing
     betpreneur.modules.picks
     betpreneur.modules.slips
@@ -209,6 +218,42 @@ forbidden_modules =
     betpreneur.modules.explanations.evaluators
 allow_indirect_imports = True
 
+[importlinter:contract:private-prediction]
+name = R2 · only prediction.api / .contracts / .events cross the boundary
+type = forbidden
+source_modules =
+    betpreneur.modules.markets
+    betpreneur.modules.identity
+    betpreneur.modules.catalog
+    betpreneur.modules.billing
+    betpreneur.modules.scoring
+    betpreneur.modules.pricing
+    betpreneur.modules.explanations
+    betpreneur.modules.picks
+    betpreneur.modules.slips
+    betpreneur.modules.settlement
+    betpreneur.modules.analytics
+forbidden_modules =
+    betpreneur.modules.prediction.models
+    betpreneur.modules.prediction.services
+    betpreneur.modules.prediction.domain
+    betpreneur.modules.prediction.interface
+    betpreneur.modules.prediction.tasks
+    betpreneur.modules.prediction.handlers
+    betpreneur.modules.prediction.evaluators
+    betpreneur.modules.prediction.feature_builder
+    betpreneur.modules.prediction.poisson
+    betpreneur.modules.prediction.elo
+    betpreneur.modules.prediction.monte_carlo
+    betpreneur.modules.prediction.calibration
+    betpreneur.modules.prediction.market_probabilities
+    betpreneur.modules.prediction.explanation
+    betpreneur.modules.prediction.diagnostics
+    betpreneur.modules.prediction.training_samples
+    betpreneur.modules.prediction.value
+    betpreneur.modules.prediction.recommendation
+allow_indirect_imports = True
+
 [importlinter:contract:private-picks]
 name = R2 · only picks.api / .contracts / .events cross the boundary
 type = forbidden
@@ -219,6 +264,7 @@ source_modules =
     betpreneur.modules.billing
     betpreneur.modules.scoring
     betpreneur.modules.pricing
+    betpreneur.modules.prediction
     betpreneur.modules.explanations
     betpreneur.modules.slips
     betpreneur.modules.settlement
@@ -243,6 +289,7 @@ source_modules =
     betpreneur.modules.billing
     betpreneur.modules.scoring
     betpreneur.modules.pricing
+    betpreneur.modules.prediction
     betpreneur.modules.explanations
     betpreneur.modules.picks
     betpreneur.modules.settlement
@@ -267,6 +314,7 @@ source_modules =
     betpreneur.modules.billing
     betpreneur.modules.scoring
     betpreneur.modules.pricing
+    betpreneur.modules.prediction
     betpreneur.modules.explanations
     betpreneur.modules.picks
     betpreneur.modules.slips
@@ -291,6 +339,7 @@ source_modules =
     betpreneur.modules.billing
     betpreneur.modules.scoring
     betpreneur.modules.pricing
+    betpreneur.modules.prediction
     betpreneur.modules.explanations
     betpreneur.modules.picks
     betpreneur.modules.slips

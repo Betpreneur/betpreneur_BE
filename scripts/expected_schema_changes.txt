@@ -20,3 +20,13 @@ catalog_teammarketprofile
 catalog_teamprofile
 catalog_teamrecentformprofile
 catalog_teamseasonprofile
+
+# Stage 18 strategy memory: records what each promote/cool/suppress decision
+# went on to do, so Stage 20 can report whether those actions helped. Additive,
+# analytics-owned, no existing table touched.
+analytics_strategyactionoutcome
+
+# Stage 8 training dataset: one row per fixture/market observation, the source
+# the calibration and walk-forward stages are meant to read. Additive, owned by
+# the new prediction module.
+prediction_training_sample

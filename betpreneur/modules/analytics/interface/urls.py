@@ -7,12 +7,19 @@ from django.urls import path
 from .views import (
     MaintenanceRunView,
     MarketHealthView,
+    ModelHealthView,
+    PublicDatasetExportView,
+    PublicDatasetView,
     PublicRecordView,
     PublicSummaryView,
     TaskStatusView,
 )
 
 urlpatterns = [
+    path("model-health/", ModelHealthView.as_view(), name="algo-model-health"),
+    path("public/dataset/", PublicDatasetView.as_view(), name="algo-public-dataset"),
+    path("public/dataset/export/", PublicDatasetExportView.as_view(),
+         name="algo-public-dataset-export"),
     path("public/summary/", PublicSummaryView.as_view(), name="algo-public-summary"),
     path("public/record/", PublicRecordView.as_view(), name="algo-public-record"),
     path("markets/health/", MarketHealthView.as_view(), name="algo-market-health"),
