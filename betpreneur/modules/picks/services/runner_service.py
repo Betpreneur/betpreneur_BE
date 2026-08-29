@@ -1733,8 +1733,8 @@ class AlgoRunnerService:
 
         predictions = list(
             MarketPrediction.objects.filter(run=algo_run)
+            .filter(eligible=True, ev__isnull=False, insights__top_picks_policy__publishable=True)
             .exclude(market__in=["DC: 1X", "DC: X2"])
-            .exclude(ev__isnull=True)
             .only(
                 "id",
                 "match_id",
