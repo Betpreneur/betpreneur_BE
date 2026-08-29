@@ -366,6 +366,16 @@ def _per_match(total, matches) -> float | None:
     return round(total_value / match_count, 4)
 
 
+def _recent_average(value, matches, *, ceiling: float) -> float | None:
+    total_value = _float_or_none(value)
+    if total_value is None:
+        return None
+    match_count = _float_or_none(matches)
+    if match_count and total_value > ceiling:
+        return round(total_value / match_count, 4)
+    return round(total_value, 4)
+
+
 def _points_per_game(form: dict[str, Any]) -> float | None:
     matches = _float_or_none(form.get("matches"))
     if not matches:
@@ -383,10 +393,15 @@ def _recent_form_by_scope(rows) -> dict[str, dict[str, Any]]:
             continue
         item = dict(row)
         item["points_per_game"] = _points_per_game(item)
-        item["goals_for_per_match"] = _per_match(item.get("goals_for"), item.get("matches"))
-        item["goals_against_per_match"] = _per_match(item.get("goals_against"), item.get("matches"))
-        item["corners_for_per_match"] = _per_match(item.get("corners_for"), item.get("matches"))
-        item["shots_on_target_for_per_match"] = _per_match(item.get("shots_on_target_for"), item.get("matches"))
+        item["goals_for_per_match"] = _recent_average(item.get("goals_for"), item.get("matches"), ceiling=6.0)
+        item["goals_against_per_match"] = _recent_average(item.get("goals_against"), item.get("matches"), ceiling=6.0)
+        item["corners_for_per_match"] = _recent_average(item.get("corners_for"), item.get("matches"), ceiling=15.0)
+        item["cards_for_per_match"] = _recent_average(item.get("cards_for"), item.get("matches"), ceiling=8.0)
+        item["shots_on_target_for_per_match"] = _recent_average(
+            item.get("shots_on_target_for"),
+            item.get("matches"),
+            ceiling=15.0,
+        )
         by_scope.setdefault(scope, {})[window] = item
     return by_scope
 

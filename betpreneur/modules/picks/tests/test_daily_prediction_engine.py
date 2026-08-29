@@ -1,4 +1,5 @@
 from datetime import date
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from django.test import TestCase
@@ -7,9 +8,12 @@ from betpreneur.modules.picks.interface.views import _compact_games_payload
 from betpreneur.modules.picks.models import AlgoFixture, AlgoRun, MarketPrediction, Pick
 from betpreneur.modules.picks.services.runner_service import AlgoRunnerService
 from betpreneur.modules.prediction.api import (
+    CountModelOutput,
+    FixtureFeatureSet,
     FixturePrediction,
     MarketProbability,
     PredictionDiagnostics,
+    TeamStrengthSnapshot,
 )
 
 
@@ -122,6 +126,115 @@ class DailyPredictionEngineTests(TestCase):
         self.assertEqual(odds["_meta"]["aw"]["source"], "statpal")
         self.assertEqual(odds["_meta"]["aw"]["bookmaker_count"], 2)
         self.assertEqual(odds["_meta"]["o25"]["source"], "statpal")
+
+    def test_prediction_scoring_hydration_restores_team_news(self):
+        service = AlgoRunnerService()
+        statpal_context = {
+            "snapshots": {},
+            "lineups": {
+                "status": "projected",
+                "home_formation": "4-3-3",
+                "away_formation": "4-2-3-1",
+            },
+            "injuries_suspensions": {
+                "home": {"to_miss_count": 2, "questionable_count": 1},
+                "away": {"to_miss_count": 0, "questionable_count": 0},
+            },
+        }
+
+        team_news = service._team_news_for_prediction_fixture(
+            {"match_id": "statpal:fixture-123"},
+            statpal_context,
+        )
+
+        self.assertTrue(team_news["available"])
+        self.assertTrue(team_news["injuries_available"])
+        self.assertTrue(team_news["lineups_available"])
+        self.assertEqual(team_news["home"]["injuries"], 2)
+        self.assertEqual(team_news["home"]["formation"], "4-3-3")
+        self.assertIn("statpal_projected_lineups", team_news["flags"])
+
+    def test_prediction_corner_profile_keeps_against_and_total_fields(self):
+        service = AlgoRunnerService()
+        prediction = FixturePrediction(
+            fixture_id="fixture-123",
+            fixture_name="Alpha FC vs Beta FC",
+            features=FixtureFeatureSet(
+                fixture_id="fixture-123",
+                fixture_name="Alpha FC vs Beta FC",
+                home_team=TeamStrengthSnapshot(team_id="home", team_name="Alpha FC"),
+                away_team=TeamStrengthSnapshot(team_id="away", team_name="Beta FC"),
+                features={
+                    "home": {
+                        "season_profile": {
+                            "matches_played": 10,
+                            "corners_for": 62,
+                            "corners_against": 41,
+                        }
+                    },
+                    "away": {
+                        "season_profile": {
+                            "matches_played": 10,
+                            "corners_for": 38,
+                            "corners_against": 57,
+                        }
+                    },
+                },
+            ),
+            counts=CountModelOutput(
+                expected_total_corners=10.2,
+                expected_team_counts={"corners": {"home": 5.9, "away": 4.3}},
+                diagnostics=PredictionDiagnostics(
+                    data_quality="strong",
+                    metadata={"sources": {"corners": ["team_season_profile"]}},
+                ),
+            ),
+        )
+
+        profile = service._prediction_corner_profile_payload(prediction)
+
+        self.assertEqual(profile["expected_total"], 10.2)
+        self.assertEqual(profile["home"]["avg_for"], 6.2)
+        self.assertEqual(profile["home"]["avg_against"], 4.1)
+        self.assertEqual(profile["home"]["avg_total"], 10.3)
+        self.assertEqual(profile["home"]["opponent_avg_against"], 5.7)
+        self.assertEqual(profile["away"]["avg_for"], 3.8)
+        self.assertEqual(profile["away"]["avg_against"], 5.7)
+        self.assertEqual(profile["away"]["avg_total"], 9.5)
+
+    def test_prediction_recent_form_payload_does_not_double_divide_averages(self):
+        service = AlgoRunnerService()
+        prediction = SimpleNamespace(
+            features=SimpleNamespace(
+                features={
+                    "home": {
+                        "recent_form": {
+                            "all": {
+                                "10": {
+                                    "matches": 10,
+                                    "wins": 3,
+                                    "draws": 4,
+                                    "losses": 3,
+                                    "goals_for": 1.7,
+                                    "goals_against": 1.6,
+                                    "goals_for_per_match": 1.7,
+                                    "goals_against_per_match": 1.6,
+                                    "form": ["D", "W", "L"],
+                                    "scope": "all",
+                                }
+                            }
+                        },
+                        "season_profile": {"source": "statpal", "data_quality": "limited"},
+                    }
+                }
+            )
+        )
+
+        payload = service._prediction_recent_form_payload(prediction, "home")
+
+        self.assertEqual(payload["games"], 10)
+        self.assertEqual(payload["avg_scored"], 1.7)
+        self.assertEqual(payload["avg_conceded"], 1.6)
 
     def test_daily_fixture_scoring_uses_prediction_api_and_persists_policy_context(self):
         run = AlgoRun.objects.create(target_date=date(2026, 8, 28), status=AlgoRun.Status.RUNNING)

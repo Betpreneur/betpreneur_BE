@@ -214,3 +214,29 @@ class FixtureFeatureBuilderTests(TestCase):
         self.assertEqual(feature_set.fixture_name, "Manual Home vs Manual Away")
         self.assertEqual(feature_set.season, "2026-2027")
         self.assertIn("goal_model_unavailable", feature_set.diagnostics.warnings)
+
+    def test_recent_form_averages_are_not_double_divided(self):
+        TeamRecentFormProfile.objects.create(
+            team=self.home,
+            league_key="england-premier-league",
+            league_name="English Premier League",
+            season="2026-2027",
+            window=10,
+            scope="all",
+            matches=10,
+            wins=4,
+            draws=3,
+            losses=3,
+            goals_for=1.7,
+            goals_against=1.6,
+            corners_for=6.2,
+            shots_on_target_for=5.1,
+        )
+
+        feature_set = build_fixture_features(self.fixture)
+        recent = feature_set.features["home"]["recent_form"]["all"]["10"]
+
+        self.assertEqual(recent["goals_for_per_match"], 1.7)
+        self.assertEqual(recent["goals_against_per_match"], 1.6)
+        self.assertEqual(recent["corners_for_per_match"], 6.2)
+        self.assertEqual(recent["shots_on_target_for_per_match"], 5.1)

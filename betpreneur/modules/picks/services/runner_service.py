@@ -574,7 +574,38 @@ class AlgoRunnerService:
         enriched = dict(fixture)
         enriched["statpal_refresh"] = refresh
         enriched["statpal_context"] = context
+        enriched["team_news"] = self._team_news_for_prediction_fixture(enriched, context)
         return enriched
+
+    def _team_news_for_prediction_fixture(self, fixture, statpal_context):
+        from betpreneur.modules.catalog.api import legacy_runner as algo_runner
+
+        team_news = algo_runner._statpal_team_news(statpal_context)
+        if team_news.get("available"):
+            return team_news
+
+        aps_id = self._text(fixture.get("aps_id") or fixture.get("api_football_fixture_id"))
+        if not aps_id:
+            return team_news
+        try:
+            fallback = algo_runner.fetch_fixture_team_news(
+                aps_id,
+                fixture.get("api_football_home_team_id") or fixture.get("hid"),
+                fixture.get("api_football_away_team_id") or fixture.get("aid"),
+            )
+        except Exception as exc:
+            log.warning(
+                "Daily prediction team news fetch failed match_id=%s aps_id=%s error=%s",
+                fixture.get("match_id"),
+                aps_id,
+                exc,
+            )
+            return team_news
+        if fallback.get("available"):
+            fallback.setdefault("flags", []).append("api_football_team_news_fallback")
+            fallback["flags"] = sorted(dict.fromkeys(fallback.get("flags") or []))
+            return fallback
+        return team_news
 
     def _persist_selected_picks(self, algo_run: AlgoRun, result):
         selected_picks = result.get("selected_picks") or []
@@ -1311,12 +1342,16 @@ class AlgoRunnerService:
         wins = int(self._prediction_number(form.get("wins")) or 0)
         draws = int(self._prediction_number(form.get("draws")) or 0)
         losses = int(self._prediction_number(form.get("losses")) or max(0, matches - wins - draws))
-        goals_for = self._prediction_number(form.get("goals_for"))
-        goals_against = self._prediction_number(form.get("goals_against"))
-        if goals_for is None:
-            goals_for = self._prediction_number(season.get("goals_for"))
-        if goals_against is None:
-            goals_against = self._prediction_number(season.get("goals_against"))
+        avg_scored = self._prediction_number(form.get("goals_for_per_match"))
+        if avg_scored is None:
+            avg_scored = self._prediction_recent_average(form.get("goals_for"), matches, ceiling=6.0)
+        if avg_scored is None:
+            avg_scored = self._prediction_rate(season.get("goals_for"), season.get("matches_played"))
+        avg_conceded = self._prediction_number(form.get("goals_against_per_match"))
+        if avg_conceded is None:
+            avg_conceded = self._prediction_recent_average(form.get("goals_against"), matches, ceiling=6.0)
+        if avg_conceded is None:
+            avg_conceded = self._prediction_rate(season.get("goals_against"), season.get("matches_played"))
         return {
             "games": int(matches),
             "wins": wins,
@@ -1324,8 +1359,8 @@ class AlgoRunnerService:
             "losses": losses,
             "scope": form.get("scope") or "stored_team_intelligence",
             "form": form.get("form") or "",
-            "avg_scored": self._prediction_rate(goals_for, matches),
-            "avg_conceded": self._prediction_rate(goals_against, matches),
+            "avg_scored": avg_scored or 0,
+            "avg_conceded": avg_conceded or 0,
             "source": season.get("source") or "stored_team_intelligence",
             "data_quality": season.get("data_quality") or features.get("coverage", {}).get("status") or "",
         }
@@ -1346,10 +1381,43 @@ class AlgoRunnerService:
             return {}
         corners = (counts.expected_team_counts or {}).get("corners") or {}
         sources = ((counts.diagnostics.metadata or {}).get("sources") or {}).get("corners") or []
+        features = prediction.features.features if prediction.features else {}
+        home = features.get("home") or {}
+        away = features.get("away") or {}
+        home_season = home.get("season_profile") or {}
+        away_season = away.get("season_profile") or {}
+        home_matches = home_season.get("matches_played")
+        away_matches = away_season.get("matches_played")
+        home_avg_for = self._prediction_rate(home_season.get("corners_for"), home_matches)
+        away_avg_for = self._prediction_rate(away_season.get("corners_for"), away_matches)
+        home_avg_against = self._prediction_rate(home_season.get("corners_against"), home_matches)
+        away_avg_against = self._prediction_rate(away_season.get("corners_against"), away_matches)
+        home_expected = self._prediction_number(corners.get("home"))
+        away_expected = self._prediction_number(corners.get("away"))
         return {
             "expected_total": counts.expected_total_corners,
-            "home": {"avg_for": corners.get("home")},
-            "away": {"avg_for": corners.get("away")},
+            "games": int(min(
+                self._prediction_number(home_matches) or 0,
+                self._prediction_number(away_matches) or 0,
+            )),
+            "home": {
+                "avg_for": home_avg_for or home_expected,
+                "avg_against": home_avg_against,
+                "avg_total": round((home_avg_for or 0) + (home_avg_against or 0), 2)
+                if home_avg_for is not None and home_avg_against is not None
+                else None,
+                "expected_for": home_expected,
+                "opponent_avg_against": away_avg_against,
+            },
+            "away": {
+                "avg_for": away_avg_for or away_expected,
+                "avg_against": away_avg_against,
+                "avg_total": round((away_avg_for or 0) + (away_avg_against or 0), 2)
+                if away_avg_for is not None and away_avg_against is not None
+                else None,
+                "expected_for": away_expected,
+                "opponent_avg_against": home_avg_against,
+            },
             "sources": list(sources),
             "data_quality": counts.diagnostics.data_quality,
             "warnings": list(counts.diagnostics.warnings or ()),
@@ -1370,6 +1438,15 @@ class AlgoRunnerService:
         if total_value is None or not match_count:
             return 0
         return round(total_value / match_count, 2)
+
+    def _prediction_recent_average(self, value, matches, *, ceiling):
+        total_value = self._prediction_number(value)
+        if total_value is None:
+            return None
+        match_count = self._prediction_number(matches)
+        if match_count and total_value > ceiling:
+            return round(total_value / match_count, 2)
+        return round(total_value, 2)
 
     def _score_fixture_with_prediction_engine(self, fixture):
         source_payload = self._prediction_fixture_payload(fixture)
