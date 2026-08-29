@@ -69,6 +69,7 @@ class TeamIntelligenceService:
     def _team_for_side(self, fixture: dict[str, Any], side: str, *, league_key: str, season: str) -> TeamProfile | None:
         provider_id = str(
             fixture.get(f"statpal_{side}_team_id")
+            or fixture.get(f"api_football_{side}_team_id")
             or fixture.get(f"{side}_team_id")
             or fixture.get("hid" if side == "home" else "aid")
             or ""
@@ -306,6 +307,7 @@ class TeamIntelligenceService:
     def _league_for_fixture(fixture: dict[str, Any]):
         provider_league_id = str(
             fixture.get("statpal_provider_competition_id")
+            or fixture.get("api_football_league_id")
             or fixture.get("provider_competition_id")
             or fixture.get("league_id")
             or fixture.get("code")

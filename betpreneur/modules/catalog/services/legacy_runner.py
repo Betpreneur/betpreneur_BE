@@ -41,6 +41,7 @@ from betpreneur.modules.markets.api import (
     daily_odds_key_map,
 )
 from betpreneur.modules.markets.api import QUANTITATIVE
+from betpreneur.modules.catalog.domain.daily_league_registry import daily_api_football_tracked_leagues
 
 log = logging.getLogger(__name__)
 WAT = timezone(timedelta(hours=1))
@@ -120,7 +121,8 @@ def clear_runtime_caches():
 # ── API-FOOTBALL LEAGUE FALLBACK LIST ────────────────────────────
 # By default the runner tracks every non-finished API-Football fixture for the
 # day. This list is only used when APS_TRACK_ALL_LEAGUES=False.
-APS_TRACKED_LEAGUES = {
+APS_TRACKED_LEAGUES = daily_api_football_tracked_leagues()
+LEGACY_APS_TRACKED_LEAGUES = {
     1:   "World Cup",
     2:   "UEFA Champions League",
     3:   "UEFA Europa League",

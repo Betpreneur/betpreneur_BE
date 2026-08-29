@@ -27,6 +27,7 @@ from betpreneur.modules.catalog.api import (
     FixtureCache,
     FixtureSearchService,
     SlipReviewMarketCache,
+    daily_tracked_league_ids,
     normalize_fixture_text,
     token_side_score,
 )
@@ -197,10 +198,10 @@ class AlgoRunnerService:
         return self._runner_env_bool("STATPAL_TRACK_ALL_LEAGUES", False)
 
     def _statpal_tracked_league_ids(self):
+        league_ids = set(daily_tracked_league_ids("statpal"))
         raw = str(os.environ.get("STATPAL_TRACKED_LEAGUES") or "").strip()
         if not raw:
-            return set()
-        league_ids = set()
+            return league_ids
         for item in raw.replace("\n", ",").split(","):
             value = item.strip()
             if not value:
@@ -223,8 +224,25 @@ class AlgoRunnerService:
             or ""
         ).strip()
 
+    def _api_football_tracked_league_ids(self):
+        from betpreneur.modules.catalog.api import legacy_runner as algo_runner
+
+        return {str(league_id) for league_id in algo_runner.tracked_leagues()}
+
+    def _api_football_fixture_league_id(self, fixture):
+        payload = fixture.api_payload or {}
+        raw_league = payload.get("league") if isinstance(payload.get("league"), dict) else {}
+        return str(
+            payload.get("api_football_league_id")
+            or payload.get("provider_competition_id")
+            or payload.get("league_id")
+            or payload.get("code")
+            or raw_league.get("id")
+            or ""
+        ).strip()
+
     def _api_enrichment_rows(self, target_date):
-        return list(
+        rows = list(
             FixtureCache.objects.filter(match_date=target_date)
             .exclude(source="statpal")
             .only(
@@ -250,6 +268,10 @@ class AlgoRunnerService:
                 "source",
             )
         )
+        tracked = self._api_football_tracked_league_ids()
+        if tracked:
+            rows = [row for row in rows if self._api_football_fixture_league_id(row) in tracked]
+        return rows
 
     def _api_enrichment_match(self, fixture, api_rows):
         home_query = normalize_fixture_text(fixture.get("hname") or fixture.get("home_team") or "")
@@ -314,7 +336,7 @@ class AlgoRunnerService:
             "away_team_id": str(api_away_id or ""),
             "score": score,
             "orientation": orientation,
-            "used_for": ["metadata", "odds_fallback", "team_form_fallback", "prediction_fallback"],
+            "used_for": ["metadata", "odds", "team_form", "prediction_context"],
         }
         provider_merge["primary"] = "statpal"
         item["provider_merge"] = provider_merge
@@ -334,19 +356,19 @@ class AlgoRunnerService:
                 matched += 1
             else:
                 enriched.append(self._merge_api_football_enrichment(fixture, None))
-        unmatched_api_rows = [
-            row
-            for row in api_rows
-            if str(row.match_id or "") not in matched_api_match_ids
-        ]
-        for row in unmatched_api_rows:
+        unmatched_api_count = sum(
+            1 for row in api_rows if str(row.match_id or "") not in matched_api_match_ids
+        )
+        for row in api_rows:
+            if str(row.match_id or "") in matched_api_match_ids:
+                continue
             payload = self._cached_fixture_runner_payload(row)
             provider_merge = dict(payload.get("provider_merge") or {})
             provider_merge.setdefault("primary", payload.get("source") or row.source or "api_football")
             provider_merge.setdefault("api_football", {
                 "matched": False,
                 "match_id": str(row.match_id or ""),
-                "used_for": ["fixture_source", "odds", "team_form", "prediction"],
+                "used_for": ["fixture_source", "odds", "team_form", "prediction_context"],
             })
             payload["provider_merge"] = provider_merge
             enriched.append(payload)
@@ -356,7 +378,7 @@ class AlgoRunnerService:
             len(fixtures or []),
             len(api_rows),
             matched,
-            len(unmatched_api_rows),
+            unmatched_api_count,
         )
         return enriched
 
@@ -443,7 +465,7 @@ class AlgoRunnerService:
         from betpreneur.modules.catalog.api import legacy_runner as algo_runner
 
         try:
-            with temporary_env(self._runner_env({"APS_TRACK_ALL_LEAGUES": "True", "APS_MAX_FIXTURES": "0"})):
+            with temporary_env(self._runner_env({"APS_TRACK_ALL_LEAGUES": "False", "APS_MAX_FIXTURES": "0"})):
                 fixtures = algo_runner.fetch_aps_fixtures(target_date.isoformat())
             synced = FixtureSearchService()._upsert_fixtures(fixtures, target_date)
             return {"synced": synced, "errors": []}
@@ -459,8 +481,6 @@ class AlgoRunnerService:
         return [self._cached_fixture_runner_payload(row) for row in rows]
 
     def _daily_runner_fixtures(self, target_date):
-        from betpreneur.modules.catalog.api import legacy_runner as algo_runner
-
         statpal_errors = []
         if self._statpal_primary_daily_enabled():
             fixtures = self._statpal_cached_runner_fixtures(target_date)
@@ -485,14 +505,19 @@ class AlgoRunnerService:
                     "errors": statpal_errors,
                 }
 
-        fixtures = algo_runner.fetch_aps_fixtures(target_date.isoformat())
-        fixtures = self._attach_statpal_fixture_context(fixtures, target_date)
         return {
-            "fixtures": fixtures,
+            "fixtures": self._api_football_fallback_runner_fixtures(target_date),
             "source": "api_football",
             "fallback_used": self._statpal_primary_daily_enabled(),
             "errors": statpal_errors,
         }
+
+    def _api_football_fallback_runner_fixtures(self, target_date):
+        from betpreneur.modules.catalog.api import legacy_runner as algo_runner
+
+        with temporary_env(self._runner_env({"APS_TRACK_ALL_LEAGUES": "False", "APS_MAX_FIXTURES": "0"})):
+            fixtures = algo_runner.fetch_aps_fixtures(target_date.isoformat())
+        return self._attach_statpal_fixture_context(fixtures, target_date)
 
     def _hydrate_statpal_scoring_context(self, fixture):
         provider_match_id = str(fixture.get("statpal_provider_match_id") or "").strip()
@@ -950,12 +975,41 @@ class AlgoRunnerService:
         return list(dict.fromkeys(str(flag) for flag in flags if flag))
 
     def _prediction_all_games_eligible(self, probability, all_games):
-        return bool(
-            probability.effective_probability is not None
-            and (all_games.data_confidence or 0) > 0
-        )
+        warnings = {str(item) for item in (probability.warnings or ())}
+        if "fixture_not_found" in warnings or probability.effective_probability is None:
+            return False
+        if probability.data_quality in {"missing", "poor", "unavailable"}:
+            return False
+        if probability.model == "poisson_goals" and {
+            "goal_model_unavailable",
+            "using_feature_derived_expected_goals",
+        }.issubset(warnings):
+            return False
+        if probability.model and "count" in str(probability.model) and "count_model_unavailable" in warnings:
+            return False
+        return bool((all_games.data_confidence or 0) > 0)
 
-    def _prediction_market_insights(self, probability, value, recommendation, all_games, top_picks):
+    def _prediction_data_status(self, probability, value, top_picks, all_games_eligible):
+        if not all_games_eligible:
+            return "insufficient_data"
+        if top_picks.publishable:
+            return "top_pick_ready"
+        if not value.available_odds:
+            return "modelled_no_real_odds"
+        if top_picks.reasons or top_picks.warnings:
+            return "modelled_watchlist"
+        return "modelled"
+
+    def _prediction_market_insights(
+        self,
+        probability,
+        value,
+        recommendation,
+        all_games,
+        top_picks,
+        *,
+        all_games_eligible=False,
+    ):
         family_payload = daily_market_family_payload(probability.market)
         positive = list(dict.fromkeys([*probability.explanation_facts, *value.explanation_facts]))
         risk = [
@@ -972,6 +1026,7 @@ class AlgoRunnerService:
             conclusion = f"{probability.market} is modelled, but product policy needs stronger price or reliability support."
         else:
             conclusion = f"{probability.market} does not have enough model support yet."
+        data_status = self._prediction_data_status(probability, value, top_picks, all_games_eligible)
         return {
             **family_payload,
             "prediction_engine": "prediction.api.predict_fixture",
@@ -988,6 +1043,8 @@ class AlgoRunnerService:
             "top_picks_policy": top_picks.to_dict(),
             "value_assessment": value.to_dict(),
             "recommendation_score": recommendation.to_dict(),
+            "analysis_available": all_games_eligible,
+            "data_status": data_status,
             "daily_evaluation_route": {
                 "family": family_payload.get("market_family"),
                 "assessment_type": family_payload.get("assessment_type"),
@@ -1049,6 +1106,7 @@ class AlgoRunnerService:
             recommendation,
             all_games,
             top_picks,
+            all_games_eligible=all_games_eligible,
         )
         entry = daily_catalog_entry(probability.market)
         family_payload = daily_market_family_payload(probability.market)
@@ -1065,6 +1123,8 @@ class AlgoRunnerService:
             "odds_source": odds_source,
             "proven": bool(entry and entry.proven),
             "eligible": all_games_eligible,
+            "analysis_available": all_games_eligible,
+            "data_status": insights["data_status"],
             "risk_flags": self._prediction_policy_flags(probability, value, recommendation, top_picks),
             "bettor_view": insights["bettor_view"],
             "analysis_summary": insights["summary"],

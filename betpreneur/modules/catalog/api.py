@@ -13,6 +13,13 @@ from __future__ import annotations
 from betpreneur.platform.db.json import json_safe
 
 from .domain.bridge import descriptor_from_canonical
+from .domain.daily_league_registry import (
+    DailyTrackedLeague,
+    daily_api_football_tracked_leagues,
+    daily_tracked_league_ids,
+    daily_tracked_leagues,
+    daily_tracked_registry_payload,
+)
 from .domain.league_registry import (
     IntelligenceLeague,
     team_intelligence_league_ids,
@@ -64,6 +71,7 @@ from .services.team_intelligence_backfill import (
 
 __all__ = [
     "DEFAULT_RECENT_FORM_WINDOWS",
+    "DailyTrackedLeague",
     "DataCoverage",
     "DataCoverageScope",
     "DataCoverageTracker",
@@ -95,6 +103,10 @@ __all__ = [
     "TeamSeasonProfile",
     "api_response_payload",
     "aps_get",
+    "daily_api_football_tracked_leagues",
+    "daily_tracked_league_ids",
+    "daily_tracked_leagues",
+    "daily_tracked_registry_payload",
     "descriptor_from_canonical",
     "fetch_team_recent_form",
     "legacy_runner",

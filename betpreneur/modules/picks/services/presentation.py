@@ -441,6 +441,8 @@ def market_prediction_payload(prediction):
         "odds_source": prediction.odds_source,
         "proven": False,
         "eligible": prediction.eligible,
+        "analysis_available": bool(insights.get("analysis_available", prediction.eligible)),
+        "data_status": insights.get("data_status", "modelled" if prediction.eligible else "insufficient_data"),
         "risk_flags": prediction.risk_flags or [],
         "bettor_view": insights.get("bettor_view") or {},
         "analysis_summary": insights.get("summary", ""),

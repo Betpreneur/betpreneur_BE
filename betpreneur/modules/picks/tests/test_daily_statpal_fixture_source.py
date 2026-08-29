@@ -513,7 +513,10 @@ class DailyStatPalFixtureSourceTests(SimpleTestCase):
                 "STATPAL_TRACKED_LEAGUES": "3037 | Premier League | england\n3240 | Allsvenskan | sweden",
             },
         ):
-            self.assertEqual(service._statpal_tracked_league_ids(), {"3037", "3240"})
+            league_ids = service._statpal_tracked_league_ids()
+
+        self.assertIn("3037", league_ids)
+        self.assertIn("3240", league_ids)
 
 
 class DailyStatPalFixtureSourceDbTests(TestCase):
@@ -556,11 +559,14 @@ class DailyStatPalFixtureSourceDbTests(TestCase):
             target_date,
         )
 
-        self.assertEqual([fixture["fixture"] for fixture in fixtures], ["Alpha FC vs Beta FC", "Gamma FC vs Delta FC"])
+        self.assertEqual(
+            [fixture["fixture"] for fixture in fixtures],
+            ["Alpha FC vs Beta FC", "Gamma FC vs Delta FC"],
+        )
         self.assertEqual(fixtures[0]["match_id"], "statpal:alpha-beta")
         self.assertEqual(fixtures[0]["api_football_fixture_id"], matched_api.match_id)
         self.assertEqual(fixtures[1]["match_id"], "api-extra")
-        self.assertEqual(fixtures[1]["provider_merge"]["primary"], "api_football")
+        self.assertEqual((fixtures[1].get("provider_merge") or {}).get("primary"), "api_football")
 
     @override_settings(CELERY_TASK_ALWAYS_EAGER=True)
     def test_statpal_daily_fixture_source_respects_tracked_league_allowlist(self):

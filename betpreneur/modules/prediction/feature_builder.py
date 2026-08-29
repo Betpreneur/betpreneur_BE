@@ -220,6 +220,7 @@ def _fixture_name(fixture: dict[str, Any]) -> str:
 def _provider_league_id(fixture: dict[str, Any]) -> str:
     return str(
         fixture.get("statpal_provider_competition_id")
+        or fixture.get("api_football_league_id")
         or fixture.get("provider_competition_id")
         or fixture.get("league_id")
         or fixture.get("code")
@@ -230,6 +231,7 @@ def _provider_league_id(fixture: dict[str, Any]) -> str:
 def _side_provider_id(fixture: dict[str, Any], side: str) -> str:
     return str(
         fixture.get(f"statpal_{side}_team_id")
+        or fixture.get(f"api_football_{side}_team_id")
         or fixture.get(f"{side}_team_id")
         or fixture.get("hid" if side == "home" else "aid")
         or ""

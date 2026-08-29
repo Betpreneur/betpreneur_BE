@@ -10,7 +10,7 @@ import csv
 import logging
 
 from celery import current_app
-from django.db.models import Count, F, Q, Window
+from django.db.models import Count, F, Window
 from django.db.models.functions import RowNumber
 from django.http import HttpResponse
 from django.shortcuts import get_object_or_404
@@ -254,7 +254,7 @@ def _fixture_summaries_for_run(algo_run):
 
     markets_by_match = {}
     predictions = (
-        MarketPrediction.objects.filter(run=algo_run)
+        MarketPrediction.objects.filter(run=algo_run, eligible=True)
         .select_related("selected_pick")
         .order_by("match_id", "-confidence", "-ev", "market")
     )
@@ -268,6 +268,7 @@ def _fixture_summaries_for_run(algo_run):
     summaries = []
     for fixture in fixtures:
         match_id = str(fixture.match_id or "")
+        markets = markets_by_match.get(match_id, [])
         summaries.append({
             "fixture": fixture.fixture,
             "home_team": fixture.home_team,
@@ -289,10 +290,10 @@ def _fixture_summaries_for_run(algo_run):
             "corner_profile": fixture.corner_profile or {},
             "insights": fixture.insights or {},
             "source_payload": fixture.source_payload or {},
-            "market_count": fixture.market_count,
-            "markets_70_plus": fixture.markets_70_plus,
-            "markets_65_plus": fixture.markets_65_plus,
-            "markets": markets_by_match.get(match_id, []),
+            "market_count": len(markets),
+            "markets_70_plus": sum(1 for market in markets if (market.get("confidence") or 0) >= 70),
+            "markets_65_plus": sum(1 for market in markets if (market.get("confidence") or 0) >= 65),
+            "markets": markets,
         })
     return summaries
 
@@ -373,6 +374,8 @@ def _compact_market_payload(market):
         "ev": market.get("ev"),
         "odds_source": market.get("odds_source", ""),
         "eligible": bool(market.get("eligible")),
+        "analysis_available": bool(market.get("analysis_available", market.get("eligible"))),
+        "data_status": market.get("data_status", "modelled" if market.get("eligible") else "insufficient_data"),
         "recommended": bool(market.get("recommended")),
         "recommendation_status": market.get("recommendation_status", ""),
         "risk_flags": market.get("risk_flags") or [],
@@ -532,12 +535,10 @@ def _compact_games_payload(target_date, request=None):
     backed_game_counts, backed_game_ids, _user_markets = _bulk_game_back_context(match_ids, request)
     picks_by_match = picks_by_match_for_run(algo_run)
 
-    base_predictions = MarketPrediction.objects.filter(run=algo_run).exclude(market__in=EXCLUDED_MARKETS)
+    base_predictions = MarketPrediction.objects.filter(run=algo_run, eligible=True).exclude(market__in=EXCLUDED_MARKETS)
     eligible_counts = {
         str(item["match_id"] or ""): item["eligible_count"]
-        for item in base_predictions.values("match_id").annotate(
-            eligible_count=Count("id", filter=Q(eligible=True))
-        )
+        for item in base_predictions.values("match_id").annotate(eligible_count=Count("id"))
     }
     markets_by_match = {}
     predictions = (
@@ -576,6 +577,7 @@ def _compact_games_payload(target_date, request=None):
         )
         for fixture in fixtures
     ]
+    games = [game for game in games if int(game.get("eligible_market_count") or 0) > 0]
     games.sort(
         key=lambda game: (
             (game.get("country") or "World").lower(),
@@ -596,7 +598,7 @@ def _compact_games_payload(target_date, request=None):
             "game_count": len(games),
             "published_game_count": sum(1 for game in games if game.get("published")),
             "recommended_game_count": sum(1 for game in games if game.get("recommended_market")),
-            "market_count": (algo_run.result or {}).get("market_count", sum(game.get("market_count", 0) for game in games)),
+            "market_count": sum(game.get("market_count", 0) for game in games),
             "eligible_market_count": sum(game.get("eligible_market_count", 0) for game in games),
             "top_pick_count": sum(len(items) for items in picks_by_match.values()),
             "markets_70_plus": (algo_run.result or {}).get("markets_70_plus", 0),
@@ -645,6 +647,7 @@ def _all_games_payload(target_date, request=None):
         )
         for item in fixture_summaries
     ]
+    games = [game for game in games if int(game.get("eligible_market_count") or 0) > 0]
 
     games.sort(
         key=lambda game: (
@@ -666,7 +669,7 @@ def _all_games_payload(target_date, request=None):
             "game_count": len(games),
             "published_game_count": sum(1 for game in games if game.get("published")),
             "recommended_game_count": sum(1 for game in games if game.get("recommended_market")),
-            "market_count": (algo_run.result or {}).get("market_count", sum(game.get("market_count", 0) for game in games)),
+            "market_count": sum(game.get("market_count", 0) for game in games),
             "eligible_market_count": sum(game.get("eligible_market_count", 0) for game in games),
             "top_pick_count": sum(len(items) for items in picks_by_match.values()),
             "markets_70_plus": (algo_run.result or {}).get("markets_70_plus", 0),
