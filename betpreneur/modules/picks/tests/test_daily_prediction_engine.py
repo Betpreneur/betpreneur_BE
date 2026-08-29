@@ -40,6 +40,89 @@ class DailyPredictionEngineTests(TestCase):
             ),
         )
 
+    def test_daily_prediction_real_odds_prefers_statpal_market_payload(self):
+        service = AlgoRunnerService()
+        fixture = {
+            "match_id": "statpal:fixture-123",
+            "aps_id": "api-fixture-123",
+            "statpal_context": {
+                "snapshots": {
+                    "prematch_odds": {
+                        "payload": {
+                            "markets": [
+                                {
+                                    "name": "1x2",
+                                    "bookmakers": [
+                                        {
+                                            "odds": [
+                                                {"name": "Home", "value": 1.45},
+                                                {"name": "Draw", "value": 4.1},
+                                                {"name": "Away", "value": 8.5},
+                                            ]
+                                        },
+                                        {
+                                            "odds": [
+                                                {"name": "Home", "value": 1.5},
+                                                {"name": "Draw", "value": 4.0},
+                                                {"name": "Away", "value": 9.0},
+                                            ]
+                                        },
+                                    ],
+                                },
+                                {
+                                    "name": "Double Chance",
+                                    "bookmakers": [
+                                        {
+                                            "odds": [
+                                                {"name": "Home/Draw", "value": 1.08},
+                                                {"name": "Draw/Away", "value": 2.65},
+                                            ]
+                                        }
+                                    ],
+                                },
+                                {
+                                    "name": "Totals",
+                                    "bookmakers": [
+                                        {
+                                            "totals": [
+                                                {
+                                                    "line": 2.5,
+                                                    "odds": [
+                                                        {"name": "Over", "value": 1.82},
+                                                        {"name": "Under", "value": 2.02},
+                                                    ],
+                                                }
+                                            ]
+                                        }
+                                    ],
+                                },
+                            ]
+                        }
+                    }
+                }
+            },
+        }
+
+        with patch(
+            "betpreneur.modules.catalog.services.legacy_runner.get_api_football_odds",
+            return_value={
+                "aw": 14.0,
+                "o25": 9.25,
+                "_meta": {
+                    "aw": {"source": "api_football", "best": 14.0},
+                    "o25": {"source": "api_football", "best": 9.25},
+                },
+            },
+        ):
+            odds = service._daily_prediction_real_odds(fixture)
+
+        self.assertEqual(odds["aw"], 9.0)
+        self.assertEqual(odds["o25"], 1.82)
+        self.assertEqual(odds["x2"], 2.65)
+        self.assertEqual(odds["_meta"]["aw"]["source"], "statpal")
+        self.assertEqual(odds["_meta"]["aw"]["bookmaker_count"], 2)
+        self.assertEqual(odds["_meta"]["o25"]["source"], "statpal")
+
     def test_daily_fixture_scoring_uses_prediction_api_and_persists_policy_context(self):
         run = AlgoRun.objects.create(target_date=date(2026, 8, 28), status=AlgoRun.Status.RUNNING)
         fixture = AlgoFixture.objects.create(
@@ -173,15 +256,20 @@ class DailyPredictionEngineTests(TestCase):
             markets_70_plus=2,
             markets_65_plus=2,
         )
-        shared_watchlist = {
+        no_edge_review = {
             "decision": "caution",
             "tier": "watchlist",
-            "raw_confidence": 70,
-            "final_confidence": 70,
+            "raw_confidence": 55,
+            "final_confidence": 55,
             "consensus_score": 47.45,
             "disagreement_score": None,
             "reasons": ["below_exposure_score", "too_much_uncertainty", "tier_watchlist"],
             "reviewers": ["prediction_policy"],
+        }
+        watchlist_review = {
+            **no_edge_review,
+            "raw_confidence": 70,
+            "final_confidence": 70,
         }
         MarketPrediction.objects.create(
             run=run,
@@ -193,8 +281,8 @@ class DailyPredictionEngineTests(TestCase):
             match_id="statpal:2026082930121",
             market="Away Win",
             meaning="Away team to win",
-            confidence=70,
-            raw_confidence=70,
+            confidence=55,
+            raw_confidence=55,
             odds=14.0,
             ev=2.339,
             eligible=True,
@@ -205,7 +293,7 @@ class DailyPredictionEngineTests(TestCase):
                     "Home win probability: 52%.",
                     "Away win probability: 24%.",
                 ],
-                "council_review": shared_watchlist,
+                "council_review": no_edge_review,
             },
         )
         MarketPrediction.objects.create(
@@ -230,7 +318,7 @@ class DailyPredictionEngineTests(TestCase):
                     "Projected total goals: 1.68.",
                     "Line 3.5 is above the model projection.",
                 ],
-                "council_review": shared_watchlist,
+                "council_review": watchlist_review,
             },
         )
 

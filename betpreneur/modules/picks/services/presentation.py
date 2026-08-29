@@ -58,11 +58,23 @@ def _top_pick_sort_key(pick):
     )
 
 
+def _recommendation_status_rank(market):
+    status = str(market.get("recommendation_status") or "").strip().lower()
+    return {
+        "strong": 5,
+        "recommended": 4,
+        "playable": 3,
+        "watchlist": 2,
+        "no_edge": 1,
+    }.get(status, 0)
+
+
 def _game_market_rank(market):
     return (
         1 if market.get("selected") else 0,
         1 if market.get("recommended") else 0,
         0 if market.get("publicly_paused") else 1,
+        _recommendation_status_rank(market),
         market_decision_rank(market),
         *market_display_score(market),
     )

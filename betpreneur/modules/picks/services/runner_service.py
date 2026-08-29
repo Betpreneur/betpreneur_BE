@@ -852,27 +852,47 @@ class AlgoRunnerService:
             return
         if odd <= 1:
             return
+        odds.setdefault("_samples", {}).setdefault(key, []).append(odd)
         current = odds.get(key)
         if current is None or odd > float(current or 0):
             odds[key] = odd
-        meta = odds.setdefault("_meta", {})
-        meta.setdefault(
-            key,
-            {
-                "bookmaker_count": 1,
-                "best": round(odd, 3),
-                "worst": round(odd, 3),
-                "average": round(odd, 3),
-                "spread_pct": 0.0,
-                "best_vs_average_pct": 0.0,
-                "source": source,
-            },
-        )
 
-    def _statpal_prediction_odds(self, fixture):
+    def _finalize_prediction_odds_meta(self, odds, *, source):
+        samples = odds.pop("_samples", {})
+        meta = {}
+        for key, values in samples.items():
+            values = [float(value) for value in values if value]
+            if not values:
+                continue
+            average = sum(values) / len(values)
+            best = max(values)
+            worst = min(values)
+            meta[key] = {
+                "bookmaker_count": len(values),
+                "best": round(best, 3),
+                "worst": round(worst, 3),
+                "average": round(average, 3),
+                "spread_pct": round(((best - worst) / average) * 100, 1) if average else 0.0,
+                "best_vs_average_pct": round(((best - average) / average) * 100, 1) if average else 0.0,
+                "source": source,
+            }
+        if meta:
+            odds["_meta"] = meta
+        return odds
+
+    def _statpal_prematch_odds(self, fixture):
         statpal_context = fixture.get("statpal_context") or {}
+        if not statpal_context:
+            statpal_context = ((fixture.get("fixture_context") or {}).get("statpal") or {})
+        snapshot = ((statpal_context.get("snapshots") or {}).get("prematch_odds") or {})
+        if snapshot:
+            payload = snapshot.get("payload") or {}
+            summary = snapshot.get("summary") or {}
+            return {**payload, **summary}
         prematch = statpal_context.get("prematch_odds") or {}
-        odds = {}
+        return prematch if isinstance(prematch, dict) else {}
+
+    def _remember_statpal_summary_odds(self, odds, prematch):
         mapping = {
             "home_odds": "hw",
             "draw_odds": "d",
@@ -885,11 +905,113 @@ class AlgoRunnerService:
             "under35_odds": "u35",
             "btts_yes_odds": "btts_yes",
             "btts_no_odds": "btts_no",
+            "double_chance_1x_odds": "1x",
             "double_chance_12_odds": "12",
+            "double_chance_x2_odds": "x2",
         }
         for source_key, odds_key in mapping.items():
             self._remember_prediction_odd(odds, odds_key, prematch.get(source_key), source="statpal")
-        return odds
+
+        alias_mapping = {
+            "home": "hw",
+            "draw": "d",
+            "away": "aw",
+            "over15": "o15",
+            "under15": "u15",
+            "over25": "o25",
+            "under25": "u25",
+            "over35": "o35",
+            "under35": "u35",
+            "1x": "1x",
+            "12": "12",
+            "x2": "x2",
+        }
+        for source_key, odds_key in alias_mapping.items():
+            self._remember_prediction_odd(odds, odds_key, prematch.get(source_key), source="statpal")
+
+    def _remember_statpal_market_odds(self, odds, payload):
+        if not isinstance(payload, dict):
+            return
+
+        def clean(value):
+            return normalize_fixture_text(value or "")
+
+        def as_list(value):
+            if isinstance(value, list):
+                return value
+            if isinstance(value, tuple):
+                return list(value)
+            if isinstance(value, dict):
+                return [value]
+            return []
+
+        def odds_items(container):
+            return as_list(container.get("odds") or container.get("odd"))
+
+        def total_items(bookmaker):
+            return as_list(bookmaker.get("totals") or bookmaker.get("total"))
+
+        def remember_items(mapping, bookmaker):
+            for odd in odds_items(bookmaker):
+                if not isinstance(odd, dict):
+                    continue
+                odds_key = mapping.get(clean(odd.get("name")))
+                if odds_key:
+                    self._remember_prediction_odd(odds, odds_key, odd.get("value"), source="statpal")
+
+        def remember_total(prefix, total):
+            if not isinstance(total, dict):
+                return
+            line = total.get("line") if total.get("line") is not None else total.get("name")
+            try:
+                line_text = f"{float(line):g}".replace(".", "")
+            except (TypeError, ValueError):
+                return
+            for odd in odds_items(total):
+                if not isinstance(odd, dict):
+                    continue
+                odd_name = clean(odd.get("name"))
+                if odd_name == "over":
+                    self._remember_prediction_odd(odds, f"{prefix}o{line_text}", odd.get("value"), source="statpal")
+                elif odd_name == "under":
+                    self._remember_prediction_odd(odds, f"{prefix}u{line_text}", odd.get("value"), source="statpal")
+
+        for market in as_list(payload.get("markets")):
+            if not isinstance(market, dict):
+                continue
+            market_name = clean(market.get("name"))
+            for bookmaker in as_list(market.get("bookmakers") or market.get("bookmaker")):
+                if not isinstance(bookmaker, dict):
+                    continue
+                if market_name in {"1x2", "1 x 2", "match winner", "fulltime result"}:
+                    remember_items({"home": "hw", "draw": "d", "away": "aw"}, bookmaker)
+                elif market_name in {"both teams to score", "both teams score", "btts"}:
+                    remember_items({"yes": "btts_yes", "no": "btts_no"}, bookmaker)
+                elif market_name == "double chance":
+                    remember_items(
+                        {
+                            "home/draw": "1x",
+                            "home draw": "1x",
+                            "1x": "1x",
+                            "home/away": "12",
+                            "home away": "12",
+                            "12": "12",
+                            "draw/away": "x2",
+                            "draw away": "x2",
+                            "x2": "x2",
+                        },
+                        bookmaker,
+                    )
+                elif market_name in {"over/under", "over under", "totals"}:
+                    for total in total_items(bookmaker):
+                        remember_total("", total)
+
+    def _statpal_prediction_odds(self, fixture):
+        prematch = self._statpal_prematch_odds(fixture)
+        odds = {}
+        self._remember_statpal_summary_odds(odds, prematch)
+        self._remember_statpal_market_odds(odds, prematch)
+        return self._finalize_prediction_odds_meta(odds, source="statpal")
 
     def _daily_prediction_real_odds(self, fixture):
         real_odds = {}
@@ -964,13 +1086,31 @@ class AlgoRunnerService:
             "unsupported": 20,
         }.get(support)
 
-    def _prediction_policy_flags(self, probability, value, recommendation, top_picks):
+    def _prediction_odds_quality_flags(self, odds_meta):
+        odds_meta = odds_meta or {}
+        flags = []
+        try:
+            spread_pct = float(odds_meta.get("spread_pct") or 0)
+        except (TypeError, ValueError):
+            spread_pct = 0.0
+        try:
+            best_vs_average_pct = float(odds_meta.get("best_vs_average_pct") or 0)
+        except (TypeError, ValueError):
+            best_vs_average_pct = 0.0
+        if spread_pct >= 80:
+            flags.append("wide_odds_market")
+        if best_vs_average_pct >= 35:
+            flags.append("best_price_far_above_consensus")
+        return flags
+
+    def _prediction_policy_flags(self, probability, value, recommendation, top_picks, *, odds_meta=None):
         flags = [
             *list(probability.warnings or ()),
             *list(value.pricing_warnings or ()),
             *list(recommendation.warnings or ()),
             *list(top_picks.reasons or ()),
             *list(top_picks.warnings or ()),
+            *self._prediction_odds_quality_flags(odds_meta),
         ]
         return list(dict.fromkeys(str(flag) for flag in flags if flag))
 
@@ -1142,7 +1282,13 @@ class AlgoRunnerService:
             "eligible": all_games_eligible,
             "analysis_available": all_games_eligible,
             "data_status": insights["data_status"],
-            "risk_flags": self._prediction_policy_flags(probability, value, recommendation, top_picks),
+            "risk_flags": self._prediction_policy_flags(
+                probability,
+                value,
+                recommendation,
+                top_picks,
+                odds_meta=odds_meta,
+            ),
             "council_review": insights["council_review"],
             "bettor_view": insights["bettor_view"],
             "analysis_summary": insights["summary"],
