@@ -17,6 +17,7 @@ EVENTS = {
         "season_against": "corners_against",
         "recent_for": "corners_for_per_match",
         "league_team_average": 5.1,
+        "team_rate_ceiling": 10.5,
         "total_lines": (7.5, 8.5, 9.5, 10.5),
         "team_lines": (1.5, 2.5, 3.5, 4.5, 5.5),
     },
@@ -27,6 +28,7 @@ EVENTS = {
         "season_against": "cards_against",
         "recent_for": "cards_for_per_match",
         "league_team_average": 1.9,
+        "team_rate_ceiling": 5.5,
         "total_lines": (2.5, 3.5, 4.5, 5.5),
         "team_lines": (0.5, 1.5, 2.5, 3.5),
     },
@@ -37,6 +39,7 @@ EVENTS = {
         "season_against": "shots_on_target_against",
         "recent_for": "shots_on_target_for_per_match",
         "league_team_average": 4.2,
+        "team_rate_ceiling": 10.0,
         "total_lines": (5.5, 6.5, 7.5, 8.5, 9.5, 10.5),
         "team_lines": (1.5, 2.5, 3.5, 4.5, 5.5),
     },
@@ -142,20 +145,28 @@ def _team_event_expected(features: FixtureFeatureSet, event: str, config: dict[s
     sources: list[str] = []
 
     own_rate = _rate_profile_value(rate_profile, config["rate_prefix"], side)
-    if own_rate is not None:
+    if own_rate is not None and _plausible_team_rate(own_rate, config):
         sources.append("team_rate_profile")
+    else:
+        own_rate = None
     own_season = _per_match(season_profile.get(config["season_for"]), season_profile.get("matches_played"))
-    if own_season is not None:
+    if own_season is not None and _plausible_team_rate(own_season, config):
         sources.append("team_season_profile")
+    else:
+        own_season = None
     opponent_concedes = _per_match(
         opponent_season_profile.get(config["season_against"]),
         opponent_season_profile.get("matches_played"),
     )
-    if opponent_concedes is not None:
+    if opponent_concedes is not None and _plausible_team_rate(opponent_concedes, config):
         sources.append("opponent_concession_profile")
+    else:
+        opponent_concedes = None
     recent_value = _recent_value(recent, key=config["recent_for"], side=side)
-    if recent_value is not None:
+    if recent_value is not None and _plausible_team_rate(recent_value, config):
         sources.append("recent_form_profile")
+    else:
+        recent_value = None
 
     base = _weighted_average(
         (
@@ -168,7 +179,11 @@ def _team_event_expected(features: FixtureFeatureSet, event: str, config: dict[s
     )
     matches = _float(rate_profile.get("matches")) or _float(season_profile.get("matches_played")) or 0.0
     expected = _shrink(base, matches=matches, prior=league_average)
-    return {"expected": round(_clamp(expected, 0.05, 20.0), 4), "sources": tuple(sources)}
+    return {"expected": round(_clamp(expected, 0.05, float(config["team_rate_ceiling"])), 4), "sources": tuple(sources)}
+
+
+def _plausible_team_rate(value: float, config: dict[str, Any]) -> bool:
+    return 0.0 <= float(value) <= float(config["team_rate_ceiling"])
 
 
 def _rate_profile_value(rate_profile: dict[str, Any], prefix: str, side: str) -> float | None:

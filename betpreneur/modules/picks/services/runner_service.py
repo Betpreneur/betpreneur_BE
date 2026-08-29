@@ -974,9 +974,14 @@ class AlgoRunnerService:
         ]
         return list(dict.fromkeys(str(flag) for flag in flags if flag))
 
-    def _prediction_all_games_eligible(self, probability, all_games):
+    def _prediction_all_games_eligible(self, probability, value, all_games):
         warnings = {str(item) for item in (probability.warnings or ())}
+        pricing_warnings = {str(item) for item in (value.pricing_warnings or ())}
         if "fixture_not_found" in warnings or probability.effective_probability is None:
+            return False
+        if not value.available_odds or "available_odds_missing" in pricing_warnings:
+            return False
+        if {"home_team_profile", "away_team_profile"}.issubset(warnings):
             return False
         if probability.data_quality in {"missing", "poor", "unavailable"}:
             return False
@@ -1027,6 +1032,8 @@ class AlgoRunnerService:
         else:
             conclusion = f"{probability.market} does not have enough model support yet."
         data_status = self._prediction_data_status(probability, value, top_picks, all_games_eligible)
+        policy_decision = "approve" if top_picks.publishable else "caution" if all_games_eligible else "reject"
+        policy_tier = top_picks.tier if all_games_eligible else ""
         return {
             **family_payload,
             "prediction_engine": "prediction.api.predict_fixture",
@@ -1043,6 +1050,16 @@ class AlgoRunnerService:
             "top_picks_policy": top_picks.to_dict(),
             "value_assessment": value.to_dict(),
             "recommendation_score": recommendation.to_dict(),
+            "council_review": {
+                "decision": policy_decision,
+                "tier": policy_tier,
+                "raw_confidence": confidence,
+                "final_confidence": confidence,
+                "consensus_score": recommendation.recommendation_score,
+                "disagreement_score": None,
+                "reasons": list(dict.fromkeys([*list(top_picks.reasons or ()), *list(top_picks.warnings or ())])),
+                "reviewers": ["prediction_policy"],
+            },
             "analysis_available": all_games_eligible,
             "data_status": data_status,
             "daily_evaluation_route": {
@@ -1099,7 +1116,7 @@ class AlgoRunnerService:
         top_picks = assess_top_picks_policy(probability, value, recommendation)
         odds = float(real_odd) if real_odd else self._prediction_estimated_odds(probability)
         confidence = int(round(probability.confidence_score or 0))
-        all_games_eligible = self._prediction_all_games_eligible(probability, all_games)
+        all_games_eligible = self._prediction_all_games_eligible(probability, value, all_games)
         insights = self._prediction_market_insights(
             probability,
             value,
@@ -1126,6 +1143,7 @@ class AlgoRunnerService:
             "analysis_available": all_games_eligible,
             "data_status": insights["data_status"],
             "risk_flags": self._prediction_policy_flags(probability, value, recommendation, top_picks),
+            "council_review": insights["council_review"],
             "bettor_view": insights["bettor_view"],
             "analysis_summary": insights["summary"],
             "analysis_conclusion": insights["conclusion"],
@@ -1133,6 +1151,79 @@ class AlgoRunnerService:
             "risk_evidence": insights["risk_evidence"],
             "insights": insights,
         }
+
+    def _prediction_recent_form_payload(self, prediction, side):
+        features = ((prediction.features.features or {}).get(side) or {}) if prediction.features else {}
+        recent = features.get("recent_form") or {}
+        form = (recent.get("all") or {}).get("10") or (recent.get("all") or {}).get("5") or {}
+        season = features.get("season_profile") or {}
+        matches = self._prediction_number(form.get("matches"))
+        if matches is None:
+            matches = self._prediction_number(season.get("matches_played"))
+        if matches is None:
+            return {"games": 0, "wins": 0, "draws": 0, "losses": 0, "scope": "overall", "form": ""}
+        wins = int(self._prediction_number(form.get("wins")) or 0)
+        draws = int(self._prediction_number(form.get("draws")) or 0)
+        losses = int(self._prediction_number(form.get("losses")) or max(0, matches - wins - draws))
+        goals_for = self._prediction_number(form.get("goals_for"))
+        goals_against = self._prediction_number(form.get("goals_against"))
+        if goals_for is None:
+            goals_for = self._prediction_number(season.get("goals_for"))
+        if goals_against is None:
+            goals_against = self._prediction_number(season.get("goals_against"))
+        return {
+            "games": int(matches),
+            "wins": wins,
+            "draws": draws,
+            "losses": losses,
+            "scope": form.get("scope") or "stored_team_intelligence",
+            "form": form.get("form") or "",
+            "avg_scored": self._prediction_rate(goals_for, matches),
+            "avg_conceded": self._prediction_rate(goals_against, matches),
+            "source": season.get("source") or "stored_team_intelligence",
+            "data_quality": season.get("data_quality") or features.get("coverage", {}).get("status") or "",
+        }
+
+    def _prediction_team_intelligence_payload(self, prediction, side):
+        features = ((prediction.features.features or {}).get(side) or {}) if prediction.features else {}
+        return {
+            "strength": features.get("strength") or {},
+            "season_profile": features.get("season_profile") or {},
+            "recent_form": features.get("recent_form") or {},
+            "market_profiles_by_family": features.get("market_profiles_by_family") or {},
+            "coverage": features.get("coverage") or {},
+        }
+
+    def _prediction_corner_profile_payload(self, prediction):
+        counts = prediction.counts
+        if not counts:
+            return {}
+        corners = (counts.expected_team_counts or {}).get("corners") or {}
+        sources = ((counts.diagnostics.metadata or {}).get("sources") or {}).get("corners") or []
+        return {
+            "expected_total": counts.expected_total_corners,
+            "home": {"avg_for": corners.get("home")},
+            "away": {"avg_for": corners.get("away")},
+            "sources": list(sources),
+            "data_quality": counts.diagnostics.data_quality,
+            "warnings": list(counts.diagnostics.warnings or ()),
+        }
+
+    @staticmethod
+    def _prediction_number(value):
+        if value in (None, ""):
+            return None
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
+    def _prediction_rate(self, total, matches):
+        total_value = self._prediction_number(total)
+        match_count = self._prediction_number(matches)
+        if total_value is None or not match_count:
+            return 0
+        return round(total_value / match_count, 2)
 
     def _score_fixture_with_prediction_engine(self, fixture):
         source_payload = self._prediction_fixture_payload(fixture)
@@ -1151,6 +1242,18 @@ class AlgoRunnerService:
         fixture_context = dict(source_payload.get("fixture_context") or {})
         if source_payload.get("statpal_context"):
             fixture_context["statpal"] = source_payload.get("statpal_context") or {}
+        fixture_context["prediction_features"] = {
+            "league_key": prediction.features.league_key if prediction.features else "",
+            "season": prediction.features.season if prediction.features else "",
+            "home": self._prediction_team_intelligence_payload(prediction, "home"),
+            "away": self._prediction_team_intelligence_payload(prediction, "away"),
+            "league": ((prediction.features.features or {}).get("league") or {}) if prediction.features else {},
+            "data_freshness": ((prediction.features.features or {}).get("data_freshness") or {}) if prediction.features else {},
+            "provider_quality": ((prediction.features.features or {}).get("provider_quality") or {}) if prediction.features else {},
+        }
+        home_recent_form = source_payload.get("home_recent_form") or self._prediction_recent_form_payload(prediction, "home")
+        away_recent_form = source_payload.get("away_recent_form") or self._prediction_recent_form_payload(prediction, "away")
+        corner_profile = source_payload.get("corner_profile") or self._prediction_corner_profile_payload(prediction)
         insights = {
             "prediction_engine": "prediction.api.predict_fixture",
             "prediction_diagnostics": prediction.diagnostics.to_dict(),
@@ -1174,11 +1277,11 @@ class AlgoRunnerService:
             "league_type": source_payload.get("league_type", ""),
             "kickoff": source_payload.get("kickoff") or source_payload.get("kickoff_utc") or "",
             "match_id": source_payload.get("match_id", ""),
-            "home_recent_form": source_payload.get("home_recent_form") or {},
-            "away_recent_form": source_payload.get("away_recent_form") or {},
+            "home_recent_form": home_recent_form,
+            "away_recent_form": away_recent_form,
             "fixture_context": fixture_context,
             "team_news": source_payload.get("team_news") or {},
-            "corner_profile": source_payload.get("corner_profile") or {},
+            "corner_profile": corner_profile,
             "market_count": len(market_payloads),
             "markets_70_plus": sum(1 for market in market_payloads if (market.get("confidence") or 0) >= 70),
             "markets_65_plus": sum(1 for market in market_payloads if (market.get("confidence") or 0) >= 65),

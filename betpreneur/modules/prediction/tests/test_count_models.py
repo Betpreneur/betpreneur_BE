@@ -101,6 +101,15 @@ class CountModelTests(SimpleTestCase):
             low.line_probabilities["corners"]["over_8_5"],
         )
 
+    def test_unrealistic_count_rates_are_ignored(self):
+        output = count_distributions(self._features(home_corners=15.35, away_corners=13.05))
+
+        self.assertLess(output.expected_total_corners, 12)
+        self.assertNotIn(
+            "team_rate_profile",
+            output.diagnostics.metadata["sources"]["corners"],
+        )
+
     def test_missing_event_data_falls_back_with_warnings(self):
         features = self._features()
         features = FixtureFeatureSet(
