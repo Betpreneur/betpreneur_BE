@@ -10,8 +10,7 @@ import csv
 import logging
 
 from celery import current_app
-from django.db.models import Count, F, Window
-from django.db.models.functions import RowNumber
+from django.db.models import Count
 from django.http import HttpResponse
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
@@ -541,30 +540,13 @@ def _compact_games_payload(target_date, request=None):
         for item in base_predictions.values("match_id").annotate(eligible_count=Count("id"))
     }
     markets_by_match = {}
-    predictions = (
-        base_predictions.annotate(
-            _compact_rank=Window(
-                expression=RowNumber(),
-                partition_by=[F("match_id")],
-                order_by=[
-                    F("published").desc(),
-                    F("eligible").desc(),
-                    F("confidence").desc(nulls_last=True),
-                    F("ev").desc(nulls_last=True),
-                    F("market").asc(),
-                ],
-            )
-        )
-        .filter(_compact_rank=1)
-        .select_related("selected_pick")
-        .order_by("match_id")
-    )
+    predictions = base_predictions.select_related("selected_pick").order_by("match_id", "-confidence", "-ev", "market")
     for prediction in predictions:
         payload = market_prediction_payload(prediction)
         payload["publicly_paused"] = market_publicly_paused(payload.get("market"))
         payload.update(_apply_council_recommendation_gate(payload))
         payload["display_score"] = round(market_display_score(payload)[0], 3)
-        markets_by_match[str(prediction.match_id or "")] = [payload]
+        markets_by_match.setdefault(str(prediction.match_id or ""), []).append(payload)
 
     games = [
         _compact_fixture_card(

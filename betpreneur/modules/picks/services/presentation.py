@@ -130,6 +130,16 @@ def _apply_council_recommendation_gate(payload):
             "recommendation_reasons": list(dict.fromkeys([*reasons, *council_reasons])),
         }
 
+    if council_tier == "watchlist":
+        reasons.append("council_watchlist")
+        reasons.extend(council_reasons)
+        return {
+            **assessment,
+            "recommended": False,
+            "recommendation_status": "watchlist",
+            "recommendation_reasons": list(dict.fromkeys(reasons)),
+        }
+
     status = "strong" if council_tier == Pick.Tier.BANKER else "recommended"
     if decision == "caution":
         status = "watchlist" if council_tier == Pick.Tier.WILD_CARD else "recommended"

@@ -3,6 +3,7 @@ from unittest.mock import patch
 
 from django.test import TestCase
 
+from betpreneur.modules.picks.interface.views import _compact_games_payload
 from betpreneur.modules.picks.models import AlgoFixture, AlgoRun, MarketPrediction, Pick
 from betpreneur.modules.picks.services.runner_service import AlgoRunnerService
 from betpreneur.modules.prediction.api import (
@@ -155,3 +156,86 @@ class DailyPredictionEngineTests(TestCase):
 
         self.assertIn(allowed.id, selected_ids)
         self.assertNotIn(blocked.id, selected_ids)
+
+    def test_compact_games_ranks_after_public_policy_gate(self):
+        run = AlgoRun.objects.create(target_date=date(2026, 8, 29), status=AlgoRun.Status.SUCCESS)
+        AlgoFixture.objects.create(
+            run=run,
+            match_date=run.target_date,
+            fixture="Celtic vs Falkirk",
+            home_team="Celtic",
+            away_team="Falkirk",
+            league="Premier League",
+            country="scotland",
+            kickoff="14:00",
+            match_id="statpal:2026082930121",
+            market_count=2,
+            markets_70_plus=2,
+            markets_65_plus=2,
+        )
+        shared_watchlist = {
+            "decision": "caution",
+            "tier": "watchlist",
+            "raw_confidence": 70,
+            "final_confidence": 70,
+            "consensus_score": 47.45,
+            "disagreement_score": None,
+            "reasons": ["below_exposure_score", "too_much_uncertainty", "tier_watchlist"],
+            "reviewers": ["prediction_policy"],
+        }
+        MarketPrediction.objects.create(
+            run=run,
+            match_date=run.target_date,
+            fixture="Celtic vs Falkirk",
+            home_team="Celtic",
+            away_team="Falkirk",
+            league="Premier League",
+            match_id="statpal:2026082930121",
+            market="Away Win",
+            meaning="Away team to win",
+            confidence=70,
+            raw_confidence=70,
+            odds=14.0,
+            ev=2.339,
+            eligible=True,
+            insights={
+                "summary": "Away Win has 70% calibrated model confidence.",
+                "conclusion": "Away Win is modelled, but product policy needs stronger reliability support.",
+                "positive_evidence": [
+                    "Home win probability: 52%.",
+                    "Away win probability: 24%.",
+                ],
+                "council_review": shared_watchlist,
+            },
+        )
+        MarketPrediction.objects.create(
+            run=run,
+            match_date=run.target_date,
+            fixture="Celtic vs Falkirk",
+            home_team="Celtic",
+            away_team="Falkirk",
+            league="Premier League",
+            match_id="statpal:2026082930121",
+            market="Under 3.5",
+            meaning="3 or fewer total goals",
+            confidence=70,
+            raw_confidence=91,
+            odds=1.93,
+            ev=0.755,
+            eligible=True,
+            insights={
+                "summary": "Under 3.5 has 70% calibrated model confidence.",
+                "conclusion": "Under 3.5 is modelled, but product policy needs stronger reliability support.",
+                "positive_evidence": [
+                    "Projected total goals: 1.68.",
+                    "Line 3.5 is above the model projection.",
+                ],
+                "council_review": shared_watchlist,
+            },
+        )
+
+        payload = _compact_games_payload(run.target_date)
+        game = payload["games"][0]
+
+        self.assertEqual(game["top_market"]["market"], "Under 3.5")
+        self.assertIsNone(game["recommended_market"])
