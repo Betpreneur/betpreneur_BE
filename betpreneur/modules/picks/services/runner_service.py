@@ -949,6 +949,12 @@ class AlgoRunnerService:
         ]
         return list(dict.fromkeys(str(flag) for flag in flags if flag))
 
+    def _prediction_all_games_eligible(self, probability, all_games):
+        return bool(
+            probability.effective_probability is not None
+            and (all_games.data_confidence or 0) > 0
+        )
+
     def _prediction_market_insights(self, probability, value, recommendation, all_games, top_picks):
         family_payload = daily_market_family_payload(probability.market)
         positive = list(dict.fromkeys([*probability.explanation_facts, *value.explanation_facts]))
@@ -1036,6 +1042,7 @@ class AlgoRunnerService:
         top_picks = assess_top_picks_policy(probability, value, recommendation)
         odds = float(real_odd) if real_odd else self._prediction_estimated_odds(probability)
         confidence = int(round(probability.confidence_score or 0))
+        all_games_eligible = self._prediction_all_games_eligible(probability, all_games)
         insights = self._prediction_market_insights(
             probability,
             value,
@@ -1057,7 +1064,7 @@ class AlgoRunnerService:
             "ev": value.ev,
             "odds_source": odds_source,
             "proven": bool(entry and entry.proven),
-            "eligible": bool(top_picks.publishable),
+            "eligible": all_games_eligible,
             "risk_flags": self._prediction_policy_flags(probability, value, recommendation, top_picks),
             "bettor_view": insights["bettor_view"],
             "analysis_summary": insights["summary"],
@@ -1890,7 +1897,6 @@ class AlgoRunnerService:
             published=False,
             selected_pick=None,
         )
-        self._refresh_recommendation_rejections(algo_run)
         selected_ids = self._select_prediction_ids(algo_run)
         flat_ids = [pk for ids in selected_ids.values() for pk in ids]
         log.info(
