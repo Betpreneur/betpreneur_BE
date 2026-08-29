@@ -55,6 +55,7 @@ from betpreneur.modules.picks.api import (
     market_prediction_payload,
     picks_by_match_for_run,
 )
+from betpreneur.modules.prediction.api import predict_fixture
 from betpreneur.modules.pricing.api import (
     assess_leg,
     effective_market_capability,
@@ -389,9 +390,11 @@ def _generated_match_checker_markets(
     statpal_context,
     provider_payload=None,
     statpal_payload=None,
+    prediction_probabilities=None,
 ):
     generated = []
     fixture = {**(game or {}), "statpal_context": statpal_context or {}}
+    prediction_probabilities = prediction_probabilities or {}
     for descriptor, generated_source in _fixture_wide_market_candidates(
         selected_descriptor,
         game=game,
@@ -406,15 +409,22 @@ def _generated_match_checker_markets(
             provider_payload=provider_payload or {},
             statpal_payload=statpal_payload,
         )
-        if not advisory.get("available") or float_or_none(advisory.get("score")) is None:
-            continue
         canonical_market = descriptor.canonical or descriptor.raw
+        prediction_probability = prediction_probabilities.get(
+            normalize_market_text(canonical_market)
+        )
+        if (
+            not prediction_probability
+            and (not advisory.get("available") or float_or_none(advisory.get("score")) is None)
+        ):
+            continue
         market = _submitted_market_payload(
             requested_market=canonical_market,
             market_taxonomy=descriptor.to_dict(),
             statpal_advisory=advisory,
             market_capability=capability,
         )
+        market = _with_prediction_probability(market, prediction_probability)
         # Price the alternative. Recommending a swap into a market whose price we do not
         # know is advice nobody can check, and it left the ranking with nothing but raw
         # probability -- which always prefers whichever market has the highest base rate.
@@ -424,8 +434,8 @@ def _generated_match_checker_markets(
             {
                 "market": canonical_market,
                 "meaning": _public_market_meaning(canonical_market),
-                "confidence": None,
-                "final_confidence": None,
+                "confidence": market.get("confidence"),
+                "final_confidence": market.get("final_confidence"),
                 "odds": reference_odds,
                 "odds_source": "statpal_reference" if reference_odds else "unpriced",
                 "odds_reference": reference or None,
@@ -442,6 +452,111 @@ def _generated_match_checker_markets(
             market["advisory_evidence"] = evidence
         generated.append(market)
     return generated
+
+
+def _prediction_probability_map(prediction):
+    probabilities = {}
+    for probability in getattr(prediction, "market_probabilities", ()) or ():
+        if not probability or not probability.market:
+            continue
+        probabilities[normalize_market_text(probability.market)] = probability
+        descriptor = describe_market(probability.market)
+        if descriptor.canonical:
+            probabilities[normalize_market_text(descriptor.canonical)] = probability
+    return probabilities
+
+
+def _slip_prediction_markets(selected_descriptor, *, game, statpal_context):
+    names = [selected_descriptor.canonical or selected_descriptor.raw]
+    for descriptor, _source in _fixture_wide_market_candidates(
+        selected_descriptor,
+        game=game,
+        statpal_context=statpal_context,
+    ):
+        names.append(descriptor.canonical or descriptor.raw)
+    return tuple(dict.fromkeys(name for name in names if name))
+
+
+def _predict_slip_markets(selected_descriptor, *, game, statpal_context):
+    fixture = {**(game or {}), "statpal_context": statpal_context or {}}
+    fixture_id = fixture.get("match_id") or fixture.get("fixture") or ""
+    markets = _slip_prediction_markets(
+        selected_descriptor,
+        game=game,
+        statpal_context=statpal_context,
+    )
+    if not fixture_id or not markets:
+        return None, {}
+    try:
+        prediction = predict_fixture(str(fixture_id), fixture=fixture, markets=markets)
+    except Exception as exc:
+        log.warning(
+            "Slip prediction engine failed match_id=%s market=%s error=%s",
+            fixture_id,
+            selected_descriptor.canonical or selected_descriptor.raw,
+            exc,
+        )
+        return None, {}
+    return prediction, _prediction_probability_map(prediction)
+
+
+def _with_prediction_probability(market, probability):
+    if not market or not probability:
+        return market
+    score = float_or_none(getattr(probability, "confidence_score", None))
+    if score is None:
+        effective = float_or_none(getattr(probability, "effective_probability", None))
+        score = round(effective * 100, 1) if effective is not None else None
+    if score is None:
+        return market
+
+    enriched = dict(market)
+    evidence = dict(enriched.get("advisory_evidence") or {})
+    facts = list(getattr(probability, "explanation_facts", ()) or ())
+    prediction_evidence = {
+        "market": probability.market,
+        "raw_probability": getattr(probability, "raw_probability", None),
+        "calibrated_probability": getattr(probability, "calibrated_probability", None),
+        "confidence_score": score,
+        "fair_odds": getattr(probability, "fair_odds", None),
+        "model": getattr(probability, "model", ""),
+        "data_quality": getattr(probability, "data_quality", ""),
+        "model_sources": list(getattr(probability, "model_sources", ()) or ()),
+        "explanation_facts": facts,
+    }
+    evidence["prediction"] = prediction_evidence
+    evidence["prediction_model"] = prediction_evidence["model"]
+    evidence["prediction_confidence_score"] = score
+    evidence["prediction_facts"] = facts
+
+    warnings = list(enriched.get("advisory_warnings") or [])
+    warnings.extend(getattr(probability, "warnings", ()) or ())
+    data_quality = str(getattr(probability, "data_quality", "") or "").lower()
+    if data_quality in {"poor", "unsupported", "missing"}:
+        warnings.append(f"prediction_data_quality_{data_quality}")
+
+    enriched.update(
+        {
+            "confidence": score,
+            "final_confidence": score,
+            "display_score": score,
+            "advisory_score": score,
+            "advisory_status": match_checker_status(score),
+            "advisory_basis": "prediction_api",
+            "model_probability_percent": score,
+            "fair_odds": getattr(probability, "fair_odds", None),
+            "data_quality": getattr(probability, "data_quality", enriched.get("data_quality")),
+            "advisory_evidence": evidence,
+            "advisory_warnings": list(dict.fromkeys(str(item) for item in warnings if item))[:12],
+            "explanation_facts": list(
+                dict.fromkeys([*facts, *list(enriched.get("explanation_facts") or ())])
+            )[:8],
+            "prediction_probability": prediction_evidence,
+        }
+    )
+    if enriched.get("ev") is None:
+        enriched["ev"] = _market_expected_value(enriched)
+    return enriched
 
 
 
@@ -2573,6 +2688,26 @@ def _analyse_manual_selection(
     }
     scoring_game["statpal_context"] = statpal_context
     scoring_game["analysis_data_source"] = analysis_data_source
+    prediction_bundle, prediction_probabilities = _predict_slip_markets(
+        market_descriptor,
+        game=scoring_game,
+        statpal_context=statpal_context,
+    )
+    selected_prediction_probability = prediction_probabilities.get(
+        normalize_market_text(market_descriptor.canonical or market_descriptor.raw)
+    )
+    prediction_context = {
+        "engine": "prediction.api.predict_fixture",
+        "available": bool(prediction_bundle),
+        "model_sources": list((prediction_bundle.diagnostics.model_sources if prediction_bundle else ()) or ()),
+        "data_quality": (prediction_bundle.diagnostics.data_quality if prediction_bundle else ""),
+        "warnings": list((prediction_bundle.diagnostics.warnings if prediction_bundle else ()) or ()),
+        "markets": sorted(
+            str(probability.market)
+            for probability in getattr(prediction_bundle, "market_probabilities", ()) or ()
+            if probability and probability.market
+        ),
+    }
 
     # Snapshot coverage is only the right yardstick for the StatPal advisory path;
     # matrix- and count-model markets are judged on the data that actually serves them.
@@ -2592,6 +2727,7 @@ def _analyse_manual_selection(
         statpal_context=statpal_context,
         provider_payload=selection.get("provider_payload") or {},
         statpal_payload=selection.get("statpal_payload"),
+        prediction_probabilities=prediction_probabilities,
     )
     canonical_requested_market = market_descriptor.canonical
     analysis_market = _market_for_fixture_orientation(canonical_requested_market, candidate)
@@ -2604,6 +2740,10 @@ def _analyse_manual_selection(
             statpal_advisory=statpal_advisory,
             market_capability=market_capability,
             odds=selection.get("odds"),
+        )
+        submitted_market = _with_prediction_probability(
+            submitted_market,
+            selected_prediction_probability,
         )
         replacement_market = _replacement_market_for_slip(
             scoring_game,
@@ -2646,6 +2786,7 @@ def _analyse_manual_selection(
             "statpal_context": statpal_context,
             "team_intelligence": team_intelligence,
             "analysis_data_source": analysis_data_source,
+            "prediction_context": prediction_context,
             "statpal_advisory": statpal_advisory,
             "market_capability": market_capability,
         }
@@ -2657,6 +2798,10 @@ def _analyse_manual_selection(
         selected_market["market_taxonomy"] = market_taxonomy
         selected_market = with_statpal_advisory(selected_market, statpal_advisory)
         selected_market = with_market_capability(selected_market, market_capability)
+        selected_market = _with_prediction_probability(
+            selected_market,
+            selected_prediction_probability,
+        )
     best_market = with_match_checker_advisory(best_market)
     recommended_market = with_match_checker_advisory(recommended_market)
     replacement_market = _replacement_market_for_slip(
@@ -2689,6 +2834,7 @@ def _analyse_manual_selection(
         "statpal_context": statpal_context,
         "team_intelligence": team_intelligence,
         "analysis_data_source": analysis_data_source,
+        "prediction_context": prediction_context,
         "statpal_advisory": statpal_advisory,
         "market_capability": market_capability,
         "possible_matches": candidates,
