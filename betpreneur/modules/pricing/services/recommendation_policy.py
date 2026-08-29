@@ -64,6 +64,8 @@ def _value(candidate, name, default=None):
 def _reviewer_score(insights, reviewer_name):
     review = (insights.get("council_review") or {})
     for item in review.get("reviewers") or []:
+        if not isinstance(item, dict):
+            continue
         if item.get("reviewer") == reviewer_name:
             try:
                 return float(item.get("score") or 0)

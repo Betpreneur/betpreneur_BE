@@ -48,6 +48,8 @@ def market_sort_value(market):
 def _market_reviewer_score(market, reviewer_name):
     review = market.get("council_review") or {}
     for item in review.get("reviewers") or []:
+        if not isinstance(item, dict):
+            continue
         if item.get("reviewer") == reviewer_name:
             try:
                 return float(item.get("score") or 0)

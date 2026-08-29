@@ -31,7 +31,7 @@ from betpreneur.modules.catalog.api import (
     normalize_fixture_text,
     token_side_score,
 )
-from betpreneur.modules.explanations.api import CAUTION, REJECT, council_review
+from betpreneur.modules.explanations.api import CAUTION, REJECT
 from betpreneur.modules.markets.api import (
     daily_catalog_entry,
     daily_market_family_payload,
@@ -1556,8 +1556,8 @@ class AlgoRunnerService:
             "risk_evidence": insights.get("risk_evidence") or [],
             "analysis_summary": insights.get("summary", ""),
             "analysis_conclusion": insights.get("conclusion", ""),
-            "reasoning": "",
-            "model_verdict": "",
+            "reasoning": self._prediction_reasoning_text(insights),
+            "model_verdict": self._prediction_verdict_text(insights),
             "home_recent_form": prediction.home_recent_form or {},
             "away_recent_form": prediction.away_recent_form or {},
             "risk_flags": risk_flags,
@@ -1569,6 +1569,21 @@ class AlgoRunnerService:
             "stake": round(max(100, float(bankroll or 10000) * 0.10), 2),
             "source": "APS",
         }
+
+    def _prediction_reasoning_text(self, insights):
+        parts = []
+        summary = insights.get("summary") or ((insights.get("bettor_view") or {}).get("summary"))
+        if summary:
+            parts.append(str(summary))
+        parts.extend([str(item) for item in (insights.get("positive_evidence") or []) if item][:3])
+        conclusion = insights.get("conclusion") or ((insights.get("bettor_view") or {}).get("conclusion"))
+        if conclusion and conclusion not in parts:
+            parts.append(str(conclusion))
+        return " ".join(" ".join(parts).split())
+
+    def _prediction_verdict_text(self, insights):
+        conclusion = insights.get("conclusion") or ((insights.get("bettor_view") or {}).get("conclusion"))
+        return " ".join(str(conclusion or "").split())
 
     def _candidate_dict_for_reasoning(self, payload):
         return {
@@ -1776,6 +1791,8 @@ class AlgoRunnerService:
     def _prediction_reviewer_score(self, prediction, reviewer_name):
         review = ((prediction.insights or {}).get("council_review") or {})
         for item in review.get("reviewers") or []:
+            if not isinstance(item, dict):
+                continue
             if item.get("reviewer") == reviewer_name:
                 try:
                     return float(item.get("score") or 0)
@@ -1870,6 +1887,22 @@ class AlgoRunnerService:
         insights["league_trust"] = self._league_trust_for_prediction(prediction, performance)
         insights["calibration_trust"] = self._calibration_trust_for_prediction(prediction, performance)
         insights["optimization_profile"] = self._prediction_optimization_profile(prediction)
+        if not insights.get("council_review"):
+            top_policy = insights.get("top_picks_policy") or {}
+            confidence = prediction.confidence
+            insights["council_review"] = {
+                "decision": "approve" if top_policy.get("publishable") else "reject",
+                "tier": top_policy.get("tier", ""),
+                "raw_confidence": confidence,
+                "final_confidence": confidence,
+                "consensus_score": ((insights.get("recommendation_score") or {}).get("recommendation_score")),
+                "disagreement_score": None,
+                "reasons": [
+                    *list(top_policy.get("reasons") or ()),
+                    *list(top_policy.get("warnings") or ()),
+                ],
+                "reviewers": ["prediction_policy"],
+            }
         candidate = {
             "confidence": prediction.confidence,
             "ev": prediction.ev,
@@ -1886,7 +1919,6 @@ class AlgoRunnerService:
             "corner_profile": (prediction.insights or {}).get("corner_profile") or {},
             "insights": insights,
         }
-        insights["council_review"] = council_review(candidate)
         return candidate
 
     def _select_prediction_ids(self, algo_run):
@@ -2083,13 +2115,10 @@ class AlgoRunnerService:
                 if prediction:
                     payloads.append(self._selected_pick_payload_from_prediction(prediction, tier, bankroll))
 
-        from betpreneur.modules.catalog.api import legacy_runner as algo_runner
-
-        reason_candidates = [self._candidate_dict_for_reasoning(payload) for payload in payloads]
-        for payload, candidate in zip(payloads, reason_candidates):
-            payload["reasoning"] = algo_runner.pick_reasoning(candidate)
-            payload["model_verdict"] = algo_runner.pick_verdict(candidate)
         if use_llm:
+            from betpreneur.modules.catalog.api import legacy_runner as algo_runner
+
+            reason_candidates = [self._candidate_dict_for_reasoning(payload) for payload in payloads]
             with temporary_env(self._runner_env()):
                 algo_runner.enhance_pick_explanations_with_llm(reason_candidates)
             for payload, candidate in zip(payloads, reason_candidates):

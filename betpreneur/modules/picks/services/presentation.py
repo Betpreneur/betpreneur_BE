@@ -207,6 +207,27 @@ def _public_reasoning_text(value):
     return " ".join(text.split())
 
 
+def _prediction_reasoning_for_market(market):
+    parts = []
+    summary = market.get("analysis_summary") or ((market.get("bettor_view") or {}).get("summary"))
+    if summary:
+        parts.append(summary)
+    parts.extend([str(item) for item in (market.get("positive_evidence") or []) if item][:3])
+    conclusion = market.get("analysis_conclusion") or ((market.get("bettor_view") or {}).get("conclusion"))
+    if conclusion and conclusion not in parts:
+        parts.append(conclusion)
+    if not parts:
+        return ""
+    return _public_reasoning_text(" ".join(parts))
+
+
+def _prediction_verdict_for_market(market):
+    conclusion = market.get("analysis_conclusion") or ((market.get("bettor_view") or {}).get("conclusion"))
+    if conclusion:
+        return _public_reasoning_text(conclusion)
+    return _market_verdict_for_game(market)
+
+
 def _market_reasoning_for_game(market, item):
     ev = market.get("ev")
     ev_text = f"{ev:+.3f} expected value" if ev is not None else "no priced EV"
@@ -284,8 +305,8 @@ def _normalise_fixture_markets(item, picks_by_match, request=None, user_backed_m
         payload["market_backed_count"] = _back_count(match_id, payload.get("market")) if match_id else 0
         payload["backed_by_me"] = payload.get("market") in user_backed_markets
         payload.update(_apply_council_recommendation_gate(payload))
-        payload["reasoning"] = _public_reasoning_text(_market_reasoning_for_game(payload, item))
-        payload["model_verdict"] = _market_verdict_for_game(payload)
+        payload["reasoning"] = _prediction_reasoning_for_market(payload)
+        payload["model_verdict"] = _prediction_verdict_for_market(payload)
         payload["display_score"] = round(market_display_score(payload)[0], 3)
         markets.append(payload)
     return sorted(markets, key=_game_market_rank, reverse=True)
@@ -428,7 +449,7 @@ def market_prediction_payload(prediction):
         fallback_tier=prediction.selected_pick.tier if prediction.selected_pick_id else "",
     )
     insights = prediction.insights or {}
-    return {
+    payload = {
         "market": prediction.market,
         "meaning": prediction.meaning,
         "raw_confidence": prediction.raw_confidence,
@@ -454,6 +475,9 @@ def market_prediction_payload(prediction):
         "selected_pick_id": prediction.selected_pick_id,
         "selected_tier": _effective_pick_tier(prediction.selected_pick) if prediction.selected_pick_id else "",
     }
+    payload["reasoning"] = _prediction_reasoning_for_market(payload)
+    payload["model_verdict"] = _prediction_verdict_for_market(payload)
+    return payload
 
 
 def _fixture_summary_for_match(algo_run, match_id):

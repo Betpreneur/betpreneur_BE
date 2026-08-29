@@ -895,7 +895,11 @@ class MarketPredictionAdmin(admin.ModelAdmin):
         review = self._council_review(obj)
         reviewers = review.get("reviewers") or []
         reviewer_lines = [
-            (f"{item.get('reviewer')}: {item.get('score')} ({item.get('verdict')})",)
+            (
+                f"{item.get('reviewer')}: {item.get('score')} ({item.get('verdict')})"
+                if isinstance(item, dict)
+                else str(item),
+            )
             for item in reviewers
         ]
         return format_html(
