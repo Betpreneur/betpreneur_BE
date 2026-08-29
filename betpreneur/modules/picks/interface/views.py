@@ -10,7 +10,8 @@ import csv
 import logging
 
 from celery import current_app
-from django.db.models import Count
+from django.db.models import Count, F, Q, Window
+from django.db.models.functions import RowNumber
 from django.http import HttpResponse
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
@@ -388,6 +389,7 @@ def _compact_fixture_card(
     *,
     markets_by_match,
     picks_by_match,
+    eligible_counts=None,
     backed_game_counts=None,
     backed_game_ids=None,
 ):
@@ -447,9 +449,39 @@ def _compact_fixture_card(
             else (top_market or {}).get("recommendation_status", "no_edge")
         ),
         "market_count": fixture.market_count,
-        "eligible_market_count": sum(1 for market in markets if market.get("eligible")),
+        "eligible_market_count": int((eligible_counts or {}).get(match_id, 0) or 0),
         "markets_70_plus": fixture.markets_70_plus,
         "markets_65_plus": fixture.markets_65_plus,
+    }
+
+
+def _compact_strategy_payload(strategy):
+    strategy = strategy or {}
+    league_warnings = strategy.get("league_warnings") or []
+    suppressed = []
+    promoted = []
+    cooling = []
+    for market, payload in (strategy.get("markets") or {}).items():
+        action = (payload or {}).get("action") or (payload or {}).get("state")
+        if action == "suppress":
+            suppressed.append(market)
+        elif action == "promote":
+            promoted.append(market)
+        elif action == "cool":
+            cooling.append(market)
+    return {
+        "date": strategy.get("date"),
+        "daily_policy": strategy.get("daily_policy"),
+        "reason": strategy.get("reason", ""),
+        "suppressed_market_count": len(suppressed),
+        "promoted_market_count": len(promoted),
+        "cooling_market_count": len(cooling),
+        "league_warning_count": len(league_warnings),
+        "suppressed_markets": suppressed[:12],
+        "promoted_markets": promoted[:12],
+        "cooling_markets": cooling[:12],
+        "league_warnings": league_warnings[:12],
+        "confidence_bands": strategy.get("confidence_bands") or {},
     }
 
 
@@ -500,26 +532,45 @@ def _compact_games_payload(target_date, request=None):
     backed_game_counts, backed_game_ids, _user_markets = _bulk_game_back_context(match_ids, request)
     picks_by_match = picks_by_match_for_run(algo_run)
 
+    base_predictions = MarketPrediction.objects.filter(run=algo_run).exclude(market__in=EXCLUDED_MARKETS)
+    eligible_counts = {
+        str(item["match_id"] or ""): item["eligible_count"]
+        for item in base_predictions.values("match_id").annotate(
+            eligible_count=Count("id", filter=Q(eligible=True))
+        )
+    }
     markets_by_match = {}
     predictions = (
-        MarketPrediction.objects.filter(run=algo_run)
+        base_predictions.annotate(
+            _compact_rank=Window(
+                expression=RowNumber(),
+                partition_by=[F("match_id")],
+                order_by=[
+                    F("published").desc(),
+                    F("eligible").desc(),
+                    F("confidence").desc(nulls_last=True),
+                    F("ev").desc(nulls_last=True),
+                    F("market").asc(),
+                ],
+            )
+        )
+        .filter(_compact_rank=1)
         .select_related("selected_pick")
-        .order_by("match_id", "-confidence", "-ev", "market")
+        .order_by("match_id")
     )
     for prediction in predictions:
-        if prediction.market in EXCLUDED_MARKETS:
-            continue
         payload = market_prediction_payload(prediction)
         payload["publicly_paused"] = market_publicly_paused(payload.get("market"))
         payload.update(_apply_council_recommendation_gate(payload))
         payload["display_score"] = round(market_display_score(payload)[0], 3)
-        markets_by_match.setdefault(str(prediction.match_id or ""), []).append(payload)
+        markets_by_match[str(prediction.match_id or "")] = [payload]
 
     games = [
         _compact_fixture_card(
             fixture,
             markets_by_match=markets_by_match,
             picks_by_match=picks_by_match,
+            eligible_counts=eligible_counts,
             backed_game_counts=backed_game_counts,
             backed_game_ids=backed_game_ids,
         )
@@ -551,7 +602,7 @@ def _compact_games_payload(target_date, request=None):
             "markets_70_plus": (algo_run.result or {}).get("markets_70_plus", 0),
             "markets_65_plus": (algo_run.result or {}).get("markets_65_plus", 0),
         },
-        "strategy": (algo_run.result or {}).get("strategy_profile", {}),
+        "strategy": _compact_strategy_payload((algo_run.result or {}).get("strategy_profile", {})),
         "games": games,
         "grouped_games": _group_by_country_and_league(games, "games"),
     }
