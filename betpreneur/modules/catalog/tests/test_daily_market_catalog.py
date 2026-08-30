@@ -1,3 +1,5 @@
+from unittest.mock import patch
+
 from django.test import SimpleTestCase
 
 from betpreneur.modules.catalog.services import legacy_runner as algo_runner
@@ -165,3 +167,48 @@ class DailyMarketCatalogTests(SimpleTestCase):
         self.assertNotIn("DC: X2", scores)
         self.assertNotIn("AH Home +0.5", scores)
         self.assertNotIn("AH Away +0.5", scores)
+
+    def test_api_football_odds_parser_maps_expanded_count_markets(self):
+        algo_runner._odds_cache.clear()
+        response = [
+            {
+                "bookmakers": [
+                    {
+                        "bets": [
+                            {
+                                "id": 99,
+                                "name": "Home Team Corners Over/Under",
+                                "values": [
+                                    {"value": "Over 4.5", "odd": "1.90"},
+                                    {"value": "Under 4.5", "odd": "1.86"},
+                                ],
+                            },
+                            {
+                                "id": 98,
+                                "name": "Cards Over/Under",
+                                "values": [{"value": "Over 3.5", "odd": "1.72"}],
+                            },
+                            {
+                                "id": 97,
+                                "name": "Shots On Target Over/Under",
+                                "values": [{"value": "Over 7.5", "odd": "1.83"}],
+                            },
+                            {
+                                "id": 5,
+                                "name": "Goals Over/Under",
+                                "values": [{"value": "Over 4.5", "odd": "3.40"}],
+                            },
+                        ]
+                    }
+                ]
+            }
+        ]
+
+        with patch.object(algo_runner, "aps_get", return_value=response), patch.object(algo_runner.time, "sleep"):
+            odds = algo_runner.get_api_football_odds("fixture-123")
+
+        self.assertEqual(odds["Home Team Corners Over 4.5"], 1.9)
+        self.assertEqual(odds["Home Team Corners Under 4.5"], 1.86)
+        self.assertEqual(odds["Cards Over 3.5"], 1.72)
+        self.assertEqual(odds["Shots On Target Over 7.5"], 1.83)
+        self.assertEqual(odds["o45"], 3.4)

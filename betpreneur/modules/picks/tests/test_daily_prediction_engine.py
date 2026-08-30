@@ -102,7 +102,7 @@ class DailyPredictionEngineTests(TestCase):
                                     ],
                                 },
                                 {
-                                    "name": "Cards",
+                                    "name": "Cards Over/Under",
                                     "bookmakers": [
                                         {
                                             "totals": [
@@ -118,7 +118,21 @@ class DailyPredictionEngineTests(TestCase):
                                     ],
                                 },
                                 {
-                                    "name": "Home Team Corners",
+                                    "name": "Corners Over Under",
+                                    "bookmakers": [
+                                        {
+                                            "totals": {
+                                                "line": 9.5,
+                                                "odds": [
+                                                    {"name": "Over", "value": 1.91},
+                                                    {"name": "Under", "value": 1.8},
+                                                ],
+                                            }
+                                        }
+                                    ],
+                                },
+                                {
+                                    "name": "Home Corners Over/Under",
                                     "bookmakers": [
                                         {
                                             "totals": [
@@ -130,6 +144,20 @@ class DailyPredictionEngineTests(TestCase):
                                                     ],
                                                 }
                                             ]
+                                        }
+                                    ],
+                                },
+                                {
+                                    "name": "Total - Home",
+                                    "bookmakers": [
+                                        {
+                                            "totals": {
+                                                "line": 1.5,
+                                                "odds": [
+                                                    {"name": "Over", "value": 1.44},
+                                                    {"name": "Under", "value": 2.62},
+                                                ],
+                                            }
                                         }
                                     ],
                                 },
@@ -158,10 +186,40 @@ class DailyPredictionEngineTests(TestCase):
         self.assertEqual(odds["o35"], 9.25)
         self.assertEqual(odds["x2"], 2.65)
         self.assertEqual(odds["Cards Over 3.5"], 1.72)
+        self.assertEqual(odds["Corners Over 9.5"], 1.91)
         self.assertEqual(odds["Home Team Corners Over 4.5"], 1.9)
+        self.assertEqual(odds["Home Team Over 1.5"], 1.44)
         self.assertEqual(odds["_meta"]["aw"]["source"], "statpal")
         self.assertEqual(odds["_meta"]["aw"]["bookmaker_count"], 2)
         self.assertEqual(odds["_meta"]["o25"]["source"], "statpal")
+
+    def test_daily_prediction_real_odds_reads_statpal_summary_odds_map(self):
+        service = AlgoRunnerService()
+        odds = service._statpal_prediction_odds(
+            {
+                "statpal_context": {
+                    "snapshots": {
+                        "prematch_odds": {
+                            "payload": {},
+                            "summary": {
+                                "odds_map": {
+                                    "Corners Over 9.5": 1.91,
+                                    "Home Team Corners Over 5.5": 1.73,
+                                    "Cards Over 3.5": 2.1,
+                                    "Home Team Over 1.5": 1.44,
+                                },
+                            },
+                        }
+                    }
+                }
+            }
+        )
+
+        self.assertEqual(odds["Corners Over 9.5"], 1.91)
+        self.assertEqual(odds["Home Team Corners Over 5.5"], 1.73)
+        self.assertEqual(odds["Cards Over 3.5"], 2.1)
+        self.assertEqual(odds["Home Team Over 1.5"], 1.44)
+        self.assertEqual(odds["_meta"]["Cards Over 3.5"]["source"], "statpal")
 
     def test_daily_prediction_markets_use_expanded_discovery_pool(self):
         service = AlgoRunnerService()
@@ -259,6 +317,35 @@ class DailyPredictionEngineTests(TestCase):
         self.assertEqual(profile["away"]["avg_for"], 3.8)
         self.assertEqual(profile["away"]["avg_against"], 5.7)
         self.assertEqual(profile["away"]["avg_total"], 9.5)
+
+    def test_prediction_corner_profile_ignores_impossible_provider_averages(self):
+        service = AlgoRunnerService()
+        prediction = FixturePrediction(
+            fixture_id="fixture-123",
+            fixture_name="Alpha FC vs Beta FC",
+            features=FixtureFeatureSet(
+                fixture_id="fixture-123",
+                fixture_name="Alpha FC vs Beta FC",
+                home_team=TeamStrengthSnapshot(team_id="home", team_name="Alpha FC"),
+                away_team=TeamStrengthSnapshot(team_id="away", team_name="Beta FC"),
+                features={
+                    "home": {"season_profile": {"matches_played": 1, "corners_for": 181}},
+                    "away": {"season_profile": {"matches_played": 1, "corners_for": 19}},
+                },
+            ),
+            counts=CountModelOutput(
+                expected_total_corners=10.32,
+                expected_team_counts={"corners": {"home": 5.25, "away": 5.07}},
+                diagnostics=PredictionDiagnostics(data_quality="limited"),
+            ),
+        )
+
+        profile = service._prediction_corner_profile_payload(prediction)
+
+        self.assertEqual(profile["home"]["avg_for"], 5.25)
+        self.assertEqual(profile["away"]["avg_for"], 19.0)
+        self.assertIsNone(profile["home"]["avg_against"])
+        self.assertIsNone(profile["home"]["avg_total"])
 
     def test_prediction_recent_form_payload_does_not_double_divide_averages(self):
         service = AlgoRunnerService()

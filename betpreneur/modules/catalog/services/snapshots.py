@@ -1322,11 +1322,14 @@ class StatPalSnapshotService:
     def _summarize_odds(payload: dict[str, Any], match_id="", provider_match_id="") -> dict[str, Any]:
         if isinstance(payload, dict) and isinstance(payload.get("markets"), list):
             simple = StatPalSnapshotService._simple_market_odds(payload)
+            odds_map = StatPalSnapshotService._market_odds_map(payload)
             return {
                 "match_id": match_id or payload.get("match_id", ""),
                 "provider_match_id": provider_match_id or payload.get("provider_match_id", ""),
                 "market_count": payload.get("market_count", len(payload.get("markets") or [])),
                 "bookmaker_count": sum(len(market.get("bookmakers") or []) for market in payload.get("markets") or []),
+                "odds_map": odds_map,
+                "odds_market_count": len(odds_map),
                 "home_odds": simple.get("home"),
                 "draw_odds": simple.get("draw"),
                 "away_odds": simple.get("away"),
@@ -1362,7 +1365,153 @@ class StatPalSnapshotService:
             "over25_odds": StatPalSnapshotService._find_numeric(payload, "over25_odds", "over_2_5_odds"),
             "under35_odds": StatPalSnapshotService._find_numeric(payload, "under35_odds", "under_3_5_odds"),
             "top_level_keys": sorted((payload or {}).keys()) if isinstance(payload, dict) else [],
-        }
+            }
+
+    @staticmethod
+    def _market_odds_map(payload: dict[str, Any]) -> dict[str, float]:
+        samples: dict[str, list[float]] = {}
+
+        def clean(value):
+            return normalize_fixture_text(value or "")
+
+        def as_list(value):
+            if isinstance(value, list):
+                return value
+            if isinstance(value, tuple):
+                return list(value)
+            if isinstance(value, dict):
+                return [value]
+            return []
+
+        def remember(key, value):
+            key = str(key or "").strip()
+            if not key:
+                return
+            try:
+                odd = float(value)
+            except (TypeError, ValueError):
+                return
+            if odd <= 1:
+                return
+            samples.setdefault(key, []).append(odd)
+
+        def odds_items(container):
+            if not isinstance(container, dict):
+                return []
+            return as_list(container.get("odds") or container.get("odd"))
+
+        def total_items(bookmaker):
+            if not isinstance(bookmaker, dict):
+                return []
+            return as_list(bookmaker.get("totals") or bookmaker.get("total"))
+
+        def market_label_for_total(market_name):
+            if "shot" in market_name and "target" in market_name:
+                if "home" in market_name:
+                    return "Home Team Shots On Target"
+                if "away" in market_name:
+                    return "Away Team Shots On Target"
+                return "Shots On Target"
+            if "booking point" in market_name:
+                return "Booking Points"
+            if "card" in market_name or "booking" in market_name or "yellow" in market_name:
+                if "home" in market_name:
+                    return "Home Team Cards"
+                if "away" in market_name:
+                    return "Away Team Cards"
+                return "Cards"
+            if "corner" in market_name:
+                if "home" in market_name:
+                    return "Home Team Corners"
+                if "away" in market_name:
+                    return "Away Team Corners"
+                return "Corners"
+            if market_name in {"total - home", "home total", "home team total"}:
+                return "Home Team"
+            if market_name in {"total - away", "away total", "away team total"}:
+                return "Away Team"
+            if "home" in market_name and "goal" in market_name:
+                return "Home Team"
+            if "away" in market_name and "goal" in market_name:
+                return "Away Team"
+            return ""
+
+        def remember_items(mapping, bookmaker):
+            for odd in odds_items(bookmaker):
+                if not isinstance(odd, dict):
+                    continue
+                market = mapping.get(clean(odd.get("name")))
+                if market:
+                    remember(market, odd.get("value"))
+
+        def remember_total(total, *, market_label=""):
+            if not isinstance(total, dict) or not market_label:
+                return
+            line = total.get("line") if total.get("line") is not None else total.get("name")
+            try:
+                display_line = f"{float(line):g}"
+            except (TypeError, ValueError):
+                return
+            for odd in odds_items(total):
+                if not isinstance(odd, dict):
+                    continue
+                odd_name = clean(odd.get("name"))
+                if odd_name == "over":
+                    remember(f"{market_label} Over {display_line}", odd.get("value"))
+                elif odd_name == "under":
+                    remember(f"{market_label} Under {display_line}", odd.get("value"))
+
+        for market in as_list(payload.get("markets")):
+            if not isinstance(market, dict):
+                continue
+            market_name = clean(market.get("name"))
+            for bookmaker in as_list(market.get("bookmakers") or market.get("bookmaker")):
+                if not isinstance(bookmaker, dict):
+                    continue
+                if market_name in {"1x2", "1 x 2", "match winner", "fulltime result"}:
+                    remember_items({"home": "Home Win", "draw": "Draw", "away": "Away Win"}, bookmaker)
+                elif market_name in {"both teams to score", "both teams score", "btts"}:
+                    remember_items({"yes": "GG / BTTS Yes", "no": "BTTS No"}, bookmaker)
+                elif market_name == "double chance":
+                    remember_items(
+                        {
+                            "home/draw": "DC: 1X",
+                            "home draw": "DC: 1X",
+                            "1x": "DC: 1X",
+                            "home/away": "DC: 12",
+                            "home away": "DC: 12",
+                            "12": "DC: 12",
+                            "draw/away": "DC: X2",
+                            "draw away": "DC: X2",
+                            "x2": "DC: X2",
+                        },
+                        bookmaker,
+                    )
+                elif market_name in {"over/under", "over under", "totals"}:
+                    for total in total_items(bookmaker):
+                        remember_total(total, market_label="")
+                        if not isinstance(total, dict):
+                            continue
+                        line = total.get("line") if total.get("line") is not None else total.get("name")
+                        try:
+                            display_line = f"{float(line):g}"
+                        except (TypeError, ValueError):
+                            continue
+                        for odd in odds_items(total):
+                            if not isinstance(odd, dict):
+                                continue
+                            odd_name = clean(odd.get("name"))
+                            if odd_name == "over":
+                                remember(f"Over {display_line}", odd.get("value"))
+                            elif odd_name == "under":
+                                remember(f"Under {display_line}", odd.get("value"))
+                else:
+                    market_label = market_label_for_total(market_name)
+                    if market_label:
+                        for total in total_items(bookmaker):
+                            remember_total(total, market_label=market_label)
+
+        return {key: round(max(values), 3) for key, values in sorted(samples.items()) if values}
 
     @staticmethod
     def _simple_market_odds(payload: dict[str, Any]) -> dict[str, float | None]:

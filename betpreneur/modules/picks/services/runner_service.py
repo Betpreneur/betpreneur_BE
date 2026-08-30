@@ -924,6 +924,11 @@ class AlgoRunnerService:
         return prematch if isinstance(prematch, dict) else {}
 
     def _remember_statpal_summary_odds(self, odds, prematch):
+        odds_map = prematch.get("odds_map") if isinstance(prematch, dict) else {}
+        if isinstance(odds_map, dict):
+            for odds_key, value in odds_map.items():
+                self._remember_prediction_odd(odds, str(odds_key), value, source="statpal")
+
         mapping = {
             "home_odds": "hw",
             "draw_odds": "d",
@@ -1015,6 +1020,10 @@ class AlgoRunnerService:
                 if "away" in market_name:
                     return "Away Team Corners"
                 return "Corners"
+            if market_name in {"total - home", "home total", "home team total"}:
+                return "Home Team"
+            if market_name in {"total - away", "away total", "away team total"}:
+                return "Away Team"
             if "home" in market_name and "goal" in market_name:
                 return "Home Team"
             if "away" in market_name and "goal" in market_name:
@@ -1449,10 +1458,18 @@ class AlgoRunnerService:
         away_season = away.get("season_profile") or {}
         home_matches = home_season.get("matches_played")
         away_matches = away_season.get("matches_played")
-        home_avg_for = self._prediction_rate(home_season.get("corners_for"), home_matches)
-        away_avg_for = self._prediction_rate(away_season.get("corners_for"), away_matches)
-        home_avg_against = self._prediction_rate(home_season.get("corners_against"), home_matches)
-        away_avg_against = self._prediction_rate(away_season.get("corners_against"), away_matches)
+        home_avg_for = self._prediction_plausible_rate(home_season.get("corners_for"), home_matches, ceiling=20.0)
+        away_avg_for = self._prediction_plausible_rate(away_season.get("corners_for"), away_matches, ceiling=20.0)
+        home_avg_against = self._prediction_plausible_rate(
+            home_season.get("corners_against"),
+            home_matches,
+            ceiling=20.0,
+        )
+        away_avg_against = self._prediction_plausible_rate(
+            away_season.get("corners_against"),
+            away_matches,
+            ceiling=20.0,
+        )
         home_expected = self._prediction_number(corners.get("home"))
         away_expected = self._prediction_number(corners.get("away"))
         return {
@@ -1499,6 +1516,16 @@ class AlgoRunnerService:
         if total_value is None or not match_count:
             return 0
         return round(total_value / match_count, 2)
+
+    def _prediction_plausible_rate(self, total, matches, *, ceiling):
+        total_value = self._prediction_number(total)
+        match_count = self._prediction_number(matches)
+        if total_value is None or not match_count:
+            return None
+        rate = total_value / match_count
+        if rate < 0 or rate > ceiling:
+            return None
+        return round(rate, 2)
 
     def _prediction_recent_average(self, value, matches, *, ceiling):
         total_value = self._prediction_number(value)

@@ -1855,6 +1855,29 @@ def _parse_line(label, prefix):
     except (TypeError, ValueError):
         return None
 
+def _aps_total_market_prefix(bet_name):
+    if "shot" in bet_name and "target" in bet_name:
+        if "home" in bet_name:
+            return "Home Team Shots On Target"
+        if "away" in bet_name:
+            return "Away Team Shots On Target"
+        return "Shots On Target"
+    if "booking point" in bet_name:
+        return "Booking Points"
+    if "card" in bet_name or "booking" in bet_name or "yellow" in bet_name:
+        if "home" in bet_name:
+            return "Home Team Cards"
+        if "away" in bet_name:
+            return "Away Team Cards"
+        return "Cards"
+    if "corner" in bet_name:
+        if "home" in bet_name:
+            return "Home Team Corners"
+        if "away" in bet_name:
+            return "Away Team Corners"
+        return "Corners"
+    return ""
+
 def get_api_football_odds(fixture_id):
     if fixture_id in _odds_cache:
         return _odds_cache[fixture_id]
@@ -1875,14 +1898,22 @@ def get_api_football_odds(fixture_id):
                 for value in bet.get("values", []) or []:
                     label = normalize(value.get("value", ""))
                     odd = value.get("odd")
+                    market_prefix = _aps_total_market_prefix(bet_name)
 
                     if bet_id == 45 or ("corner" in bet_name and ("over under" in bet_name or "over/under" in bet_name)):
                         over_line = _parse_line(label, "over ")
                         under_line = _parse_line(label, "under ")
                         if over_line is not None:
-                            _remember_odd(odds, f"Corners Over {over_line:g}", odd)
+                            _remember_odd(odds, f"{market_prefix or 'Corners'} Over {over_line:g}", odd)
                         elif under_line is not None:
-                            _remember_odd(odds, f"Corners Under {under_line:g}", odd)
+                            _remember_odd(odds, f"{market_prefix or 'Corners'} Under {under_line:g}", odd)
+                    elif market_prefix and ("over under" in bet_name or "over/under" in bet_name or "total" in bet_name):
+                        over_line = _parse_line(label, "over ")
+                        under_line = _parse_line(label, "under ")
+                        if over_line is not None:
+                            _remember_odd(odds, f"{market_prefix} Over {over_line:g}", odd)
+                        elif under_line is not None:
+                            _remember_odd(odds, f"{market_prefix} Under {under_line:g}", odd)
                     elif bet_id == 1 or bet_name in ("match winner", "fulltime result", "1x2"):
                         if label in ("home", "1"):
                             _remember_odd(odds, "hw", odd)
@@ -1909,6 +1940,10 @@ def get_api_football_odds(fixture_id):
                             _remember_odd(odds, "o35", odd)
                         elif "under 3.5" in label:
                             _remember_odd(odds, "u35", odd)
+                        elif "over 4.5" in label:
+                            _remember_odd(odds, "o45", odd)
+                        elif "under 4.5" in label:
+                            _remember_odd(odds, "u45", odd)
                     elif bet_id == 8 or bet_name in ("both teams score", "both teams to score"):
                         if label == "yes":
                             _remember_odd(odds, "btts_yes", odd)

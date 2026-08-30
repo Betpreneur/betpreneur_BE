@@ -503,6 +503,70 @@ class StatPalSnapshotServiceTests(TestCase):
                                             }
                                         ],
                                     },
+                                    {
+                                        "id": "23957",
+                                        "name": "Total - Home",
+                                        "bookmaker": [
+                                            {
+                                                "id": "1847",
+                                                "name": "10Bet",
+                                                "total": {
+                                                    "name": "1.5",
+                                                    "odd": [
+                                                        {"name": "Over", "value": "1.44"},
+                                                        {"name": "Under", "value": "2.62"},
+                                                    ],
+                                                },
+                                            }
+                                        ],
+                                    },
+                                    {
+                                        "id": "24477",
+                                        "name": "Corners Over Under",
+                                        "bookmaker": {
+                                            "id": "1847",
+                                            "name": "10Bet",
+                                            "total": {
+                                                "name": "9.5",
+                                                "odd": [
+                                                    {"name": "Over", "value": "1.91"},
+                                                    {"name": "Under", "value": "1.80"},
+                                                ],
+                                            },
+                                        },
+                                    },
+                                    {
+                                        "id": "24675",
+                                        "name": "Home Corners Over/Under",
+                                        "bookmaker": {
+                                            "id": "1847",
+                                            "name": "10Bet",
+                                            "total": {
+                                                "name": "5.5",
+                                                "odd": [
+                                                    {"name": "Over", "value": "1.73"},
+                                                    {"name": "Under", "value": "2.00"},
+                                                ],
+                                            },
+                                        },
+                                    },
+                                    {
+                                        "id": "24791",
+                                        "name": "Cards Over/Under",
+                                        "bookmaker": {
+                                            "id": "1847",
+                                            "name": "10Bet",
+                                            "total": [
+                                                {
+                                                    "name": "3.5",
+                                                    "odd": [
+                                                        {"name": "Over", "value": "2.10"},
+                                                        {"name": "Under", "value": "1.67"},
+                                                    ],
+                                                }
+                                            ],
+                                        },
+                                    },
                                 ],
                             }
                         ],
@@ -525,6 +589,10 @@ class StatPalSnapshotServiceTests(TestCase):
         self.assertEqual(row.summary["btts_yes_odds"], 1.72)
         self.assertEqual(row.summary["btts_no_odds"], 2.05)
         self.assertEqual(row.summary["double_chance_12_odds"], 1.31)
+        self.assertEqual(row.summary["odds_map"]["Home Team Over 1.5"], 1.44)
+        self.assertEqual(row.summary["odds_map"]["Corners Over 9.5"], 1.91)
+        self.assertEqual(row.summary["odds_map"]["Home Team Corners Under 5.5"], 2.0)
+        self.assertEqual(row.summary["odds_map"]["Cards Over 3.5"], 2.1)
 
     def test_prediction_summary_extracts_core_scoring_signals(self):
         summary = StatPalSnapshotService().summarize(
