@@ -474,7 +474,7 @@ def describe_market(value, *, market_name="", outcome_name="", specifier=""):
             selection=side,
             line=line,
             period=period,
-            support_level="unsupported",
+            support_level="medium",
         )
 
     if "player" in text or any(keyword in text for keyword in ["to score", "shots", "shot on target", "assist", "saves", "tackles"]):

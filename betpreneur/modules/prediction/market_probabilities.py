@@ -600,8 +600,7 @@ def _confidence_score(probability: float | None, quality: str) -> float | None:
         "partial": 70,
         "poor": 55,
     }.get(quality, 45)
-    certainty = abs(probability - 0.5) * 100.0
-    return round(min(quality_cap, 50.0 + certainty), 2)
+    return round(min(quality_cap, max(0.0, probability * 100.0)), 2)
 
 
 def _quality(output, *, fallback: str = "unavailable") -> str:

@@ -69,11 +69,44 @@ def _recommendation_status_rank(market):
     }.get(status, 0)
 
 
+def _model_probability_percent(market):
+    insights = market.get("insights") or {}
+    probability = insights.get("calibrated_probability")
+    if probability is None:
+        probability = insights.get("raw_probability")
+    try:
+        if probability is not None:
+            return float(probability) * 100.0
+    except (TypeError, ValueError):
+        pass
+    return float(market.get("final_confidence") or market.get("confidence") or 0)
+
+
+def _data_quality_rank(market):
+    quality = str(
+        (market.get("insights") or {}).get("data_quality") or market.get("data_quality") or ""
+    ).lower()
+    return {
+        "calibrated": 6,
+        "strong": 5,
+        "fresh": 5,
+        "medium": 4,
+        "limited": 3,
+        "partial": 3,
+        "poor": 2,
+        "unavailable": 1,
+        "unknown": 1,
+    }.get(quality, 0)
+
+
 def _game_market_rank(market):
     return (
         1 if market.get("selected") else 0,
         1 if market.get("recommended") else 0,
         0 if market.get("publicly_paused") else 1,
+        _model_probability_percent(market),
+        _data_quality_rank(market),
+        -len(market.get("risk_flags") or []),
         _recommendation_status_rank(market),
         market_decision_rank(market),
         *market_display_score(market),

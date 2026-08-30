@@ -50,7 +50,10 @@ DAILY_MARKET_CATALOG: tuple[DailyMarketCatalogEntry, ...] = (
     DailyMarketCatalogEntry("Under 2.5", "2 or fewer total goals", "goals", odds_key="u25"),
     DailyMarketCatalogEntry("Over 3.5", "4 or more total goals", "goals", odds_key="o35"),
     DailyMarketCatalogEntry("Under 3.5", "3 or fewer total goals", "goals", proven=True, odds_key="u35"),
+    DailyMarketCatalogEntry("Over 4.5", "5 or more total goals", "goals", odds_key="o45"),
+    DailyMarketCatalogEntry("Under 4.5", "4 or fewer total goals", "goals", odds_key="u45"),
     DailyMarketCatalogEntry("GG / BTTS Yes", "Both teams to score", "goals", proven=True, odds_key="btts_yes"),
+    DailyMarketCatalogEntry("BTTS No", "At least one team not to score", "goals", odds_key="btts_no"),
     DailyMarketCatalogEntry(
         "GG + Over 2.5",
         "Both score & 3+ goals",
@@ -107,8 +110,20 @@ DAILY_MARKET_CATALOG: tuple[DailyMarketCatalogEntry, ...] = (
             "core_supported": True,
         },
     ),
-    DailyMarketCatalogEntry("AH Home +0.5", "Home win or draw (+0.5)", "handicap", proven=True),
-    DailyMarketCatalogEntry("AH Away +0.5", "Away win or draw (+0.5)", "handicap"),
+    DailyMarketCatalogEntry(
+        "AH Home +0.5",
+        "Home win or draw (+0.5)",
+        "handicap",
+        enabled=False,
+        publish_enabled=False,
+    ),
+    DailyMarketCatalogEntry(
+        "AH Away +0.5",
+        "Away win or draw (+0.5)",
+        "handicap",
+        enabled=False,
+        publish_enabled=False,
+    ),
     DailyMarketCatalogEntry("First to Score H", "Home team scores first", "scoring", proven=True),
     DailyMarketCatalogEntry("First to Score A", "Away team scores first", "scoring"),
 )
@@ -127,6 +142,54 @@ EXCLUDED_DAILY_MARKETS = {
     for entry in DAILY_MARKET_CATALOG
     if not entry.enabled or not entry.publish_enabled
 }
+
+
+def _daily_group_for_family(family: str) -> str:
+    if family in {"match_result", "double_chance", "draw_no_bet", "asian_handicap", "handicap"}:
+        return "result"
+    if family in {"total_goals", "team_total_goals", "btts", "total_btts"}:
+        return "goals"
+    if family in {"corners_total", "team_corners"}:
+        return "corners"
+    if family in {"cards_total", "team_cards", "booking_points"}:
+        return "cards"
+    if family in {"shots_on_target_total", "team_shots_on_target"}:
+        return "shots"
+    if family == "clean_sheet":
+        return "clean_sheet"
+    if family == "first_to_score":
+        return "scoring"
+    return "other"
+
+
+def _dynamic_market_meaning(market: str) -> str:
+    descriptor = describe_market(market)
+    side = (descriptor.side or descriptor.selection or "").lower()
+    line = descriptor.line
+    team_prefix = ""
+    if descriptor.team == "home":
+        team_prefix = "Home team "
+    elif descriptor.team == "away":
+        team_prefix = "Away team "
+
+    if descriptor.family == "total_goals" and line:
+        return f"Match to finish with {'more than' if side == 'over' else 'fewer than'} {line} total goals"
+    if descriptor.family == "team_total_goals" and line:
+        return f"{team_prefix or 'Selected team '}to score {'more than' if side == 'over' else 'fewer than'} {line} goals"
+    if descriptor.family == "btts":
+        return "Both teams to score" if side == "yes" else "At least one team not to score"
+    if descriptor.family in {"corners_total", "team_corners"} and line:
+        subject = team_prefix or "Match "
+        return f"{subject}to finish with {'more than' if side == 'over' else 'fewer than'} {line} corners"
+    if descriptor.family in {"cards_total", "team_cards"} and line:
+        subject = team_prefix or "Match "
+        return f"{subject}to finish with {'more than' if side == 'over' else 'fewer than'} {line} cards"
+    if descriptor.family == "booking_points" and line:
+        return f"Match to finish with {'more than' if side == 'over' else 'fewer than'} {line} booking points"
+    if descriptor.family in {"shots_on_target_total", "team_shots_on_target"} and line:
+        subject = team_prefix or "Match "
+        return f"{subject}to finish with {'more than' if side == 'over' else 'fewer than'} {line} shots on target"
+    return descriptor.canonical or market
 
 
 def daily_catalog_entry(market: str) -> DailyMarketCatalogEntry | None:
@@ -149,6 +212,18 @@ def daily_catalog_entry(market: str) -> DailyMarketCatalogEntry | None:
             "corners",
             generation="odds_line",
         )
+    descriptor = describe_market(market)
+    if (
+        descriptor.recognized
+        and descriptor.support_level != "unsupported"
+        and evaluator_for(descriptor.family)
+    ):
+        return DailyMarketCatalogEntry(
+            descriptor.canonical or market,
+            _dynamic_market_meaning(market),
+            _daily_group_for_family(descriptor.family),
+            generation="discovered",
+        )
     return None
 
 
@@ -166,6 +241,51 @@ def daily_scoring_market_names() -> list[str]:
         for entry in DAILY_MARKET_CATALOG
         if entry.enabled and entry.generation == "fixed"
     ]
+
+
+def _line_markets(prefix: str, lines: tuple[str, ...]) -> tuple[str, ...]:
+    return tuple(f"{prefix} Over {line}" for line in lines) + tuple(
+        f"{prefix} Under {line}" for line in lines
+    )
+
+
+DAILY_MARKET_DISCOVERY_POOL: tuple[str, ...] = tuple(
+    dict.fromkeys(
+        [
+            *daily_scoring_market_names(),
+            "Home Team Over 1.5",
+            "Away Team Over 1.5",
+            "Home Team Under 2.5",
+            "Away Team Under 2.5",
+            "1H Over 1.5",
+            "1H Under 1.5",
+            "1H Under 2.5",
+            *_line_markets("Corners", ("7.5", "8.5", "9.5", "10.5", "11.5")),
+            *_line_markets("Home Team Corners", ("2.5", "3.5", "4.5", "5.5", "6.5")),
+            *_line_markets("Away Team Corners", ("2.5", "3.5", "4.5", "5.5", "6.5")),
+            *_line_markets("Cards", ("2.5", "3.5", "4.5", "5.5")),
+            *_line_markets("Home Team Cards", ("1.5", "2.5", "3.5")),
+            *_line_markets("Away Team Cards", ("1.5", "2.5", "3.5")),
+            *_line_markets("Booking Points", ("35.5", "45.5", "55.5", "65.5")),
+            *_line_markets("Shots On Target", ("6.5", "7.5", "8.5", "9.5", "10.5", "11.5")),
+            *_line_markets("Home Team Shots On Target", ("2.5", "3.5", "4.5", "5.5")),
+            *_line_markets("Away Team Shots On Target", ("2.5", "3.5", "4.5", "5.5")),
+        ]
+    )
+)
+
+
+def daily_discovery_market_names(*, include_excluded=False) -> list[str]:
+    markets: list[str] = []
+    for market in DAILY_MARKET_DISCOVERY_POOL:
+        entry = daily_catalog_entry(market)
+        if not entry:
+            continue
+        if not include_excluded and (not entry.enabled or not entry.publish_enabled):
+            continue
+        if entry.market not in markets:
+            markets.append(entry.market)
+    return markets
 
 
 def daily_odds_key_map() -> dict[str, str]:

@@ -1665,6 +1665,7 @@ def score_fixture(hf, af, h2h, real_odds, api_preds=None, corner_profile=None, f
 
     poisson_o25 = round((1 - _pp(exp_total,0) - _pp(exp_total,1) - _pp(exp_total,2)) * 100)
     poisson_o15 = round((1 - _pp(exp_total,0) - _pp(exp_total,1)) * 100)
+    poisson_o45 = round((1 - sum(_pp(exp_total, k) for k in range(5))) * 100)
 
     # Historical over25 rate from each team's recent games
     h_o25_rate = hf["over25_count"] / max(hf["games"], 1)
@@ -1751,12 +1752,19 @@ def score_fixture(hf, af, h2h, real_odds, api_preds=None, corner_profile=None, f
 
     under35 = min(90, 100 - round(o25 * 0.55))
     o35 = max(5, 100 - under35)
+    o45 = max(3, min(70, round(poisson_o45 * CONF_DEFLATOR)))
+    under45 = max(25, min(95, 100 - o45))
+    if real_odds:
+        o45 = blend_conf(o45, real_odds.get("o45"))
+        under45 = blend_conf(under45, real_odds.get("u45"))
+    btts_no = max(5, min(95, 100 - gg))
     score_values = {
         "Home Win":hc,"Away Win":ac,"Draw":draw_conf,
         "Over 1.5":o15,"Under 1.5":100-o15,
         "Over 2.5":o25,"Under 2.5":100-o25,
         "Over 3.5":o35,"Under 3.5":under35,
-        "GG / BTTS Yes":gg,"GG + Over 2.5":round(gg*o25/100),
+        "Over 4.5":o45,"Under 4.5":under45,
+        "GG / BTTS Yes":gg,"BTTS No":btts_no,"GG + Over 2.5":round(gg*o25/100),
         "DC: 12":dc12,
         "DNB Home":hc,"DNB Away":ac,
         "Home CS":hcs,"Away CS":acs,

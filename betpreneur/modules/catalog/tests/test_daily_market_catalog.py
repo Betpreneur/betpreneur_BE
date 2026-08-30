@@ -9,6 +9,7 @@ from betpreneur.modules.markets.api import (
     SCORE_MATRIX_ENGINE,
     build_daily_market_scores,
     daily_catalog_entry,
+    daily_discovery_market_names,
     daily_evaluation_route,
     daily_market_family_payload,
     daily_market_names,
@@ -43,7 +44,9 @@ class DailyMarketCatalogTests(SimpleTestCase):
         self.assertIn("GG + Over 2.5", markets)
         self.assertNotIn("DC: 1X", markets)
         self.assertNotIn("DC: X2", markets)
-        self.assertEqual(EXCLUDED_DAILY_MARKETS, {"DC: 1X", "DC: X2"})
+        self.assertNotIn("AH Home +0.5", markets)
+        self.assertNotIn("AH Away +0.5", markets)
+        self.assertEqual(EXCLUDED_DAILY_MARKETS, {"DC: 1X", "DC: X2", "AH Home +0.5", "AH Away +0.5"})
 
     def test_catalog_groups_markets_by_evaluator_family(self):
         grouped = daily_markets_by_family()
@@ -84,7 +87,7 @@ class DailyMarketCatalogTests(SimpleTestCase):
     def test_proven_markets_are_catalog_driven(self):
         self.assertEqual(
             PROVEN_DAILY_MARKETS,
-            {"First to Score H", "Over 1.5", "AH Home +0.5", "Under 3.5", "GG / BTTS Yes"},
+            {"First to Score H", "Over 1.5", "Under 3.5", "GG / BTTS Yes"},
         )
 
     def test_odds_keys_are_catalog_driven(self):
@@ -100,10 +103,34 @@ class DailyMarketCatalogTests(SimpleTestCase):
                 "Under 2.5": "u25",
                 "Over 3.5": "o35",
                 "Under 3.5": "u35",
+                "Over 4.5": "o45",
+                "Under 4.5": "u45",
                 "GG / BTTS Yes": "btts_yes",
+                "BTTS No": "btts_no",
                 "DC: 12": "12",
             },
         )
+
+    def test_discovery_pool_expands_daily_prediction_markets(self):
+        markets = daily_discovery_market_names()
+
+        self.assertIn("Home Team Over 1.5", markets)
+        self.assertIn("Away Team Under 2.5", markets)
+        self.assertIn("Corners Over 9.5", markets)
+        self.assertIn("Cards Over 3.5", markets)
+        self.assertIn("Booking Points Over 45.5", markets)
+        self.assertIn("Shots On Target Over 7.5", markets)
+        self.assertNotIn("AH Home +0.5", markets)
+        self.assertNotIn("AH Away +0.5", markets)
+
+    def test_dynamic_count_market_entry_is_supported_by_catalog(self):
+        entry = daily_catalog_entry("Home Team Shots On Target Over 3.5")
+        payload = daily_market_family_payload(entry.market)
+
+        self.assertEqual(entry.generation, "discovered")
+        self.assertEqual(entry.group, "shots")
+        self.assertEqual(payload["market_family"], "team_shots_on_target")
+        self.assertEqual(payload["evaluation_engine"], COUNT_MODEL_ENGINE)
 
     def test_score_builder_uses_enabled_catalog_markets_and_dynamic_lines(self):
         fixed_values = dict.fromkeys(daily_market_names(include_excluded=True), 61)
@@ -115,9 +142,12 @@ class DailyMarketCatalogTests(SimpleTestCase):
         self.assertEqual(set(daily_scoring_market_names()), set(daily_market_names()))
         self.assertIn("Home Win", scores)
         self.assertIn("Over 3.5", scores)
+        self.assertIn("Over 4.5", scores)
         self.assertIn("Corners Under 12.5", scores)
         self.assertNotIn("DC: 1X", scores)
         self.assertNotIn("DC: X2", scores)
+        self.assertNotIn("AH Home +0.5", scores)
+        self.assertNotIn("AH Away +0.5", scores)
         self.assertNotIn("Unsupported Custom Market", scores)
 
     def test_score_fixture_output_is_catalog_driven(self):
@@ -130,5 +160,8 @@ class DailyMarketCatalogTests(SimpleTestCase):
 
         self.assertEqual(set(daily_market_names()), set(scores))
         self.assertIn("Over 3.5", scores)
+        self.assertIn("BTTS No", scores)
         self.assertNotIn("DC: 1X", scores)
         self.assertNotIn("DC: X2", scores)
+        self.assertNotIn("AH Home +0.5", scores)
+        self.assertNotIn("AH Away +0.5", scores)

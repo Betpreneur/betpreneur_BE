@@ -100,6 +100,38 @@ class DailyPredictionEngineTests(TestCase):
                                         }
                                     ],
                                 },
+                                {
+                                    "name": "Cards",
+                                    "bookmakers": [
+                                        {
+                                            "totals": [
+                                                {
+                                                    "line": 3.5,
+                                                    "odds": [
+                                                        {"name": "Over", "value": 1.72},
+                                                        {"name": "Under", "value": 2.05},
+                                                    ],
+                                                }
+                                            ]
+                                        }
+                                    ],
+                                },
+                                {
+                                    "name": "Home Team Corners",
+                                    "bookmakers": [
+                                        {
+                                            "totals": [
+                                                {
+                                                    "line": 4.5,
+                                                    "odds": [
+                                                        {"name": "Over", "value": 1.9},
+                                                        {"name": "Under", "value": 1.86},
+                                                    ],
+                                                }
+                                            ]
+                                        }
+                                    ],
+                                },
                             ]
                         }
                     }
@@ -122,10 +154,35 @@ class DailyPredictionEngineTests(TestCase):
 
         self.assertEqual(odds["aw"], 9.0)
         self.assertEqual(odds["o25"], 1.82)
+        self.assertEqual(odds["o35"], 9.25)
         self.assertEqual(odds["x2"], 2.65)
+        self.assertEqual(odds["Cards Over 3.5"], 1.72)
+        self.assertEqual(odds["Home Team Corners Over 4.5"], 1.9)
         self.assertEqual(odds["_meta"]["aw"]["source"], "statpal")
         self.assertEqual(odds["_meta"]["aw"]["bookmaker_count"], 2)
         self.assertEqual(odds["_meta"]["o25"]["source"], "statpal")
+
+    def test_daily_prediction_markets_use_expanded_discovery_pool(self):
+        service = AlgoRunnerService()
+
+        markets = service._daily_prediction_markets(
+            {
+                "Home Team Corners Over 4.5": 1.88,
+                "Cards Over 3.5": 1.72,
+                "Unsupported Custom Market": 9.99,
+                "_meta": {},
+            }
+        )
+
+        self.assertIn("Home Team Over 1.5", markets)
+        self.assertIn("BTTS No", markets)
+        self.assertIn("Cards Over 3.5", markets)
+        self.assertIn("Booking Points Over 45.5", markets)
+        self.assertIn("Shots On Target Over 7.5", markets)
+        self.assertIn("Home Team Corners Over 4.5", markets)
+        self.assertNotIn("AH Home +0.5", markets)
+        self.assertNotIn("AH Away +0.5", markets)
+        self.assertNotIn("Unsupported Custom Market", markets)
 
     def test_prediction_scoring_hydration_restores_team_news(self):
         service = AlgoRunnerService()
@@ -394,13 +451,16 @@ class DailyPredictionEngineTests(TestCase):
             match_id="statpal:2026082930121",
             market="Away Win",
             meaning="Away team to win",
-            confidence=55,
-            raw_confidence=55,
+            confidence=66,
+            raw_confidence=34,
             odds=14.0,
             ev=2.339,
             eligible=True,
             insights={
-                "summary": "Away Win has 70% calibrated model confidence.",
+                "summary": "Away Win has 34% calibrated model confidence.",
+                "raw_probability": 0.34,
+                "calibrated_probability": 0.34,
+                "data_quality": "limited",
                 "conclusion": "Away Win is modelled, but product policy needs stronger reliability support.",
                 "positive_evidence": [
                     "Home win probability: 52%.",
@@ -419,13 +479,16 @@ class DailyPredictionEngineTests(TestCase):
             match_id="statpal:2026082930121",
             market="Under 3.5",
             meaning="3 or fewer total goals",
-            confidence=70,
-            raw_confidence=91,
+            confidence=62,
+            raw_confidence=62,
             odds=1.93,
-            ev=0.755,
+            ev=0.02,
             eligible=True,
             insights={
-                "summary": "Under 3.5 has 70% calibrated model confidence.",
+                "summary": "Under 3.5 has 62% calibrated model confidence.",
+                "raw_probability": 0.62,
+                "calibrated_probability": 0.62,
+                "data_quality": "limited",
                 "conclusion": "Under 3.5 is modelled, but product policy needs stronger reliability support.",
                 "positive_evidence": [
                     "Projected total goals: 1.68.",

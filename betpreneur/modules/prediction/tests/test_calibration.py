@@ -8,6 +8,7 @@ from betpreneur.modules.prediction.api import (
     FixturePrediction,
     GoalModelOutput,
     PredictionDiagnostics,
+    ResultProbabilityOutput,
     calibrate_probability,
     evaluate_market_probability,
     record_training_sample,
@@ -138,6 +139,23 @@ class CalibrationTests(TestCase):
         self.assertEqual(market.calibrated_probability, 0.75)
         self.assertEqual(market.confidence_score, 75)
         self.assertEqual(market.diagnostics.metadata["calibration_method"], "isotonic")
+
+    def test_low_probability_market_confidence_is_not_inverted_by_certainty(self):
+        prediction = FixturePrediction(
+            fixture_id="fixture-1",
+            result=ResultProbabilityOutput(
+                home_win=0.39,
+                draw=0.27,
+                away_win=0.34,
+                diagnostics=PredictionDiagnostics(data_quality="limited"),
+            ),
+        )
+
+        market = evaluate_market_probability(prediction, "Away Win")
+
+        self.assertEqual(market.raw_probability, 0.34)
+        self.assertEqual(market.calibrated_probability, 0.34)
+        self.assertEqual(market.confidence_score, 34)
 
     def _seed_samples(
         self,

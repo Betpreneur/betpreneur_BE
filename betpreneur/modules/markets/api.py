@@ -39,6 +39,7 @@ from .domain.capabilities import (
 # -- the daily catalogue ----------------------------------------------------
 from .domain.catalogue import (
     DAILY_MARKET_CATALOG,
+    DAILY_MARKET_DISCOVERY_POOL,
     DAILY_MARKET_FAMILY_OVERRIDES,
     DAILY_MARKET_LOOKUP,
     DAILY_MARKET_MEANINGS,
@@ -46,6 +47,7 @@ from .domain.catalogue import (
     PROVEN_DAILY_MARKETS,
     build_daily_market_scores,
     daily_catalog_entry,
+    daily_discovery_market_names,
     daily_evaluation_route,
     daily_market_family_payload,
     daily_market_names,
@@ -90,6 +92,7 @@ __all__ = [
     "CORE_MARKETS",
     "COUNT_MODEL_ENGINE",
     "DAILY_MARKET_CATALOG",
+    "DAILY_MARKET_DISCOVERY_POOL",
     "DAILY_MARKET_FAMILY_OVERRIDES",
     "DAILY_MARKET_LOOKUP",
     "DAILY_MARKET_MEANINGS",
@@ -124,6 +127,7 @@ __all__ = [
     "capabilities_from_snapshots",
     "coverage",
     "daily_catalog_entry",
+    "daily_discovery_market_names",
     "daily_evaluation_route",
     "daily_market_family_payload",
     "daily_market_names",

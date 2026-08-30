@@ -34,9 +34,9 @@ from betpreneur.modules.catalog.api import (
 from betpreneur.modules.explanations.api import CAUTION, REJECT
 from betpreneur.modules.markets.api import (
     daily_catalog_entry,
+    daily_discovery_market_names,
     daily_market_family_payload,
     daily_odds_key_map,
-    daily_scoring_market_names,
 )
 from betpreneur.modules.picks.models import (
     AlgoFixture,
@@ -934,6 +934,8 @@ class AlgoRunnerService:
             "under25_odds": "u25",
             "over35_odds": "o35",
             "under35_odds": "u35",
+            "over45_odds": "o45",
+            "under45_odds": "u45",
             "btts_yes_odds": "btts_yes",
             "btts_no_odds": "btts_no",
             "double_chance_1x_odds": "1x",
@@ -953,6 +955,8 @@ class AlgoRunnerService:
             "under25": "u25",
             "over35": "o35",
             "under35": "u35",
+            "over45": "o45",
+            "under45": "u45",
             "1x": "1x",
             "12": "12",
             "x2": "x2",
@@ -990,12 +994,41 @@ class AlgoRunnerService:
                 if odds_key:
                     self._remember_prediction_odd(odds, odds_key, odd.get("value"), source="statpal")
 
-        def remember_total(prefix, total):
+        def market_label_for_total(market_name):
+            if "shot" in market_name and "target" in market_name:
+                if "home" in market_name:
+                    return "Home Team Shots On Target"
+                if "away" in market_name:
+                    return "Away Team Shots On Target"
+                return "Shots On Target"
+            if "booking point" in market_name:
+                return "Booking Points"
+            if "card" in market_name or "booking" in market_name or "yellow" in market_name:
+                if "home" in market_name:
+                    return "Home Team Cards"
+                if "away" in market_name:
+                    return "Away Team Cards"
+                return "Cards"
+            if "corner" in market_name:
+                if "home" in market_name:
+                    return "Home Team Corners"
+                if "away" in market_name:
+                    return "Away Team Corners"
+                return "Corners"
+            if "home" in market_name and "goal" in market_name:
+                return "Home Team"
+            if "away" in market_name and "goal" in market_name:
+                return "Away Team"
+            return ""
+
+        def remember_total(prefix, total, *, market_label=""):
             if not isinstance(total, dict):
                 return
             line = total.get("line") if total.get("line") is not None else total.get("name")
             try:
-                line_text = f"{float(line):g}".replace(".", "")
+                line_value = float(line)
+                line_text = f"{line_value:g}".replace(".", "")
+                display_line = f"{line_value:g}"
             except (TypeError, ValueError):
                 return
             for odd in odds_items(total):
@@ -1003,9 +1036,29 @@ class AlgoRunnerService:
                     continue
                 odd_name = clean(odd.get("name"))
                 if odd_name == "over":
-                    self._remember_prediction_odd(odds, f"{prefix}o{line_text}", odd.get("value"), source="statpal")
+                    if prefix or not market_label:
+                        self._remember_prediction_odd(
+                            odds, f"{prefix}o{line_text}", odd.get("value"), source="statpal"
+                        )
+                    if market_label:
+                        self._remember_prediction_odd(
+                            odds,
+                            f"{market_label} Over {display_line}",
+                            odd.get("value"),
+                            source="statpal",
+                        )
                 elif odd_name == "under":
-                    self._remember_prediction_odd(odds, f"{prefix}u{line_text}", odd.get("value"), source="statpal")
+                    if prefix or not market_label:
+                        self._remember_prediction_odd(
+                            odds, f"{prefix}u{line_text}", odd.get("value"), source="statpal"
+                        )
+                    if market_label:
+                        self._remember_prediction_odd(
+                            odds,
+                            f"{market_label} Under {display_line}",
+                            odd.get("value"),
+                            source="statpal",
+                        )
 
         for market in as_list(payload.get("markets")):
             if not isinstance(market, dict):
@@ -1036,6 +1089,11 @@ class AlgoRunnerService:
                 elif market_name in {"over/under", "over under", "totals"}:
                     for total in total_items(bookmaker):
                         remember_total("", total)
+                else:
+                    market_label = market_label_for_total(market_name)
+                    if market_label:
+                        for total in total_items(bookmaker):
+                            remember_total("", total, market_label=market_label)
 
     def _statpal_prediction_odds(self, fixture):
         prematch = self._statpal_prematch_odds(fixture)
@@ -1074,10 +1132,13 @@ class AlgoRunnerService:
         return real_odds
 
     def _daily_prediction_markets(self, real_odds):
-        markets = list(daily_scoring_market_names())
-        for market in sorted(key for key in (real_odds or {}) if str(key).startswith("Corners ")):
-            if market not in markets:
-                markets.append(market)
+        markets = list(daily_discovery_market_names())
+        for key in sorted(real_odds or {}):
+            if str(key).startswith("_"):
+                continue
+            entry = daily_catalog_entry(str(key))
+            if entry and entry.enabled and entry.publish_enabled and entry.market not in markets:
+                markets.append(entry.market)
         return tuple(markets)
 
     def _prediction_market_real_odd(self, real_odds, market):
