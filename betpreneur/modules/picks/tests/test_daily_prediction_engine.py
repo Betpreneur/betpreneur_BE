@@ -737,6 +737,13 @@ class DailyPredictionEngineTests(TestCase):
             confidence=82,
             odds=1.34,
             eligible=False,
+            insights={
+                "analysis_available": True,
+                "data_status": "modelled_watchlist",
+                "raw_probability": 0.86,
+                "calibrated_probability": 0.82,
+                "summary": "Home Team Over 0.5 has 82% calibrated model confidence.",
+            },
         )
 
         compact = _compact_games_payload(run.target_date)
@@ -747,6 +754,8 @@ class DailyPredictionEngineTests(TestCase):
         compact_by_fixture = {game["fixture"]: game for game in compact["games"]}
         full_by_fixture = {game["fixture"]: game for game in full["games"]}
         self.assertEqual(compact_by_fixture["Benfica vs Estoril"]["eligible_market_count"], 0)
-        self.assertIsNone(compact_by_fixture["Benfica vs Estoril"]["top_market"])
+        self.assertEqual(compact_by_fixture["Benfica vs Estoril"]["top_market"]["market"], "Home Team Over 0.5")
+        self.assertFalse(compact_by_fixture["Benfica vs Estoril"]["top_market"]["eligible"])
         self.assertEqual(full_by_fixture["Benfica vs Estoril"]["eligible_market_count"], 0)
-        self.assertIsNone(full_by_fixture["Benfica vs Estoril"]["top_market"])
+        self.assertEqual(full_by_fixture["Benfica vs Estoril"]["top_market"]["market"], "Home Team Over 0.5")
+        self.assertFalse(full_by_fixture["Benfica vs Estoril"]["top_market"]["eligible"])

@@ -393,8 +393,8 @@ def game_summary_from_fixture(
             "backed_game_ids": user_backed_game_ids,
         },
     ).data
-    exposed_markets = [market for market in markets if market.get("eligible")]
-    top_market = next((market for market in exposed_markets if not market.get("publicly_paused")), None)
+    exposed_markets = [market for market in markets if market_analysis_displayable(market)]
+    top_market = next(iter(exposed_markets), None)
     recommended_market = next((market for market in exposed_markets if market.get("recommended")), None)
     official_pick = pick_data[0] if pick_data else None
     backed_count = (
@@ -532,6 +532,22 @@ def market_prediction_payload(prediction):
     payload["reasoning"] = _prediction_reasoning_for_market(payload)
     payload["model_verdict"] = _prediction_verdict_for_market(payload)
     return payload
+
+
+def market_analysis_displayable(market):
+    if not market or market.get("publicly_paused"):
+        return False
+    if market.get("analysis_available"):
+        return True
+    data_status = market.get("data_status")
+    if data_status and data_status != "insufficient_data":
+        return True
+    insights = market.get("insights") or {}
+    if insights.get("analysis_available"):
+        return True
+    if insights.get("raw_probability") is not None or insights.get("calibrated_probability") is not None:
+        return True
+    return False
 
 
 def _fixture_summary_for_match(algo_run, match_id):

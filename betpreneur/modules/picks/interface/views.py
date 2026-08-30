@@ -72,6 +72,7 @@ from betpreneur.modules.picks.services.presentation import (
     decimal_or_none,
     game_detail_payload,
     game_summary_from_fixture,
+    market_analysis_displayable,
     market_prediction_payload,
     normalise_council_review,
     picks_by_match_for_run,
@@ -253,7 +254,7 @@ def _fixture_summaries_for_run(algo_run):
 
     markets_by_match = {}
     predictions = (
-        MarketPrediction.objects.filter(run=algo_run, eligible=True)
+        MarketPrediction.objects.filter(run=algo_run)
         .select_related("selected_pick")
         .order_by("match_id", "-confidence", "-ev", "market")
     )
@@ -289,7 +290,7 @@ def _fixture_summaries_for_run(algo_run):
             "corner_profile": fixture.corner_profile or {},
             "insights": fixture.insights or {},
             "source_payload": fixture.source_payload or {},
-            "market_count": len(markets),
+            "market_count": fixture.market_count or len(markets),
             "markets_70_plus": sum(1 for market in markets if (market.get("confidence") or 0) >= 70),
             "markets_65_plus": sum(1 for market in markets if (market.get("confidence") or 0) >= 65),
             "markets": markets,
@@ -532,10 +533,10 @@ def _compact_games_payload(target_date, request=None):
     backed_game_counts, backed_game_ids, _user_markets = _bulk_game_back_context(match_ids, request)
     picks_by_match = picks_by_match_for_run(algo_run)
 
-    base_predictions = MarketPrediction.objects.filter(run=algo_run, eligible=True).exclude(market__in=EXCLUDED_MARKETS)
+    base_predictions = MarketPrediction.objects.filter(run=algo_run).exclude(market__in=EXCLUDED_MARKETS)
     eligible_counts = {
         str(item["match_id"] or ""): item["eligible_count"]
-        for item in base_predictions.values("match_id").annotate(eligible_count=Count("id"))
+        for item in base_predictions.filter(eligible=True).values("match_id").annotate(eligible_count=Count("id"))
     }
     top_markets_by_match = {}
     top_market_ranks = {}
@@ -554,12 +555,12 @@ def _compact_games_payload(target_date, request=None):
         payload["publicly_paused"] = market_publicly_paused(payload.get("market"))
         payload.update(_apply_council_recommendation_gate(payload))
         payload["display_score"] = round(market_display_score(payload)[0], 3)
-        if not payload.get("publicly_paused"):
+        if market_analysis_displayable(payload):
             rank = _game_market_rank(payload)
             if rank > top_market_ranks.get(prediction_match_id, ()):
                 top_market_ranks[prediction_match_id] = rank
                 top_markets_by_match[prediction_match_id] = payload
-        if payload.get("recommended"):
+        if payload.get("recommended") and market_analysis_displayable(payload):
             rank = _game_market_rank(payload)
             if rank > recommended_market_ranks.get(prediction_match_id, ()):
                 recommended_market_ranks[prediction_match_id] = rank

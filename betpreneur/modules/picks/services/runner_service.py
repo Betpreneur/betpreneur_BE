@@ -1216,11 +1216,16 @@ class AlgoRunnerService:
         return list(dict.fromkeys(str(flag) for flag in flags if flag))
 
     def _prediction_all_games_eligible(self, probability, value, all_games):
-        warnings = {str(item) for item in (probability.warnings or ())}
-        pricing_warnings = {str(item) for item in (value.pricing_warnings or ())}
-        if "fixture_not_found" in warnings or probability.effective_probability is None:
+        if not self._prediction_analysis_available(probability, all_games):
             return False
+        pricing_warnings = {str(item) for item in (value.pricing_warnings or ())}
         if not value.available_odds or "available_odds_missing" in pricing_warnings:
+            return False
+        return True
+
+    def _prediction_analysis_available(self, probability, all_games):
+        warnings = {str(item) for item in (probability.warnings or ())}
+        if "fixture_not_found" in warnings or probability.effective_probability is None:
             return False
         if {"home_team_profile", "away_team_profile"}.issubset(warnings):
             return False
@@ -1235,8 +1240,8 @@ class AlgoRunnerService:
             return False
         return bool((all_games.data_confidence or 0) > 0)
 
-    def _prediction_data_status(self, probability, value, top_picks, all_games_eligible):
-        if not all_games_eligible:
+    def _prediction_data_status(self, probability, value, top_picks, analysis_available):
+        if not analysis_available:
             return "insufficient_data"
         if top_picks.publishable:
             return "top_pick_ready"
@@ -1255,6 +1260,7 @@ class AlgoRunnerService:
         top_picks,
         *,
         all_games_eligible=False,
+        analysis_available=False,
     ):
         family_payload = daily_market_family_payload(probability.market)
         positive = list(dict.fromkeys([*probability.explanation_facts, *value.explanation_facts]))
@@ -1272,7 +1278,7 @@ class AlgoRunnerService:
             conclusion = f"{probability.market} is modelled, but product policy needs stronger price or reliability support."
         else:
             conclusion = f"{probability.market} does not have enough model support yet."
-        data_status = self._prediction_data_status(probability, value, top_picks, all_games_eligible)
+        data_status = self._prediction_data_status(probability, value, top_picks, analysis_available)
         policy_decision = "approve" if top_picks.publishable else "caution" if all_games_eligible else "reject"
         policy_tier = top_picks.tier if all_games_eligible else ""
         return {
@@ -1301,7 +1307,7 @@ class AlgoRunnerService:
                 "reasons": list(dict.fromkeys([*list(top_picks.reasons or ()), *list(top_picks.warnings or ())])),
                 "reviewers": ["prediction_policy"],
             },
-            "analysis_available": all_games_eligible,
+            "analysis_available": analysis_available,
             "data_status": data_status,
             "daily_evaluation_route": {
                 "family": family_payload.get("market_family"),
@@ -1357,6 +1363,7 @@ class AlgoRunnerService:
         top_picks = assess_top_picks_policy(probability, value, recommendation)
         odds = float(real_odd) if real_odd else self._prediction_estimated_odds(probability)
         confidence = int(round(probability.confidence_score or 0))
+        analysis_available = self._prediction_analysis_available(probability, all_games)
         all_games_eligible = self._prediction_all_games_eligible(probability, value, all_games)
         insights = self._prediction_market_insights(
             probability,
@@ -1365,6 +1372,7 @@ class AlgoRunnerService:
             all_games,
             top_picks,
             all_games_eligible=all_games_eligible,
+            analysis_available=analysis_available,
         )
         entry = daily_catalog_entry(probability.market)
         family_payload = daily_market_family_payload(probability.market)
@@ -1381,7 +1389,7 @@ class AlgoRunnerService:
             "odds_source": odds_source,
             "proven": bool(entry and entry.proven),
             "eligible": all_games_eligible,
-            "analysis_available": all_games_eligible,
+            "analysis_available": analysis_available,
             "data_status": insights["data_status"],
             "risk_flags": self._prediction_policy_flags(
                 probability,
