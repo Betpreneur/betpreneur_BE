@@ -393,10 +393,9 @@ def game_summary_from_fixture(
             "backed_game_ids": user_backed_game_ids,
         },
     ).data
-    top_market = next((market for market in markets if not market.get("publicly_paused")), None)
-    if top_market is None:
-        top_market = markets[0] if markets else None
-    recommended_market = next((market for market in markets if market.get("recommended")), None)
+    exposed_markets = [market for market in markets if market.get("eligible")]
+    top_market = next((market for market in exposed_markets if not market.get("publicly_paused")), None)
+    recommended_market = next((market for market in exposed_markets if market.get("recommended")), None)
     official_pick = pick_data[0] if pick_data else None
     backed_count = (
         int((backed_game_counts or {}).get(match_id, 0) or 0)
@@ -571,11 +570,7 @@ def _fixture_summary_for_match(algo_run, match_id):
 
     markets = [
         market_prediction_payload(prediction)
-        for prediction in MarketPrediction.objects.filter(
-            run=algo_run,
-            match_id=target_match_id,
-            eligible=True,
-        )
+        for prediction in MarketPrediction.objects.filter(run=algo_run, match_id=target_match_id)
         .select_related("selected_pick")
         .order_by("-confidence", "-ev", "market")
         if prediction.market not in EXCLUDED_MARKETS

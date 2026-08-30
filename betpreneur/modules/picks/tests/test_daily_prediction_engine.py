@@ -527,4 +527,47 @@ class DailyPredictionEngineTests(TestCase):
 
         self.assertEqual(game["top_market"]["market"], "Under 3.5")
         self.assertEqual(detail["top_market"]["market"], "Under 3.5")
+        self.assertIn("Away Team Goals Over 3.5", {market["market"] for market in detail["markets"]})
         self.assertIsNone(game["recommended_market"])
+
+    def test_game_detail_does_not_promote_ineligible_market_as_top_market(self):
+        run = AlgoRun.objects.create(target_date=date(2026, 8, 30), status=AlgoRun.Status.SUCCESS)
+        AlgoFixture.objects.create(
+            run=run,
+            match_date=run.target_date,
+            fixture="Manchester Utd vs Ipswich",
+            home_team="Manchester Utd",
+            away_team="Ipswich",
+            league="Premier League",
+            country="england",
+            kickoff="15:30",
+            match_id="statpal:2026083018487",
+            market_count=1,
+        )
+        MarketPrediction.objects.create(
+            run=run,
+            match_date=run.target_date,
+            fixture="Manchester Utd vs Ipswich",
+            home_team="Manchester Utd",
+            away_team="Ipswich",
+            league="Premier League",
+            match_id="statpal:2026083018487",
+            market="Home Team Corners Over 2.5",
+            meaning="Home team to finish with more than 2.5 corners",
+            confidence=70,
+            raw_confidence=89,
+            odds=1.17,
+            odds_source="estimated",
+            eligible=False,
+            insights={
+                "summary": "Home Team Corners Over 2.5 has 70% calibrated model confidence.",
+                "data_status": "insufficient_data",
+                "analysis_available": False,
+            },
+        )
+
+        detail = game_detail_payload(run.target_date, "statpal:2026083018487")["game"]
+
+        self.assertIsNone(detail["top_market"])
+        self.assertIsNone(detail["best_market"])
+        self.assertEqual(detail["markets"][0]["market"], "Home Team Corners Over 2.5")
