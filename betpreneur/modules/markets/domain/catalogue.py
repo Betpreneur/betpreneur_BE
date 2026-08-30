@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from decimal import Decimal, InvalidOperation
 
 from .evaluation import assessment_type_for, evaluator_for
 from .taxonomy import describe_market
@@ -144,6 +145,26 @@ EXCLUDED_DAILY_MARKETS = {
 }
 
 
+def _decimal_line(value) -> Decimal | None:
+    if value in (None, ""):
+        return None
+    try:
+        return Decimal(str(value))
+    except (InvalidOperation, TypeError, ValueError):
+        return None
+
+
+def _daily_line_allowed(market: str) -> bool:
+    descriptor = describe_market(market)
+    line = _decimal_line(descriptor.line)
+    side = (descriptor.side or descriptor.selection or "").lower()
+    if descriptor.family == "total_goals" and line is not None:
+        return Decimal("1.5") <= line <= Decimal("4.5")
+    if descriptor.family == "team_corners" and side == "over" and line is not None:
+        return line >= Decimal("2.5")
+    return True
+
+
 def _daily_group_for_family(family: str) -> str:
     if family in {"match_result", "double_chance", "draw_no_bet", "asian_handicap", "handicap"}:
         return "result"
@@ -194,6 +215,8 @@ def _dynamic_market_meaning(market: str) -> str:
 
 def daily_catalog_entry(market: str) -> DailyMarketCatalogEntry | None:
     market = str(market or "").strip()
+    if not _daily_line_allowed(market):
+        return None
     if market in DAILY_MARKET_LOOKUP:
         return DAILY_MARKET_LOOKUP[market]
     if market.startswith("Corners Over "):

@@ -112,7 +112,6 @@ SLIP_REVIEW_LEG_CACHE_WAIT_SECONDS = _env_int("SLIP_REVIEW_LEG_CACHE_WAIT_SECOND
 
 
 PICK_DETAIL_HISTORY_DAYS = 90
-COMPACT_MARKET_CANDIDATE_LIMIT = 12
 
 
 
@@ -390,18 +389,16 @@ def _compact_market_payload(market):
 def _compact_fixture_card(
     fixture,
     *,
-    markets_by_match,
+    top_markets_by_match,
+    recommended_markets_by_match,
     picks_by_match,
     eligible_counts=None,
     backed_game_counts=None,
     backed_game_ids=None,
 ):
     match_id = str(fixture.match_id or "")
-    markets = sorted(markets_by_match.get(match_id, []), key=_game_market_rank, reverse=True)
-    top_market = next((market for market in markets if not market.get("publicly_paused")), None)
-    if top_market is None:
-        top_market = markets[0] if markets else None
-    recommended_market = next((market for market in markets if market.get("recommended")), None)
+    top_market = top_markets_by_match.get(match_id)
+    recommended_market = recommended_markets_by_match.get(match_id)
     match_picks = sorted(picks_by_match.get(match_id, []), key=_top_pick_sort_key, reverse=True)
     pick_data = [
         _compact_pick_payload(
@@ -540,8 +537,10 @@ def _compact_games_payload(target_date, request=None):
         str(item["match_id"] or ""): item["eligible_count"]
         for item in base_predictions.values("match_id").annotate(eligible_count=Count("id"))
     }
-    markets_by_match = {}
-    candidate_counts = {}
+    top_markets_by_match = {}
+    top_market_ranks = {}
+    recommended_markets_by_match = {}
+    recommended_market_ranks = {}
     predictions = base_predictions.select_related("selected_pick").order_by(
         "match_id",
         "-published",
@@ -551,20 +550,26 @@ def _compact_games_payload(target_date, request=None):
     )
     for prediction in predictions.iterator(chunk_size=200):
         prediction_match_id = str(prediction.match_id or "")
-        count = candidate_counts.get(prediction_match_id, 0)
-        if count >= COMPACT_MARKET_CANDIDATE_LIMIT:
-            continue
-        candidate_counts[prediction_match_id] = count + 1
         payload = market_prediction_payload(prediction)
         payload["publicly_paused"] = market_publicly_paused(payload.get("market"))
         payload.update(_apply_council_recommendation_gate(payload))
         payload["display_score"] = round(market_display_score(payload)[0], 3)
-        markets_by_match.setdefault(prediction_match_id, []).append(payload)
+        if not payload.get("publicly_paused"):
+            rank = _game_market_rank(payload)
+            if rank > top_market_ranks.get(prediction_match_id, ()):
+                top_market_ranks[prediction_match_id] = rank
+                top_markets_by_match[prediction_match_id] = payload
+        if payload.get("recommended"):
+            rank = _game_market_rank(payload)
+            if rank > recommended_market_ranks.get(prediction_match_id, ()):
+                recommended_market_ranks[prediction_match_id] = rank
+                recommended_markets_by_match[prediction_match_id] = payload
 
     games = [
         _compact_fixture_card(
             fixture,
-            markets_by_match=markets_by_match,
+            top_markets_by_match=top_markets_by_match,
+            recommended_markets_by_match=recommended_markets_by_match,
             picks_by_match=picks_by_match,
             eligible_counts=eligible_counts,
             backed_game_counts=backed_game_counts,

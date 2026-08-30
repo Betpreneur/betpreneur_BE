@@ -557,6 +557,31 @@ class DailyPredictionEngineTests(TestCase):
                 "council_review": no_edge_review,
             },
         )
+        for index in range(13):
+            MarketPrediction.objects.create(
+                run=run,
+                match_date=run.target_date,
+                fixture="Celtic vs Falkirk",
+                home_team="Celtic",
+                away_team="Falkirk",
+                league="Premier League",
+                match_id="statpal:2026082930121",
+                market=f"Over {index + 5}.5",
+                meaning="High goal line test market",
+                confidence=90 - index,
+                raw_confidence=90 - index,
+                odds=1.2,
+                ev=-0.1,
+                eligible=True,
+                risk_flags=["goal_line_boundary"],
+                insights={
+                    "summary": "High confidence market that should lose after display policy penalties.",
+                    "raw_probability": 0.9,
+                    "calibrated_probability": 0.9,
+                    "data_quality": "limited",
+                    "council_review": no_edge_review,
+                },
+            )
         MarketPrediction.objects.create(
             run=run,
             match_date=run.target_date,

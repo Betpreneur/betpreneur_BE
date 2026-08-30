@@ -118,12 +118,28 @@ class DailyMarketCatalogTests(SimpleTestCase):
 
         self.assertIn("Home Team Over 1.5", markets)
         self.assertIn("Away Team Under 2.5", markets)
+        self.assertNotIn("Over 0.5", markets)
+        self.assertNotIn("Under 5.5", markets)
         self.assertIn("Corners Over 9.5", markets)
+        self.assertNotIn("Home Team Corners Over 1.5", markets)
+        self.assertIn("Home Team Corners Over 2.5", markets)
+        self.assertNotIn("Away Team Corners Over 1.5", markets)
+        self.assertIn("Away Team Corners Over 2.5", markets)
         self.assertIn("Cards Over 3.5", markets)
         self.assertIn("Booking Points Over 45.5", markets)
         self.assertIn("Shots On Target Over 7.5", markets)
         self.assertNotIn("AH Home +0.5", markets)
         self.assertNotIn("AH Away +0.5", markets)
+
+    def test_daily_dynamic_markets_reject_soft_goal_and_team_corner_lines(self):
+        self.assertIsNone(daily_catalog_entry("Over 0.5"))
+        self.assertIsNone(daily_catalog_entry("Under 5.5"))
+        self.assertIsNone(daily_catalog_entry("Home Team Corners Over 1.5"))
+        self.assertIsNone(daily_catalog_entry("Away Team Corners Over 1.5"))
+        self.assertIsNotNone(daily_catalog_entry("Over 1.5"))
+        self.assertIsNotNone(daily_catalog_entry("Under 4.5"))
+        self.assertIsNotNone(daily_catalog_entry("Home Team Corners Over 2.5"))
+        self.assertIsNotNone(daily_catalog_entry("Away Team Corners Over 2.5"))
 
     def test_dynamic_count_market_entry_is_supported_by_catalog(self):
         entry = daily_catalog_entry("Home Team Shots On Target Over 3.5")
@@ -138,7 +154,13 @@ class DailyMarketCatalogTests(SimpleTestCase):
         fixed_values = dict.fromkeys(daily_market_names(include_excluded=True), 61)
         scores = build_daily_market_scores(
             fixed_values,
-            {"Corners Under 12.5": 67, "Unsupported Custom Market": 90},
+            {
+                "Corners Under 12.5": 67,
+                "Over 0.5": 92,
+                "Under 5.5": 88,
+                "Home Team Corners Over 1.5": 89,
+                "Unsupported Custom Market": 90,
+            },
         )
 
         self.assertEqual(set(daily_scoring_market_names()), set(daily_market_names()))
@@ -146,6 +168,9 @@ class DailyMarketCatalogTests(SimpleTestCase):
         self.assertIn("Over 3.5", scores)
         self.assertIn("Over 4.5", scores)
         self.assertIn("Corners Under 12.5", scores)
+        self.assertNotIn("Over 0.5", scores)
+        self.assertNotIn("Under 5.5", scores)
+        self.assertNotIn("Home Team Corners Over 1.5", scores)
         self.assertNotIn("DC: 1X", scores)
         self.assertNotIn("DC: X2", scores)
         self.assertNotIn("AH Home +0.5", scores)
