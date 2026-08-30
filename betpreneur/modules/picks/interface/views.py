@@ -112,6 +112,7 @@ SLIP_REVIEW_LEG_CACHE_WAIT_SECONDS = _env_int("SLIP_REVIEW_LEG_CACHE_WAIT_SECOND
 
 
 PICK_DETAIL_HISTORY_DAYS = 90
+COMPACT_MARKET_CANDIDATE_LIMIT = 12
 
 
 
@@ -540,13 +541,25 @@ def _compact_games_payload(target_date, request=None):
         for item in base_predictions.values("match_id").annotate(eligible_count=Count("id"))
     }
     markets_by_match = {}
-    predictions = base_predictions.select_related("selected_pick").order_by("match_id", "-confidence", "-ev", "market")
-    for prediction in predictions:
+    candidate_counts = {}
+    predictions = base_predictions.select_related("selected_pick").order_by(
+        "match_id",
+        "-published",
+        "-confidence",
+        "-ev",
+        "market",
+    )
+    for prediction in predictions.iterator(chunk_size=200):
+        prediction_match_id = str(prediction.match_id or "")
+        count = candidate_counts.get(prediction_match_id, 0)
+        if count >= COMPACT_MARKET_CANDIDATE_LIMIT:
+            continue
+        candidate_counts[prediction_match_id] = count + 1
         payload = market_prediction_payload(prediction)
         payload["publicly_paused"] = market_publicly_paused(payload.get("market"))
         payload.update(_apply_council_recommendation_gate(payload))
         payload["display_score"] = round(market_display_score(payload)[0], 3)
-        markets_by_match.setdefault(str(prediction.match_id or ""), []).append(payload)
+        markets_by_match.setdefault(prediction_match_id, []).append(payload)
 
     games = [
         _compact_fixture_card(
