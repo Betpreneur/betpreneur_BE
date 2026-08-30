@@ -6,6 +6,7 @@ from django.test import TestCase
 
 from betpreneur.modules.picks.interface.views import _compact_games_payload
 from betpreneur.modules.picks.models import AlgoFixture, AlgoRun, MarketPrediction, Pick
+from betpreneur.modules.picks.services.presentation import game_detail_payload
 from betpreneur.modules.picks.services.runner_service import AlgoRunnerService
 from betpreneur.modules.prediction.api import (
     CountModelOutput,
@@ -477,6 +478,28 @@ class DailyPredictionEngineTests(TestCase):
             away_team="Falkirk",
             league="Premier League",
             match_id="statpal:2026082930121",
+            market="Away Team Goals Over 3.5",
+            meaning="Away team to score 4+ goals",
+            confidence=95,
+            raw_confidence=95,
+            odds=22.0,
+            ev=3.5,
+            eligible=False,
+            insights={
+                "summary": "This market should not be exposed because it is not eligible.",
+                "raw_probability": 0.95,
+                "calibrated_probability": 0.95,
+                "data_quality": "unavailable",
+            },
+        )
+        MarketPrediction.objects.create(
+            run=run,
+            match_date=run.target_date,
+            fixture="Celtic vs Falkirk",
+            home_team="Celtic",
+            away_team="Falkirk",
+            league="Premier League",
+            match_id="statpal:2026082930121",
             market="Under 3.5",
             meaning="3 or fewer total goals",
             confidence=62,
@@ -500,6 +523,8 @@ class DailyPredictionEngineTests(TestCase):
 
         payload = _compact_games_payload(run.target_date)
         game = payload["games"][0]
+        detail = game_detail_payload(run.target_date, "statpal:2026082930121")["game"]
 
         self.assertEqual(game["top_market"]["market"], "Under 3.5")
+        self.assertEqual(detail["top_market"]["market"], "Under 3.5")
         self.assertIsNone(game["recommended_market"])

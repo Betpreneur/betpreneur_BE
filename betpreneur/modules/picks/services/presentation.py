@@ -571,7 +571,11 @@ def _fixture_summary_for_match(algo_run, match_id):
 
     markets = [
         market_prediction_payload(prediction)
-        for prediction in MarketPrediction.objects.filter(run=algo_run, match_id=target_match_id)
+        for prediction in MarketPrediction.objects.filter(
+            run=algo_run,
+            match_id=target_match_id,
+            eligible=True,
+        )
         .select_related("selected_pick")
         .order_by("-confidence", "-ev", "market")
         if prediction.market not in EXCLUDED_MARKETS
