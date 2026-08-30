@@ -4,7 +4,7 @@ from unittest.mock import patch
 
 from django.test import TestCase
 
-from betpreneur.modules.picks.interface.views import _compact_games_payload
+from betpreneur.modules.picks.interface.views import _all_games_payload, _compact_games_payload
 from betpreneur.modules.picks.models import AlgoFixture, AlgoRun, MarketPrediction, Pick
 from betpreneur.modules.picks.services.presentation import game_detail_payload
 from betpreneur.modules.picks.services.runner_service import AlgoRunnerService
@@ -683,3 +683,70 @@ class DailyPredictionEngineTests(TestCase):
         self.assertIsNone(detail["top_market"])
         self.assertIsNone(detail["best_market"])
         self.assertEqual(detail["markets"][0]["market"], "Home Team Corners Over 2.5")
+
+    def test_all_games_keeps_scored_fixtures_without_eligible_markets(self):
+        run = AlgoRun.objects.create(target_date=date(2026, 8, 31), status=AlgoRun.Status.SUCCESS)
+        AlgoFixture.objects.create(
+            run=run,
+            match_date=run.target_date,
+            fixture="Aston Villa vs Arsenal",
+            home_team="Aston Villa",
+            away_team="Arsenal",
+            league="Premier League",
+            country="england",
+            kickoff="19:00",
+            match_id="statpal:2026083118010",
+            status=AlgoFixture.Status.SCORED,
+            market_count=1,
+        )
+        AlgoFixture.objects.create(
+            run=run,
+            match_date=run.target_date,
+            fixture="Benfica vs Estoril",
+            home_team="Benfica",
+            away_team="Estoril",
+            league="Portuguese Liga",
+            country="portugal",
+            kickoff="19:15",
+            match_id="statpal:2026083128584",
+            status=AlgoFixture.Status.SCORED,
+            market_count=1,
+        )
+        MarketPrediction.objects.create(
+            run=run,
+            match_date=run.target_date,
+            fixture="Aston Villa vs Arsenal",
+            home_team="Aston Villa",
+            away_team="Arsenal",
+            league="Premier League",
+            match_id="statpal:2026083118010",
+            market="Over 2.5",
+            confidence=72,
+            odds=1.8,
+            eligible=True,
+        )
+        MarketPrediction.objects.create(
+            run=run,
+            match_date=run.target_date,
+            fixture="Benfica vs Estoril",
+            home_team="Benfica",
+            away_team="Estoril",
+            league="Portuguese Liga",
+            match_id="statpal:2026083128584",
+            market="Home Team Over 0.5",
+            confidence=82,
+            odds=1.34,
+            eligible=False,
+        )
+
+        compact = _compact_games_payload(run.target_date)
+        full = _all_games_payload(run.target_date)
+
+        self.assertEqual(compact["summary"]["game_count"], 2)
+        self.assertEqual(full["summary"]["game_count"], 2)
+        compact_by_fixture = {game["fixture"]: game for game in compact["games"]}
+        full_by_fixture = {game["fixture"]: game for game in full["games"]}
+        self.assertEqual(compact_by_fixture["Benfica vs Estoril"]["eligible_market_count"], 0)
+        self.assertIsNone(compact_by_fixture["Benfica vs Estoril"]["top_market"])
+        self.assertEqual(full_by_fixture["Benfica vs Estoril"]["eligible_market_count"], 0)
+        self.assertIsNone(full_by_fixture["Benfica vs Estoril"]["top_market"])
