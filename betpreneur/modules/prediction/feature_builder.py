@@ -16,6 +16,7 @@ from django.utils import timezone
 from betpreneur.modules.catalog.api import (
     FixtureCache,
     StatPalFixtureSnapshot,
+    normalize_referee_name,
     team_intelligence_service,
 )
 from betpreneur.modules.scoring.api import (
@@ -90,6 +91,7 @@ def build_fixture_features(fixture=None, *, fixture_id: str = "") -> FixtureFeat
         fixture_id=resolved_id,
     )
     snapshots = _snapshot_payloads(fixture_obj=fixture_obj, fixture_id=resolved_id)
+    referee = _referee_context(fixture_payload, snapshots)
     league_features = _league_features(intelligence, goal_model=goal_model)
     freshness = _freshness_payload(
         intelligence=intelligence,
@@ -97,6 +99,7 @@ def build_fixture_features(fixture=None, *, fixture_id: str = "") -> FixtureFeat
         home=home_features,
         away=away_features,
         snapshots=snapshots,
+        referee=referee,
     )
 
     return FixtureFeatureSet(
@@ -129,6 +132,7 @@ def build_fixture_features(fixture=None, *, fixture_id: str = "") -> FixtureFeat
             },
             "data_freshness": freshness,
             "provider_quality": _provider_quality(intelligence, freshness),
+            "referee": referee,
         },
         diagnostics=_diagnostics(
             intelligence=intelligence,
@@ -136,6 +140,7 @@ def build_fixture_features(fixture=None, *, fixture_id: str = "") -> FixtureFeat
             home=home_features,
             away=away_features,
             snapshots=snapshots,
+            referee=referee,
             fixture_found=fixture_obj is not None or bool(fixture_payload),
         ),
     )
@@ -568,6 +573,85 @@ def _snapshot_payloads(*, fixture_obj: FixtureCache | None, fixture_id: str) -> 
     }
 
 
+def _referee_context(fixture_payload: dict[str, Any], snapshots: dict[str, Any]) -> dict[str, Any]:
+    referee_payload = fixture_payload.get("referee") if isinstance(fixture_payload.get("referee"), dict) else {}
+    match_info = fixture_payload.get("match_info") if isinstance(fixture_payload.get("match_info"), dict) else {}
+    match_info_referee = match_info.get("referee")
+    if isinstance(match_info_referee, dict):
+        match_info_referee = match_info_referee.get("name")
+    detailed = (
+        (snapshots.get("by_type") or {})
+        .get(StatPalFixtureSnapshot.SnapshotType.DETAILED_STATS, {})
+        .get("summary")
+        or {}
+    )
+    referee_name = str(
+        referee_payload.get("name")
+        or detailed.get("referee_name")
+        or match_info_referee
+        or ""
+    ).strip()
+    referee_key = normalize_referee_name(referee_name)
+    referee_id = str(referee_payload.get("id") or detailed.get("referee_id") or "").strip()
+    if not referee_name and not referee_id:
+        return {"available": False}
+
+    query = StatPalFixtureSnapshot.objects.filter(
+        snapshot_type=StatPalFixtureSnapshot.SnapshotType.DETAILED_STATS,
+        status="available",
+    )
+    fixture_id = str(fixture_payload.get("match_id") or "").strip()
+    provider_match_id = str(fixture_payload.get("provider_match_id") or "").strip()
+    current_ids = {value for value in (fixture_id, provider_match_id, fixture_id.removeprefix("statpal:")) if value}
+    if current_ids:
+        query = query.exclude(Q(match_id__in=current_ids) | Q(provider_match_id__in=current_ids))
+    if referee_id:
+        query = query.filter(Q(summary__referee_id=referee_id) | Q(payload__referee__id=referee_id))
+    elif referee_key:
+        query = query.filter(
+            Q(summary__referee_normalized=referee_key)
+            | Q(summary__referee_name__iexact=referee_name)
+            | Q(payload__referee__name__iexact=referee_name)
+            | Q(payload__referee_normalized__name__iexact=referee_name)
+            | Q(payload__match_info__referee__iexact=referee_name)
+        )
+
+    league_id = str(
+        fixture_payload.get("statpal_provider_competition_id")
+        or fixture_payload.get("provider_competition_id")
+        or fixture_payload.get("league_id")
+        or fixture_payload.get("code")
+        or ""
+    ).strip()
+    if league_id:
+        query = query.filter(Q(provider_competition_id=league_id) | Q(payload__provider_competition_id=league_id))
+
+    cards: list[float] = []
+    booking_points: list[float] = []
+    for row in query.order_by("-fetched_at", "-updated_at")[:50]:
+        summary = row.summary or {}
+        total_cards = _float_or_none(summary.get("total_cards"))
+        points = _float_or_none(summary.get("booking_points"))
+        if total_cards is not None and 0 <= total_cards <= 12:
+            cards.append(total_cards)
+        if points is not None and 0 <= points <= 140:
+            booking_points.append(points)
+
+    payload = {
+        "available": True,
+        "name": referee_name,
+        "normalized": referee_key,
+        "id": referee_id,
+        "sample_matches": len(cards),
+        "avg_cards_per_match": round(sum(cards) / len(cards), 3) if cards else None,
+        "avg_booking_points": round(sum(booking_points) / len(booking_points), 3) if booking_points else None,
+        "source": "statpal_detailed_stats",
+    }
+    if not cards:
+        payload["warning"] = "referee_card_history_missing"
+    return payload
+
+
 def _freshness_payload(
     *,
     intelligence: dict[str, Any],
@@ -575,6 +659,7 @@ def _freshness_payload(
     home: dict[str, Any],
     away: dict[str, Any],
     snapshots: dict[str, Any],
+    referee: dict[str, Any],
 ) -> dict[str, Any]:
     statuses = {
         "team_intelligence": intelligence.get("status") or "missing",
@@ -586,6 +671,11 @@ def _freshness_payload(
         "lineups": "fresh" if home["lineup"].get("available") or away["lineup"].get("available") else "missing",
         "player_availability": "fresh"
         if home["availability"].get("available") or away["availability"].get("available")
+        else "missing",
+        "referee_context": "fresh"
+        if referee.get("avg_cards_per_match")
+        else "partial"
+        if referee.get("available")
         else "missing",
     }
     return {
@@ -612,6 +702,7 @@ def _diagnostics(
     home: dict[str, Any],
     away: dict[str, Any],
     snapshots: dict[str, Any],
+    referee: dict[str, Any],
     fixture_found: bool,
 ) -> PredictionDiagnostics:
     warnings: list[str] = []
@@ -624,6 +715,10 @@ def _diagnostics(
         warnings.append("prematch_odds_snapshot_missing")
     if not home["lineup"].get("available") and not away["lineup"].get("available"):
         warnings.append("lineup_snapshot_missing")
+    if not referee.get("available"):
+        warnings.append("referee_context_missing")
+    elif not referee.get("avg_cards_per_match"):
+        warnings.append("referee_card_history_missing")
 
     data_quality = _worst_quality(
         [
@@ -644,6 +739,7 @@ def _diagnostics(
         metadata={
             "team_intelligence_status": intelligence.get("status"),
             "goal_model_quality": goal_model.get("data_quality"),
+            "referee": referee,
         },
     )
 

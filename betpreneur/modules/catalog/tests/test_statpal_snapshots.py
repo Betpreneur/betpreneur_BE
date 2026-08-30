@@ -734,6 +734,8 @@ class StatPalSnapshotServiceTests(TestCase):
         self.assertEqual(row.summary["home_xg"], 0.41)
         self.assertEqual(row.summary["away_xg"], 4.24)
         self.assertEqual(row.summary["expected_goals"], 4.65)
+        self.assertEqual(row.summary["referee_name"], "Michael Salisbury, England")
+        self.assertEqual(row.summary["referee_normalized"], "michael salisbury")
         self.assertEqual(row.summary["home_corners"], 1)
         self.assertEqual(row.summary["away_corners"], 9)
         self.assertEqual(row.summary["home_fouls"], 17)

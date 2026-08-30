@@ -480,6 +480,13 @@ def _count_facts(
         facts.append(f"Home team averages {home:.2f} {label}.")
     if away is not None:
         facts.append(f"Away team averages {away:.2f} {label}.")
+    if event == "cards":
+        referee = ((prediction.features.features if prediction.features else {}) or {}).get("referee") or {}
+        referee_cards = _float(referee.get("avg_cards_per_match"))
+        sample = _int(referee.get("sample_matches"))
+        if referee_cards is not None and sample:
+            name = str(referee.get("name") or "The assigned referee").strip()
+            facts.append(f"{name} averages {referee_cards:.2f} cards across {sample} tracked matches.")
     line = _float(descriptor.line)
     if line is not None and expected is not None and descriptor.side in {"over", "under"}:
         direction = "below" if line < expected else "above"

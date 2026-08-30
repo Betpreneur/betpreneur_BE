@@ -22,6 +22,16 @@ def normalize_fixture_text(value) -> str:
     return re.sub(r"[^a-z0-9]+", " ", text).strip()
 
 
+def normalize_referee_name(value) -> str:
+    """Fold provider referee names to a comparable key.
+
+    StatPal often appends the country, e.g. ``Michael Salisbury, England``.
+    The country is useful for display but noisy for historical matching.
+    """
+    text = normalize_fixture_text(str(value or "").split(",", 1)[0])
+    return text
+
+
 def parse_match_query(value) -> tuple[str, str, str]:
     """Split a free-text search into (home, away, normalized_whole).
 

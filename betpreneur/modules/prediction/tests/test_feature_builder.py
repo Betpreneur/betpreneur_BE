@@ -48,6 +48,7 @@ class FixtureFeatureBuilderTests(TestCase):
                 "league_id": "3037",
                 "home_team_id": "home-1",
                 "away_team_id": "away-1",
+                "referee": {"name": "Michael Salisbury"},
             },
         )
         TeamSeasonProfile.objects.create(
@@ -178,6 +179,22 @@ class FixtureFeatureBuilderTests(TestCase):
             summary={"markets": 14},
             fetched_at=timezone.now(),
         )
+        for index, cards in enumerate((5, 4, 6), start=1):
+            StatPalFixtureSnapshot.objects.create(
+                match_id=f"historic-{index}",
+                provider_match_id=f"historic-{index}",
+                provider_competition_id="3037",
+                snapshot_type=StatPalFixtureSnapshot.SnapshotType.DETAILED_STATS,
+                status="available",
+                source_endpoint="SOCCER_DETAILED_STATS",
+                summary={
+                    "referee_name": "Michael Salisbury, England",
+                    "referee_normalized": "michael salisbury",
+                    "total_cards": cards,
+                    "booking_points": cards * 10,
+                },
+                fetched_at=timezone.now(),
+            )
 
     def test_build_fixture_features_returns_shared_feature_set(self):
         feature_set = build_fixture_features(self.fixture)
@@ -198,6 +215,10 @@ class FixtureFeatureBuilderTests(TestCase):
         self.assertEqual(features["lineups"]["home"]["formation"], "4-3-3")
         self.assertEqual(features["player_availability"]["home"]["by_status"]["out"], 1)
         self.assertEqual(features["odds_snapshots"]["prematch"]["summary"]["markets"], 14)
+        self.assertEqual(features["referee"]["name"], "Michael Salisbury")
+        self.assertEqual(features["referee"]["normalized"], "michael salisbury")
+        self.assertEqual(features["referee"]["sample_matches"], 3)
+        self.assertEqual(features["referee"]["avg_cards_per_match"], 5.0)
         self.assertIn("total_goals", features["market_family_history"]["home"])
         self.assertIn("corners_total", features["market_family_history"]["league"])
 

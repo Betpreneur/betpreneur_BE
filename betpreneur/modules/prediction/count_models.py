@@ -141,6 +141,7 @@ def _team_event_expected(features: FixtureFeatureSet, event: str, config: dict[s
     season_profile = payload.get("season_profile") or {}
     opponent_season_profile = opponent_payload.get("season_profile") or {}
     recent = payload.get("recent_form") or {}
+    referee = (features.features or {}).get("referee") or {}
     league_average = float(config["league_team_average"])
     sources: list[str] = []
 
@@ -167,6 +168,11 @@ def _team_event_expected(features: FixtureFeatureSet, event: str, config: dict[s
         sources.append("recent_form_profile")
     else:
         recent_value = None
+    referee_rate = None
+    if event == "cards":
+        referee_rate = _referee_team_card_rate(referee, config)
+        if referee_rate is not None:
+            sources.append("referee_card_profile")
 
     base = _weighted_average(
         (
@@ -174,6 +180,7 @@ def _team_event_expected(features: FixtureFeatureSet, event: str, config: dict[s
             (own_season, 0.22),
             (opponent_concedes, 0.18),
             (recent_value, 0.12),
+            (referee_rate, 0.18),
         ),
         fallback=league_average,
     )
@@ -199,6 +206,17 @@ def _recent_value(recent: dict[str, Any], *, key: str, side: str) -> float | Non
         return value
     raw_key = key.replace("_per_match", "")
     return _per_match(form5.get(raw_key), form5.get("matches"))
+
+
+def _referee_team_card_rate(referee: dict[str, Any], config: dict[str, Any]) -> float | None:
+    cards = _float(referee.get("avg_cards_per_match"))
+    sample = _float(referee.get("sample_matches")) or 0.0
+    if cards is None or sample < 3:
+        return None
+    per_team = cards / 2.0
+    if not _plausible_team_rate(per_team, config):
+        return None
+    return per_team
 
 
 def _line_probabilities(expected: float, lines: tuple[float, ...]) -> dict[str, float]:
@@ -228,9 +246,12 @@ def _poisson_over(expected: float, line: float) -> float:
 
 
 def _side_warnings(event: str, side: str, sources: tuple[str, ...]) -> tuple[str, ...]:
-    if sources:
-        return ()
-    return (f"{side}_{event}_using_league_average",)
+    warnings = []
+    if not sources:
+        warnings.append(f"{side}_{event}_using_league_average")
+    if event == "cards" and "referee_card_profile" not in sources:
+        warnings.append("referee_card_profile_missing")
+    return tuple(warnings)
 
 
 def _count_quality(features: FixtureFeatureSet, forecasts: dict[str, _EventForecast]) -> str:

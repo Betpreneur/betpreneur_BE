@@ -6,7 +6,7 @@ from typing import Any
 from django.db.models import Q
 from django.utils import timezone
 
-from betpreneur.modules.catalog.domain.text import normalize_fixture_text
+from betpreneur.modules.catalog.domain.text import normalize_fixture_text, normalize_referee_name
 from betpreneur.modules.catalog.models import (
     FixtureCache,
     ProviderFixtureMap,
@@ -1157,6 +1157,24 @@ class StatPalSnapshotService:
         team_stats = (payload or {}).get("team_stats") if isinstance(payload, dict) else {}
         player_stats = (payload or {}).get("player_stats") if isinstance(payload, dict) else {}
         event_summary = (payload or {}).get("event_summary") if isinstance(payload, dict) else {}
+        referee = (payload or {}).get("referee") if isinstance((payload or {}).get("referee"), dict) else {}
+        referee_normalized = (
+            (payload or {}).get("referee_normalized")
+            if isinstance((payload or {}).get("referee_normalized"), dict)
+            else {}
+        )
+        match_info = (payload or {}).get("match_info") if isinstance((payload or {}).get("match_info"), dict) else {}
+        match_info_referee = match_info.get("referee")
+        if isinstance(match_info_referee, dict):
+            match_info_referee = match_info_referee.get("name")
+        referee_name = str(
+            referee_normalized.get("name")
+            or referee.get("name")
+            or match_info_referee
+            or ""
+        ).strip()
+        referee_key = normalize_referee_name(referee_name)
+        referee_id = str(referee_normalized.get("id") or referee.get("id") or "").strip()
         home_xg = (
             StatPalSnapshotService._team_metric(team_stats, "home", "expected_goals")
             or StatPalSnapshotService._find_numeric(payload, "home_xg", "xg_home", "home_expected_goals")
@@ -1209,6 +1227,9 @@ class StatPalSnapshotService:
         return {
             "match_id": match_id,
             "provider_match_id": provider_match_id or (payload or {}).get("provider_match_id", ""),
+            "referee_name": referee_name,
+            "referee_normalized": referee_key,
+            "referee_id": referee_id,
             "home_xg": home_xg,
             "away_xg": away_xg,
             "expected_goals": total_xg,

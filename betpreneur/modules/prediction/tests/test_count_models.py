@@ -20,6 +20,12 @@ class CountModelTests(SimpleTestCase):
             home_team=TeamStrengthSnapshot(team_id="home", team_name="Home FC", data_quality="strong"),
             away_team=TeamStrengthSnapshot(team_id="away", team_name="Away FC", data_quality="medium"),
             features={
+                "referee": {
+                    "available": True,
+                    "name": "Michael Salisbury",
+                    "sample_matches": 12,
+                    "avg_cards_per_match": 4.8,
+                },
                 "home": {
                     "rate_profile": {
                         "available": True,
@@ -89,7 +95,36 @@ class CountModelTests(SimpleTestCase):
         self.assertIn("over_7_5", output.line_probabilities["sot"])
         self.assertIn("over_2_5", output.team_line_probabilities["corners"]["home"])
         self.assertIn("over_2_5", output.team_line_probabilities["corners"]["away"])
+        self.assertIn("referee_card_profile", output.diagnostics.metadata["sources"]["cards"])
         self.assertNotIn("odds", output.diagnostics.metadata)
+
+    def test_referee_card_history_changes_card_expectation_only(self):
+        lenient = self._features(home_cards=1.7, away_cards=2.3)
+        strict = FixtureFeatureSet(
+            fixture_id=lenient.fixture_id,
+            fixture_name=lenient.fixture_name,
+            league_key=lenient.league_key,
+            season=lenient.season,
+            home_team=lenient.home_team,
+            away_team=lenient.away_team,
+            features={
+                **lenient.features,
+                "referee": {
+                    "available": True,
+                    "name": "Strict Referee",
+                    "sample_matches": 15,
+                    "avg_cards_per_match": 6.8,
+                },
+            },
+            diagnostics=lenient.diagnostics,
+        )
+
+        lenient_output = count_distributions(lenient)
+        strict_output = count_distributions(strict)
+
+        self.assertGreater(strict_output.expected_total_cards, lenient_output.expected_total_cards)
+        self.assertEqual(strict_output.expected_total_corners, lenient_output.expected_total_corners)
+        self.assertEqual(strict_output.expected_total_sot, lenient_output.expected_total_sot)
 
     def test_stronger_corner_rates_raise_corner_probabilities(self):
         low = count_distributions(self._features(home_corners=3.0, away_corners=2.8))

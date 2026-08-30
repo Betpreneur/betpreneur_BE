@@ -88,6 +88,14 @@ class MarketProbabilityEngineTests(SimpleTestCase):
                 fixture_id="fixture-market",
                 home_team=TeamStrengthSnapshot(team_id="home", team_name="Home FC"),
                 away_team=TeamStrengthSnapshot(team_id="away", team_name="Away FC"),
+                features={
+                    "referee": {
+                        "available": True,
+                        "name": "Michael Salisbury",
+                        "sample_matches": 12,
+                        "avg_cards_per_match": 4.8,
+                    }
+                },
             ),
             goals=goals,
             counts=counts,
@@ -196,6 +204,10 @@ class MarketProbabilityEngineTests(SimpleTestCase):
         self.assertEqual(sot.raw_probability, 0.73)
         self.assertEqual(corners.model, "poisson_counts")
         self.assertIn("Projected corners: 10.20.", corners.supporting_facts)
+        self.assertIn(
+            "Michael Salisbury averages 4.80 cards across 12 tracked matches.",
+            cards.supporting_facts,
+        )
         self.assertIn(
             "Line 7.5 is below the model projection of 10.20 corners.",
             corners.supporting_facts,

@@ -27,7 +27,7 @@ from .domain.league_registry import (
     team_intelligence_registry_payload,
 )
 from .domain.sportybet_normalize import resolve
-from .domain.text import normalize_fixture_text
+from .domain.text import normalize_fixture_text, normalize_referee_name
 from .interface.views import api_response_payload
 from .models import (
     DataCoverage,
@@ -111,6 +111,7 @@ __all__ = [
     "fetch_team_recent_form",
     "legacy_runner",
     "normalize_fixture_text",
+    "normalize_referee_name",
     "plan_slip_hydration",
     "provider_mapping_service",
     "recent_form_summary",
