@@ -684,7 +684,7 @@ class DailyPredictionEngineTests(TestCase):
         self.assertIsNone(detail["best_market"])
         self.assertEqual(detail["markets"][0]["market"], "Home Team Corners Over 2.5")
 
-    def test_all_games_keeps_scored_fixtures_without_eligible_markets(self):
+    def test_all_games_hides_fixtures_without_displayable_markets(self):
         run = AlgoRun.objects.create(target_date=date(2026, 8, 31), status=AlgoRun.Status.SUCCESS)
         AlgoFixture.objects.create(
             run=run,
@@ -749,16 +749,14 @@ class DailyPredictionEngineTests(TestCase):
         compact = _compact_games_payload(run.target_date)
         full = _all_games_payload(run.target_date)
 
-        self.assertEqual(compact["summary"]["game_count"], 2)
-        self.assertEqual(full["summary"]["game_count"], 2)
+        self.assertEqual(compact["summary"]["game_count"], 1)
+        self.assertEqual(full["summary"]["game_count"], 1)
         compact_by_fixture = {game["fixture"]: game for game in compact["games"]}
         full_by_fixture = {game["fixture"]: game for game in full["games"]}
-        self.assertEqual(compact_by_fixture["Benfica vs Estoril"]["eligible_market_count"], 0)
-        self.assertEqual(compact_by_fixture["Benfica vs Estoril"]["top_market"]["market"], "Home Team Over 0.5")
-        self.assertFalse(compact_by_fixture["Benfica vs Estoril"]["top_market"]["eligible"])
-        self.assertEqual(full_by_fixture["Benfica vs Estoril"]["eligible_market_count"], 0)
-        self.assertEqual(full_by_fixture["Benfica vs Estoril"]["top_market"]["market"], "Home Team Over 0.5")
-        self.assertFalse(full_by_fixture["Benfica vs Estoril"]["top_market"]["eligible"])
+        self.assertIn("Aston Villa vs Arsenal", compact_by_fixture)
+        self.assertIn("Aston Villa vs Arsenal", full_by_fixture)
+        self.assertNotIn("Benfica vs Estoril", compact_by_fixture)
+        self.assertNotIn("Benfica vs Estoril", full_by_fixture)
 
     def test_public_headline_demotes_short_team_card_props(self):
         run = AlgoRun.objects.create(target_date=date(2026, 8, 31), status=AlgoRun.Status.SUCCESS)

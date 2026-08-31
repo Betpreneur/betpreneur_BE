@@ -578,6 +578,7 @@ def _compact_games_payload(target_date, request=None):
         )
         for fixture in fixtures
     ]
+    games = [game for game in games if game.get("top_market")]
     games.sort(
         key=lambda game: (
             (game.get("country") or "World").lower(),
@@ -647,6 +648,7 @@ def _all_games_payload(target_date, request=None):
         )
         for item in fixture_summaries
     ]
+    games = [game for game in games if game.get("top_market")]
     games.sort(
         key=lambda game: (
             (game.get("country") or "World").lower(),
