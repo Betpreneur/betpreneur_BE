@@ -759,3 +759,83 @@ class DailyPredictionEngineTests(TestCase):
         self.assertEqual(full_by_fixture["Benfica vs Estoril"]["eligible_market_count"], 0)
         self.assertEqual(full_by_fixture["Benfica vs Estoril"]["top_market"]["market"], "Home Team Over 0.5")
         self.assertFalse(full_by_fixture["Benfica vs Estoril"]["top_market"]["eligible"])
+
+    def test_public_headline_demotes_short_team_card_props(self):
+        run = AlgoRun.objects.create(target_date=date(2026, 8, 31), status=AlgoRun.Status.SUCCESS)
+        AlgoFixture.objects.create(
+            run=run,
+            match_date=run.target_date,
+            fixture="Aston Villa vs Arsenal",
+            home_team="Aston Villa",
+            away_team="Arsenal",
+            league="Premier League",
+            country="england",
+            kickoff="19:00",
+            match_id="statpal:2026083118010",
+            status=AlgoFixture.Status.SCORED,
+            market_count=2,
+        )
+        base_insights = {
+            "analysis_available": True,
+            "data_status": "modelled_watchlist",
+            "data_quality": "limited",
+            "council_review": {
+                "decision": "caution",
+                "tier": "watchlist",
+                "raw_confidence": 70,
+                "final_confidence": 70,
+                "consensus_score": 66,
+                "reasons": ["tier_watchlist"],
+                "reviewers": ["prediction_policy"],
+            },
+        }
+        MarketPrediction.objects.create(
+            run=run,
+            match_date=run.target_date,
+            fixture="Aston Villa vs Arsenal",
+            home_team="Aston Villa",
+            away_team="Arsenal",
+            league="Premier League",
+            match_id="statpal:2026083118010",
+            market="Home Team Cards Under 3.5",
+            confidence=82,
+            raw_confidence=82,
+            odds=1.15,
+            ev=0.148,
+            eligible=True,
+            risk_flags=["referee_card_profile_missing", "tier_watchlist"],
+            insights={
+                **base_insights,
+                "summary": "Home Team Cards Under 3.5 has 82% calibrated model confidence.",
+                "raw_probability": 0.86,
+                "calibrated_probability": 0.82,
+            },
+        )
+        MarketPrediction.objects.create(
+            run=run,
+            match_date=run.target_date,
+            fixture="Aston Villa vs Arsenal",
+            home_team="Aston Villa",
+            away_team="Arsenal",
+            league="Premier League",
+            match_id="statpal:2026083118010",
+            market="Over 2.5",
+            confidence=68,
+            raw_confidence=72,
+            odds=1.82,
+            ev=0.05,
+            eligible=True,
+            insights={
+                **base_insights,
+                "summary": "Over 2.5 has 68% calibrated model confidence.",
+                "raw_probability": 0.72,
+                "calibrated_probability": 0.68,
+            },
+        )
+
+        compact = _compact_games_payload(run.target_date)
+        detail = game_detail_payload(run.target_date, "statpal:2026083118010")["game"]
+
+        self.assertEqual(compact["games"][0]["top_market"]["market"], "Over 2.5")
+        self.assertEqual(detail["top_market"]["market"], "Over 2.5")
+        self.assertIn("Home Team Cards Under 3.5", {market["market"] for market in detail["markets"]})

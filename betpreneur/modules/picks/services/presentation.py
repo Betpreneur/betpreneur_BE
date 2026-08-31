@@ -10,6 +10,7 @@ from __future__ import annotations
 import re
 from decimal import Decimal, InvalidOperation
 
+from betpreneur.modules.markets.api import describe_market
 from betpreneur.modules.picks.interface.serializers import PickSerializer
 from betpreneur.modules.picks.models import AlgoFixture, AlgoRun, GameBack, MarketPrediction, Pick
 from betpreneur.modules.pricing.api import (
@@ -99,15 +100,76 @@ def _data_quality_rank(market):
     }.get(quality, 0)
 
 
+def _market_family(market):
+    taxonomy = (market.get("insights") or {}).get("market_taxonomy") or market.get("market_taxonomy")
+    if isinstance(taxonomy, dict) and taxonomy.get("family"):
+        return str(taxonomy.get("family") or "")
+    family = (market.get("insights") or {}).get("market_family") or market.get("market_family")
+    if family:
+        return str(family)
+    return describe_market(market.get("market")).family
+
+
+def _headline_market_rank(market):
+    family = _market_family(market)
+    rank = {
+        "total_goals": 78,
+        "btts": 74,
+        "corners_total": 70,
+        "match_result": 66,
+        "draw_no_bet": 62,
+        "double_chance": 58,
+        "team_total_goals": 46,
+        "shots_on_target_total": 42,
+        "team_shots_on_target": 36,
+        "team_corners": 30,
+        "cards_total": 28,
+        "booking_points": 24,
+        "team_cards": 18,
+    }.get(family, 35)
+
+    odds = Decimal("0")
+    try:
+        odds = Decimal(str(market.get("odds") or "0"))
+    except (InvalidOperation, TypeError, ValueError):
+        odds = Decimal("0")
+    if odds and odds <= Decimal("1.10"):
+        rank -= 30
+    elif odds and odds <= Decimal("1.20"):
+        rank -= 18
+    elif odds and odds <= Decimal("1.30"):
+        rank -= 8
+
+    status = str(market.get("recommendation_status") or "").strip().lower()
+    if status == "no_edge":
+        rank -= 12
+    elif status == "watchlist":
+        rank -= 6
+
+    risk_flags = {str(flag) for flag in market.get("risk_flags") or []}
+    uses_league_average = any(
+        "using_league_average" in flag or flag.endswith("_using_league_average")
+        for flag in risk_flags
+    )
+    if uses_league_average:
+        rank -= 8
+    if "referee_card_profile_missing" in risk_flags and family in {"cards_total", "team_cards", "booking_points"}:
+        rank -= 10
+    if not market.get("eligible"):
+        rank -= 5
+    return rank
+
+
 def _game_market_rank(market):
     return (
         1 if market.get("selected") else 0,
         1 if market.get("recommended") else 0,
         0 if market.get("publicly_paused") else 1,
+        _headline_market_rank(market),
+        _recommendation_status_rank(market),
         _model_probability_percent(market),
         _data_quality_rank(market),
         -len(market.get("risk_flags") or []),
-        _recommendation_status_rank(market),
         market_decision_rank(market),
         *market_display_score(market),
     )
