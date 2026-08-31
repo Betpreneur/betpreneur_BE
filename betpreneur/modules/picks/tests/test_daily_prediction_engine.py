@@ -839,3 +839,60 @@ class DailyPredictionEngineTests(TestCase):
         self.assertEqual(compact["games"][0]["top_market"]["market"], "Over 2.5")
         self.assertEqual(detail["top_market"]["market"], "Over 2.5")
         self.assertIn("Home Team Cards Under 3.5", {market["market"] for market in detail["markets"]})
+
+    def test_analysis_gate_allows_goal_model_without_team_intelligence(self):
+        probability = MarketProbability(
+            fixture_id="statpal:outside-core",
+            market="Over 2.5",
+            raw_probability=0.71,
+            calibrated_probability=0.68,
+            confidence_score=68,
+            model="poisson_goals",
+            data_quality="medium",
+            warnings=("home_team_profile", "away_team_profile"),
+        )
+
+        allowed = AlgoRunnerService()._prediction_analysis_available(
+            probability,
+            SimpleNamespace(data_confidence=68),
+        )
+
+        self.assertTrue(allowed)
+
+    def test_analysis_gate_allows_count_model_without_team_intelligence(self):
+        probability = MarketProbability(
+            fixture_id="statpal:outside-core",
+            market="Corners Over 8.5",
+            raw_probability=0.73,
+            calibrated_probability=0.7,
+            confidence_score=70,
+            model="poisson_counts",
+            data_quality="limited",
+            warnings=("home_team_profile", "away_team_profile"),
+        )
+
+        allowed = AlgoRunnerService()._prediction_analysis_available(
+            probability,
+            SimpleNamespace(data_confidence=70),
+        )
+
+        self.assertTrue(allowed)
+
+    def test_analysis_gate_blocks_elo_without_team_intelligence(self):
+        probability = MarketProbability(
+            fixture_id="statpal:outside-core",
+            market="Home Win",
+            raw_probability=0.52,
+            calibrated_probability=0.5,
+            confidence_score=50,
+            model="elo_result",
+            data_quality="limited",
+            warnings=("home_team_profile", "away_team_profile"),
+        )
+
+        allowed = AlgoRunnerService()._prediction_analysis_available(
+            probability,
+            SimpleNamespace(data_confidence=50),
+        )
+
+        self.assertFalse(allowed)

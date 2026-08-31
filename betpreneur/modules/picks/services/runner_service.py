@@ -1227,16 +1227,26 @@ class AlgoRunnerService:
         warnings = {str(item) for item in (probability.warnings or ())}
         if "fixture_not_found" in warnings or probability.effective_probability is None:
             return False
-        if {"home_team_profile", "away_team_profile"}.issubset(warnings):
+        both_team_profiles_missing = {"home_team_profile", "away_team_profile"}.issubset(warnings)
+        model = str(probability.model or "")
+        if model == "elo_result" and both_team_profiles_missing:
+            return False
+        if model == "poisson_goals":
+            if {
+                "goal_model_unavailable",
+                "using_feature_derived_expected_goals",
+            }.issubset(warnings):
+                return False
+            return bool((all_games.data_confidence or 0) > 0)
+        if "count" in model:
+            if "count_model_unavailable" in warnings:
+                return False
+            if probability.data_quality in {"missing", "poor", "unavailable"}:
+                return False
+            return bool((all_games.data_confidence or 0) > 0)
+        if both_team_profiles_missing:
             return False
         if probability.data_quality in {"missing", "poor", "unavailable"}:
-            return False
-        if probability.model == "poisson_goals" and {
-            "goal_model_unavailable",
-            "using_feature_derived_expected_goals",
-        }.issubset(warnings):
-            return False
-        if probability.model and "count" in str(probability.model) and "count_model_unavailable" in warnings:
             return False
         return bool((all_games.data_confidence or 0) > 0)
 

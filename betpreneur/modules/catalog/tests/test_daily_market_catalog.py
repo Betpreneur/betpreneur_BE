@@ -119,6 +119,9 @@ class DailyMarketCatalogTests(SimpleTestCase):
         self.assertIn("Home Team Over 1.5", markets)
         self.assertIn("Away Team Under 2.5", markets)
         self.assertNotIn("Over 0.5", markets)
+        self.assertNotIn("Over 1.75", markets)
+        self.assertNotIn("Under 2.25", markets)
+        self.assertNotIn("Over 3.25", markets)
         self.assertNotIn("Under 5.5", markets)
         self.assertIn("Corners Over 9.5", markets)
         self.assertNotIn("Home Team Corners Over 1.5", markets)
@@ -133,10 +136,16 @@ class DailyMarketCatalogTests(SimpleTestCase):
 
     def test_daily_dynamic_markets_reject_soft_goal_and_team_corner_lines(self):
         self.assertIsNone(daily_catalog_entry("Over 0.5"))
+        self.assertIsNone(daily_catalog_entry("Over 1.75"))
+        self.assertIsNone(daily_catalog_entry("Under 2.25"))
+        self.assertIsNone(daily_catalog_entry("Over 3.25"))
+        self.assertIsNone(daily_catalog_entry("Under 4.25"))
         self.assertIsNone(daily_catalog_entry("Under 5.5"))
         self.assertIsNone(daily_catalog_entry("Home Team Corners Over 1.5"))
         self.assertIsNone(daily_catalog_entry("Away Team Corners Over 1.5"))
         self.assertIsNotNone(daily_catalog_entry("Over 1.5"))
+        self.assertIsNotNone(daily_catalog_entry("Over 2.5"))
+        self.assertIsNotNone(daily_catalog_entry("Under 3.5"))
         self.assertIsNotNone(daily_catalog_entry("Under 4.5"))
         self.assertIsNotNone(daily_catalog_entry("Home Team Corners Over 2.5"))
         self.assertIsNotNone(daily_catalog_entry("Away Team Corners Over 2.5"))
@@ -157,6 +166,8 @@ class DailyMarketCatalogTests(SimpleTestCase):
             {
                 "Corners Under 12.5": 67,
                 "Over 0.5": 92,
+                "Over 1.75": 91,
+                "Under 2.25": 90,
                 "Under 5.5": 88,
                 "Home Team Corners Over 1.5": 89,
                 "Unsupported Custom Market": 90,
@@ -169,6 +180,8 @@ class DailyMarketCatalogTests(SimpleTestCase):
         self.assertIn("Over 4.5", scores)
         self.assertIn("Corners Under 12.5", scores)
         self.assertNotIn("Over 0.5", scores)
+        self.assertNotIn("Over 1.75", scores)
+        self.assertNotIn("Under 2.25", scores)
         self.assertNotIn("Under 5.5", scores)
         self.assertNotIn("Home Team Corners Over 1.5", scores)
         self.assertNotIn("DC: 1X", scores)

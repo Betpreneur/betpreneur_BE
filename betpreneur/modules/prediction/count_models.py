@@ -256,6 +256,8 @@ def _side_warnings(event: str, side: str, sources: tuple[str, ...]) -> tuple[str
 
 def _count_quality(features: FixtureFeatureSet, forecasts: dict[str, _EventForecast]) -> str:
     if all(forecast.sources for forecast in forecasts.values()):
+        if features.diagnostics.data_quality in {"missing", "poor", "unavailable"}:
+            return "limited"
         return features.diagnostics.data_quality
     if any(forecast.sources for forecast in forecasts.values()):
         return "limited"

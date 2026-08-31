@@ -154,12 +154,18 @@ def _decimal_line(value) -> Decimal | None:
         return None
 
 
+def _standard_half_goal_line(line: Decimal | None) -> bool:
+    if line is None:
+        return False
+    return line % Decimal("1") == Decimal("0.5")
+
+
 def _daily_line_allowed(market: str) -> bool:
     descriptor = describe_market(market)
     line = _decimal_line(descriptor.line)
     side = (descriptor.side or descriptor.selection or "").lower()
     if descriptor.family == "total_goals" and line is not None:
-        return Decimal("1.5") <= line <= Decimal("4.5")
+        return _standard_half_goal_line(line) and Decimal("1.5") <= line <= Decimal("4.5")
     if descriptor.family == "team_corners" and side == "over" and line is not None:
         return line >= Decimal("2.5")
     return True
