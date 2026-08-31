@@ -599,14 +599,22 @@ def market_prediction_payload(prediction):
 def market_analysis_displayable(market):
     if not market or market.get("publicly_paused"):
         return False
+    if market.get("analysis_available") is False:
+        return False
     if market.get("analysis_available"):
         return True
     data_status = market.get("data_status")
+    if data_status == "insufficient_data":
+        return False
     if data_status and data_status != "insufficient_data":
         return True
     insights = market.get("insights") or {}
+    if insights.get("analysis_available") is False:
+        return False
     if insights.get("analysis_available"):
         return True
+    if insights.get("data_status") == "insufficient_data":
+        return False
     if insights.get("raw_probability") is not None or insights.get("calibrated_probability") is not None:
         return True
     return False
