@@ -7,14 +7,14 @@
 services:
   backend:
     build:
-      context: ..
+      context: .
       dockerfile: deploy/Dockerfile
       target: production
     restart: unless-stopped
     expose:
       - "8000"
     env_file:
-      - path: ../.env
+      - path: .env
         required: false
     environment:
       DJANGO_SETTINGS_MODULE: config.settings
@@ -81,12 +81,12 @@ services:
 
   celery-worker:
     build:
-      context: ..
+      context: .
       dockerfile: deploy/Dockerfile
       target: worker
     restart: unless-stopped
     env_file:
-      - path: ../.env
+      - path: .env
         required: false
     environment:
       DJANGO_SETTINGS_MODULE: config.settings
@@ -136,12 +136,12 @@ services:
 
   celery-daily-worker:
     build:
-      context: ..
+      context: .
       dockerfile: deploy/Dockerfile
       target: worker
     restart: unless-stopped
     env_file:
-      - path: ../.env
+      - path: .env
         required: false
     environment:
       DJANGO_SETTINGS_MODULE: config.settings
@@ -160,12 +160,12 @@ services:
 
   celery-scoring-worker:
     build:
-      context: ..
+      context: .
       dockerfile: deploy/Dockerfile
       target: worker
     restart: unless-stopped
     env_file:
-      - path: ../.env
+      - path: .env
         required: false
     environment:
       DJANGO_SETTINGS_MODULE: config.settings
@@ -184,12 +184,12 @@ services:
 
   celery-llm-worker:
     build:
-      context: ..
+      context: .
       dockerfile: deploy/Dockerfile
       target: worker
     restart: unless-stopped
     env_file:
-      - path: ../.env
+      - path: .env
         required: false
     environment:
       DJANGO_SETTINGS_MODULE: config.settings
@@ -203,12 +203,12 @@ services:
 
   celery-statpal-worker:
     build:
-      context: ..
+      context: .
       dockerfile: deploy/Dockerfile
       target: worker
     restart: unless-stopped
     env_file:
-      - path: ../.env
+      - path: .env
         required: false
     environment:
       DJANGO_SETTINGS_MODULE: config.settings
@@ -222,12 +222,12 @@ services:
 
   celery-settlement-worker:
     build:
-      context: ..
+      context: .
       dockerfile: deploy/Dockerfile
       target: worker
     restart: unless-stopped
     env_file:
-      - path: ../.env
+      - path: .env
         required: false
     environment:
       DJANGO_SETTINGS_MODULE: config.settings
@@ -241,12 +241,12 @@ services:
 
   celery-maintenance-worker:
     build:
-      context: ..
+      context: .
       dockerfile: deploy/Dockerfile
       target: worker
     restart: unless-stopped
     env_file:
-      - path: ../.env
+      - path: .env
         required: false
     environment:
       DJANGO_SETTINGS_MODULE: config.settings
@@ -260,12 +260,12 @@ services:
 
   celery-slip-review-import-worker:
     build:
-      context: ..
+      context: .
       dockerfile: deploy/Dockerfile
       target: worker
     restart: unless-stopped
     env_file:
-      - path: ../.env
+      - path: .env
         required: false
     environment:
       DJANGO_SETTINGS_MODULE: config.settings
@@ -315,12 +315,12 @@ services:
 
   celery-slip-review-leg-worker:
     build:
-      context: ..
+      context: .
       dockerfile: deploy/Dockerfile
       target: worker
     restart: unless-stopped
     env_file:
-      - path: ../.env
+      - path: .env
         required: false
     environment:
       DJANGO_SETTINGS_MODULE: config.settings
@@ -364,12 +364,12 @@ services:
 
   celery-slip-review-finalize-worker:
     build:
-      context: ..
+      context: .
       dockerfile: deploy/Dockerfile
       target: worker
     restart: unless-stopped
     env_file:
-      - path: ../.env
+      - path: .env
         required: false
     environment:
       DJANGO_SETTINGS_MODULE: config.settings
@@ -408,12 +408,12 @@ services:
 
   celery-beat:
     build:
-      context: ..
+      context: .
       dockerfile: deploy/Dockerfile
       target: worker
     restart: unless-stopped
     env_file:
-      - path: ../.env
+      - path: .env
         required: false
     environment:
       DJANGO_SETTINGS_MODULE: config.settings
