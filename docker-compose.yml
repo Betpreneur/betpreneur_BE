@@ -1,0 +1,434 @@
+# ================================================================
+# Betpreneur Backend Docker Compose
+# ================================================================
+# Services: PostgreSQL, Backend, Celery Worker, Celery Beat
+# ================================================================
+
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile
+      target: production
+    restart: unless-stopped
+    expose:
+      - "8000"
+    environment:
+      DJANGO_SETTINGS_MODULE: config.settings
+      TZ: Africa/Lagos
+      WEB_CONCURRENCY: "${WEB_CONCURRENCY:-2}"
+      WEB_THREADS: "${WEB_THREADS:-2}"
+      GUNICORN_TIMEOUT: "${GUNICORN_TIMEOUT:-120}"
+      ENABLE_WEBSOCKETS: "${ENABLE_WEBSOCKETS:-true}"
+      ALGO_DAILY_QUEUE: "${ALGO_DAILY_QUEUE:-algo_daily}"
+      ALGO_SCORING_QUEUE: "${ALGO_SCORING_QUEUE:-algo_scoring}"
+      ALGO_LLM_QUEUE: "${ALGO_LLM_QUEUE:-algo_llm}"
+      ALGO_STATPAL_QUEUE: "${ALGO_STATPAL_QUEUE:-algo_statpal}"
+      ALGO_SETTLEMENT_QUEUE: "${ALGO_SETTLEMENT_QUEUE:-algo_settlement}"
+      ALGO_MAINTENANCE_QUEUE: "${ALGO_MAINTENANCE_QUEUE:-algo_maintenance}"
+      SLIP_REVIEW_PARALLEL_LEG_THRESHOLD: "${SLIP_REVIEW_PARALLEL_LEG_THRESHOLD:-4}"
+      SLIP_REVIEW_ANALYSIS_WORKERS: "${SLIP_REVIEW_ANALYSIS_WORKERS:-4}"
+      SLIP_REVIEW_LEG_CACHE_TTL_SECONDS: "${SLIP_REVIEW_LEG_CACHE_TTL_SECONDS:-900}"
+      SLIP_REVIEW_LEG_CACHE_LOCK_SECONDS: "${SLIP_REVIEW_LEG_CACHE_LOCK_SECONDS:-300}"
+      SLIP_REVIEW_LEG_CACHE_WAIT_SECONDS: "${SLIP_REVIEW_LEG_CACHE_WAIT_SECONDS:-45}"
+      SLIP_REVIEW_STALE_AFTER_SECONDS: "${SLIP_REVIEW_STALE_AFTER_SECONDS:-1200}"
+      SLIP_REVIEW_RECOVERY_MINUTES: "${SLIP_REVIEW_RECOVERY_MINUTES:-*/5}"
+      SLIP_REVIEW_RECOVERY_LIMIT: "${SLIP_REVIEW_RECOVERY_LIMIT:-25}"
+      SLIP_REVIEW_DEEPSEEK_MAX_GAMES: "${SLIP_REVIEW_DEEPSEEK_MAX_GAMES:-5}"
+      SLIP_REVIEW_STREAM_TICKET_SECONDS: "${SLIP_REVIEW_STREAM_TICKET_SECONDS:-1800}"
+      SLIP_REVIEW_QUEUE: "${SLIP_REVIEW_QUEUE:-slip_review}"
+      SLIP_REVIEW_IMPORT_QUEUE: "${SLIP_REVIEW_IMPORT_QUEUE:-slip_review_import}"
+      SLIP_REVIEW_LEG_QUEUE: "${SLIP_REVIEW_LEG_QUEUE:-slip_review_leg}"
+      SLIP_REVIEW_FINALIZE_QUEUE: "${SLIP_REVIEW_FINALIZE_QUEUE:-slip_review_finalize}"
+      TOKEN_FREE_DAILY_CAP: "${TOKEN_FREE_DAILY_CAP:-50}"
+      TOKEN_FREE_REFILL_THRESHOLD: "${TOKEN_FREE_REFILL_THRESHOLD:-10}"
+      TOKEN_SIGNUP_GRANT: "${TOKEN_SIGNUP_GRANT:-50}"
+      TOKEN_FREE_REFILL_HOUR: "${TOKEN_FREE_REFILL_HOUR:-0}"
+      TOKEN_FREE_REFILL_MINUTE: "${TOKEN_FREE_REFILL_MINUTE:-15}"
+      TOKEN_PURCHASE_PACKAGES: "${TOKEN_PURCHASE_PACKAGES:-240:990,480:1980,720:2970,960:3960,1200:4950}"
+      TOKEN_PURCHASE_CURRENCY: "${TOKEN_PURCHASE_CURRENCY:-NGN}"
+      SLIP_REVIEW_TOKEN_COST_PER_GAME: "${SLIP_REVIEW_TOKEN_COST_PER_GAME:-1}"
+      SLIP_REVIEW_RANDOMIZE_TOKEN_COST: "${SLIP_REVIEW_RANDOMIZE_TOKEN_COST:-5}"
+      TOKEN_RESERVATION_TTL_MINUTES: "${TOKEN_RESERVATION_TTL_MINUTES:-30}"
+      TOKEN_RESERVATION_EXPIRY_MINUTES: "${TOKEN_RESERVATION_EXPIRY_MINUTES:-*/5}"
+      TOKEN_RESERVATION_EXPIRY_LIMIT: "${TOKEN_RESERVATION_EXPIRY_LIMIT:-200}"
+      PAYFONTE_BASE_URL: "${PAYFONTE_BASE_URL:-https://sandbox-api.payfonte.com}"
+      PAYFONTE_CLIENT_ID: "${PAYFONTE_CLIENT_ID:-}"
+      PAYFONTE_CLIENT_SECRET: "${PAYFONTE_CLIENT_SECRET:-}"
+      PAYFONTE_COLLECTION_PROVIDER: "${PAYFONTE_COLLECTION_PROVIDER:-bank-transfer-nigeria}"
+      PAYFONTE_BANK_TRANSFER_NETWORK: "${PAYFONTE_BANK_TRANSFER_NETWORK:-}"
+      PAYFONTE_WEBHOOK_URL: "${PAYFONTE_WEBHOOK_URL:-}"
+      PAYFONTE_TIMEOUT: "${PAYFONTE_TIMEOUT:-30}"
+      PAYFONTE_VIRTUAL_ACCOUNT_TTL_MINUTES: "${PAYFONTE_VIRTUAL_ACCOUNT_TTL_MINUTES:-30}"
+    command: >
+      sh -c "echo '[startup] running migrations' &&
+      python manage.py migrate --noinput &&
+      echo '[startup] collecting static files' &&
+      python manage.py collectstatic --noinput &&
+      echo '[startup] starting uvicorn ASGI on 0.0.0.0:8000' &&
+      exec uvicorn config.asgi:application --host 0.0.0.0 --port 8000 --workers ${WEB_CONCURRENCY:-2} --proxy-headers --forwarded-allow-ips='*'"
+    volumes:
+      - media:/home/appuser/media
+    healthcheck:
+      test: ["CMD-SHELL", "curl --fail --silent http://127.0.0.1:8000/api/health/ >/dev/null || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 90s
+
+  celery-worker:
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile
+      target: worker
+    restart: unless-stopped
+    environment:
+      DJANGO_SETTINGS_MODULE: config.settings
+      TZ: Africa/Lagos
+      ENABLE_WEBSOCKETS: "${ENABLE_WEBSOCKETS:-true}"
+      ALGO_DAILY_QUEUE: "${ALGO_DAILY_QUEUE:-algo_daily}"
+      ALGO_SCORING_QUEUE: "${ALGO_SCORING_QUEUE:-algo_scoring}"
+      ALGO_LLM_QUEUE: "${ALGO_LLM_QUEUE:-algo_llm}"
+      ALGO_STATPAL_QUEUE: "${ALGO_STATPAL_QUEUE:-algo_statpal}"
+      ALGO_SETTLEMENT_QUEUE: "${ALGO_SETTLEMENT_QUEUE:-algo_settlement}"
+      ALGO_MAINTENANCE_QUEUE: "${ALGO_MAINTENANCE_QUEUE:-algo_maintenance}"
+      SLIP_REVIEW_PARALLEL_LEG_THRESHOLD: "${SLIP_REVIEW_PARALLEL_LEG_THRESHOLD:-4}"
+      SLIP_REVIEW_ANALYSIS_WORKERS: "${SLIP_REVIEW_ANALYSIS_WORKERS:-4}"
+      SLIP_REVIEW_LEG_CACHE_TTL_SECONDS: "${SLIP_REVIEW_LEG_CACHE_TTL_SECONDS:-900}"
+      SLIP_REVIEW_LEG_CACHE_LOCK_SECONDS: "${SLIP_REVIEW_LEG_CACHE_LOCK_SECONDS:-300}"
+      SLIP_REVIEW_LEG_CACHE_WAIT_SECONDS: "${SLIP_REVIEW_LEG_CACHE_WAIT_SECONDS:-45}"
+      SLIP_REVIEW_STALE_AFTER_SECONDS: "${SLIP_REVIEW_STALE_AFTER_SECONDS:-1200}"
+      SLIP_REVIEW_DEEPSEEK_MAX_GAMES: "${SLIP_REVIEW_DEEPSEEK_MAX_GAMES:-5}"
+      SLIP_REVIEW_STREAM_TICKET_SECONDS: "${SLIP_REVIEW_STREAM_TICKET_SECONDS:-1800}"
+      SLIP_REVIEW_QUEUE: "${SLIP_REVIEW_QUEUE:-slip_review}"
+      SLIP_REVIEW_IMPORT_QUEUE: "${SLIP_REVIEW_IMPORT_QUEUE:-slip_review_import}"
+      SLIP_REVIEW_LEG_QUEUE: "${SLIP_REVIEW_LEG_QUEUE:-slip_review_leg}"
+      SLIP_REVIEW_FINALIZE_QUEUE: "${SLIP_REVIEW_FINALIZE_QUEUE:-slip_review_finalize}"
+      TOKEN_FREE_DAILY_CAP: "${TOKEN_FREE_DAILY_CAP:-50}"
+      TOKEN_FREE_REFILL_THRESHOLD: "${TOKEN_FREE_REFILL_THRESHOLD:-10}"
+      TOKEN_SIGNUP_GRANT: "${TOKEN_SIGNUP_GRANT:-50}"
+      TOKEN_FREE_REFILL_HOUR: "${TOKEN_FREE_REFILL_HOUR:-0}"
+      TOKEN_FREE_REFILL_MINUTE: "${TOKEN_FREE_REFILL_MINUTE:-15}"
+      TOKEN_PURCHASE_PACKAGES: "${TOKEN_PURCHASE_PACKAGES:-240:990,480:1980,720:2970,960:3960,1200:4950}"
+      TOKEN_PURCHASE_CURRENCY: "${TOKEN_PURCHASE_CURRENCY:-NGN}"
+      SLIP_REVIEW_TOKEN_COST_PER_GAME: "${SLIP_REVIEW_TOKEN_COST_PER_GAME:-1}"
+      SLIP_REVIEW_RANDOMIZE_TOKEN_COST: "${SLIP_REVIEW_RANDOMIZE_TOKEN_COST:-5}"
+      TOKEN_RESERVATION_TTL_MINUTES: "${TOKEN_RESERVATION_TTL_MINUTES:-30}"
+      TOKEN_RESERVATION_EXPIRY_MINUTES: "${TOKEN_RESERVATION_EXPIRY_MINUTES:-*/5}"
+      TOKEN_RESERVATION_EXPIRY_LIMIT: "${TOKEN_RESERVATION_EXPIRY_LIMIT:-200}"
+      PAYFONTE_BASE_URL: "${PAYFONTE_BASE_URL:-https://sandbox-api.payfonte.com}"
+      PAYFONTE_CLIENT_ID: "${PAYFONTE_CLIENT_ID:-}"
+      PAYFONTE_CLIENT_SECRET: "${PAYFONTE_CLIENT_SECRET:-}"
+      PAYFONTE_COLLECTION_PROVIDER: "${PAYFONTE_COLLECTION_PROVIDER:-bank-transfer-nigeria}"
+      PAYFONTE_BANK_TRANSFER_NETWORK: "${PAYFONTE_BANK_TRANSFER_NETWORK:-}"
+      PAYFONTE_WEBHOOK_URL: "${PAYFONTE_WEBHOOK_URL:-}"
+      PAYFONTE_TIMEOUT: "${PAYFONTE_TIMEOUT:-30}"
+      PAYFONTE_VIRTUAL_ACCOUNT_TTL_MINUTES: "${PAYFONTE_VIRTUAL_ACCOUNT_TTL_MINUTES:-30}"
+    command: celery -A config worker --loglevel=info -Q ${CELERY_WORKER_QUEUES:-celery} --concurrency=${CELERY_WORKER_CONCURRENCY:-1} --max-tasks-per-child=1 --prefetch-multiplier=1
+    volumes:
+      - media:/home/appuser/media
+
+  celery-daily-worker:
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile
+      target: worker
+    restart: unless-stopped
+    environment:
+      DJANGO_SETTINGS_MODULE: config.settings
+      TZ: Africa/Lagos
+      ENABLE_WEBSOCKETS: "${ENABLE_WEBSOCKETS:-true}"
+      ALGO_DAILY_QUEUE: "${ALGO_DAILY_QUEUE:-algo_daily}"
+      ALGO_SCORING_QUEUE: "${ALGO_SCORING_QUEUE:-algo_scoring}"
+      ALGO_LLM_QUEUE: "${ALGO_LLM_QUEUE:-algo_llm}"
+      ALGO_STATPAL_QUEUE: "${ALGO_STATPAL_QUEUE:-algo_statpal}"
+      ALGO_SETTLEMENT_QUEUE: "${ALGO_SETTLEMENT_QUEUE:-algo_settlement}"
+      ALGO_MAINTENANCE_QUEUE: "${ALGO_MAINTENANCE_QUEUE:-algo_maintenance}"
+      SLIP_REVIEW_QUEUE: "${SLIP_REVIEW_QUEUE:-slip_review}"
+    command: celery -A config worker --loglevel=info -Q ${ALGO_DAILY_QUEUE:-algo_daily} --concurrency=${ALGO_DAILY_WORKER_CONCURRENCY:-1} --max-tasks-per-child=${ALGO_DAILY_MAX_TASKS_PER_CHILD:-20} --prefetch-multiplier=1
+    volumes:
+      - media:/home/appuser/media
+
+  celery-scoring-worker:
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile
+      target: worker
+    restart: unless-stopped
+    environment:
+      DJANGO_SETTINGS_MODULE: config.settings
+      TZ: Africa/Lagos
+      ENABLE_WEBSOCKETS: "${ENABLE_WEBSOCKETS:-true}"
+      ALGO_DAILY_QUEUE: "${ALGO_DAILY_QUEUE:-algo_daily}"
+      ALGO_SCORING_QUEUE: "${ALGO_SCORING_QUEUE:-algo_scoring}"
+      ALGO_LLM_QUEUE: "${ALGO_LLM_QUEUE:-algo_llm}"
+      ALGO_STATPAL_QUEUE: "${ALGO_STATPAL_QUEUE:-algo_statpal}"
+      ALGO_SETTLEMENT_QUEUE: "${ALGO_SETTLEMENT_QUEUE:-algo_settlement}"
+      ALGO_MAINTENANCE_QUEUE: "${ALGO_MAINTENANCE_QUEUE:-algo_maintenance}"
+      SLIP_REVIEW_QUEUE: "${SLIP_REVIEW_QUEUE:-slip_review}"
+    command: celery -A config worker --loglevel=info -Q ${ALGO_SCORING_QUEUE:-algo_scoring} --concurrency=${ALGO_SCORING_WORKER_CONCURRENCY:-2} --max-tasks-per-child=${ALGO_SCORING_MAX_TASKS_PER_CHILD:-20} --prefetch-multiplier=1
+    volumes:
+      - media:/home/appuser/media
+
+  celery-llm-worker:
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile
+      target: worker
+    restart: unless-stopped
+    environment:
+      DJANGO_SETTINGS_MODULE: config.settings
+      TZ: Africa/Lagos
+      ENABLE_WEBSOCKETS: "${ENABLE_WEBSOCKETS:-true}"
+      ALGO_LLM_QUEUE: "${ALGO_LLM_QUEUE:-algo_llm}"
+      SLIP_REVIEW_QUEUE: "${SLIP_REVIEW_QUEUE:-slip_review}"
+    command: celery -A config worker --loglevel=info -Q ${ALGO_LLM_QUEUE:-algo_llm} --concurrency=${ALGO_LLM_WORKER_CONCURRENCY:-1} --max-tasks-per-child=${ALGO_LLM_MAX_TASKS_PER_CHILD:-20} --prefetch-multiplier=1
+    volumes:
+      - media:/home/appuser/media
+
+  celery-statpal-worker:
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile
+      target: worker
+    restart: unless-stopped
+    environment:
+      DJANGO_SETTINGS_MODULE: config.settings
+      TZ: Africa/Lagos
+      ENABLE_WEBSOCKETS: "${ENABLE_WEBSOCKETS:-true}"
+      ALGO_STATPAL_QUEUE: "${ALGO_STATPAL_QUEUE:-algo_statpal}"
+      SLIP_REVIEW_QUEUE: "${SLIP_REVIEW_QUEUE:-slip_review}"
+    command: celery -A config worker --loglevel=info -Q ${ALGO_STATPAL_QUEUE:-algo_statpal} --concurrency=${ALGO_STATPAL_WORKER_CONCURRENCY:-1} --max-tasks-per-child=${ALGO_STATPAL_MAX_TASKS_PER_CHILD:-10} --prefetch-multiplier=1
+    volumes:
+      - media:/home/appuser/media
+
+  celery-settlement-worker:
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile
+      target: worker
+    restart: unless-stopped
+    environment:
+      DJANGO_SETTINGS_MODULE: config.settings
+      TZ: Africa/Lagos
+      ENABLE_WEBSOCKETS: "${ENABLE_WEBSOCKETS:-true}"
+      ALGO_SETTLEMENT_QUEUE: "${ALGO_SETTLEMENT_QUEUE:-algo_settlement}"
+      SLIP_REVIEW_QUEUE: "${SLIP_REVIEW_QUEUE:-slip_review}"
+    command: celery -A config worker --loglevel=info -Q ${ALGO_SETTLEMENT_QUEUE:-algo_settlement} --concurrency=${ALGO_SETTLEMENT_WORKER_CONCURRENCY:-1} --max-tasks-per-child=${ALGO_SETTLEMENT_MAX_TASKS_PER_CHILD:-20} --prefetch-multiplier=1
+    volumes:
+      - media:/home/appuser/media
+
+  celery-maintenance-worker:
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile
+      target: worker
+    restart: unless-stopped
+    environment:
+      DJANGO_SETTINGS_MODULE: config.settings
+      TZ: Africa/Lagos
+      ENABLE_WEBSOCKETS: "${ENABLE_WEBSOCKETS:-true}"
+      ALGO_MAINTENANCE_QUEUE: "${ALGO_MAINTENANCE_QUEUE:-algo_maintenance}"
+      SLIP_REVIEW_QUEUE: "${SLIP_REVIEW_QUEUE:-slip_review}"
+    command: celery -A config worker --loglevel=info -Q ${ALGO_MAINTENANCE_QUEUE:-algo_maintenance} --concurrency=${ALGO_MAINTENANCE_WORKER_CONCURRENCY:-1} --max-tasks-per-child=${ALGO_MAINTENANCE_MAX_TASKS_PER_CHILD:-50} --prefetch-multiplier=1
+    volumes:
+      - media:/home/appuser/media
+
+  celery-slip-review-import-worker:
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile
+      target: worker
+    restart: unless-stopped
+    environment:
+      DJANGO_SETTINGS_MODULE: config.settings
+      TZ: Africa/Lagos
+      ENABLE_WEBSOCKETS: "${ENABLE_WEBSOCKETS:-true}"
+      ALGO_DAILY_QUEUE: "${ALGO_DAILY_QUEUE:-algo_daily}"
+      ALGO_SCORING_QUEUE: "${ALGO_SCORING_QUEUE:-algo_scoring}"
+      ALGO_LLM_QUEUE: "${ALGO_LLM_QUEUE:-algo_llm}"
+      ALGO_STATPAL_QUEUE: "${ALGO_STATPAL_QUEUE:-algo_statpal}"
+      ALGO_SETTLEMENT_QUEUE: "${ALGO_SETTLEMENT_QUEUE:-algo_settlement}"
+      ALGO_MAINTENANCE_QUEUE: "${ALGO_MAINTENANCE_QUEUE:-algo_maintenance}"
+      SLIP_REVIEW_PARALLEL_LEG_THRESHOLD: "${SLIP_REVIEW_PARALLEL_LEG_THRESHOLD:-4}"
+      SLIP_REVIEW_ANALYSIS_WORKERS: "${SLIP_REVIEW_ANALYSIS_WORKERS:-4}"
+      SLIP_REVIEW_LEG_CACHE_TTL_SECONDS: "${SLIP_REVIEW_LEG_CACHE_TTL_SECONDS:-900}"
+      SLIP_REVIEW_LEG_CACHE_LOCK_SECONDS: "${SLIP_REVIEW_LEG_CACHE_LOCK_SECONDS:-300}"
+      SLIP_REVIEW_LEG_CACHE_WAIT_SECONDS: "${SLIP_REVIEW_LEG_CACHE_WAIT_SECONDS:-45}"
+      SLIP_REVIEW_STALE_AFTER_SECONDS: "${SLIP_REVIEW_STALE_AFTER_SECONDS:-1200}"
+      SLIP_REVIEW_DEEPSEEK_MAX_GAMES: "${SLIP_REVIEW_DEEPSEEK_MAX_GAMES:-5}"
+      SLIP_REVIEW_STREAM_TICKET_SECONDS: "${SLIP_REVIEW_STREAM_TICKET_SECONDS:-1800}"
+      SLIP_REVIEW_QUEUE: "${SLIP_REVIEW_QUEUE:-slip_review}"
+      SLIP_REVIEW_IMPORT_QUEUE: "${SLIP_REVIEW_IMPORT_QUEUE:-slip_review_import}"
+      SLIP_REVIEW_LEG_QUEUE: "${SLIP_REVIEW_LEG_QUEUE:-slip_review_leg}"
+      SLIP_REVIEW_FINALIZE_QUEUE: "${SLIP_REVIEW_FINALIZE_QUEUE:-slip_review_finalize}"
+      TOKEN_FREE_DAILY_CAP: "${TOKEN_FREE_DAILY_CAP:-50}"
+      TOKEN_FREE_REFILL_THRESHOLD: "${TOKEN_FREE_REFILL_THRESHOLD:-10}"
+      TOKEN_SIGNUP_GRANT: "${TOKEN_SIGNUP_GRANT:-50}"
+      TOKEN_FREE_REFILL_HOUR: "${TOKEN_FREE_REFILL_HOUR:-0}"
+      TOKEN_FREE_REFILL_MINUTE: "${TOKEN_FREE_REFILL_MINUTE:-15}"
+      TOKEN_PURCHASE_PACKAGES: "${TOKEN_PURCHASE_PACKAGES:-240:990,480:1980,720:2970,960:3960,1200:4950}"
+      TOKEN_PURCHASE_CURRENCY: "${TOKEN_PURCHASE_CURRENCY:-NGN}"
+      SLIP_REVIEW_TOKEN_COST_PER_GAME: "${SLIP_REVIEW_TOKEN_COST_PER_GAME:-1}"
+      SLIP_REVIEW_RANDOMIZE_TOKEN_COST: "${SLIP_REVIEW_RANDOMIZE_TOKEN_COST:-5}"
+      TOKEN_RESERVATION_TTL_MINUTES: "${TOKEN_RESERVATION_TTL_MINUTES:-30}"
+      TOKEN_RESERVATION_EXPIRY_MINUTES: "${TOKEN_RESERVATION_EXPIRY_MINUTES:-*/5}"
+      TOKEN_RESERVATION_EXPIRY_LIMIT: "${TOKEN_RESERVATION_EXPIRY_LIMIT:-200}"
+      PAYFONTE_BASE_URL: "${PAYFONTE_BASE_URL:-https://sandbox-api.payfonte.com}"
+      PAYFONTE_CLIENT_ID: "${PAYFONTE_CLIENT_ID:-}"
+      PAYFONTE_CLIENT_SECRET: "${PAYFONTE_CLIENT_SECRET:-}"
+      PAYFONTE_COLLECTION_PROVIDER: "${PAYFONTE_COLLECTION_PROVIDER:-bank-transfer-nigeria}"
+      PAYFONTE_BANK_TRANSFER_NETWORK: "${PAYFONTE_BANK_TRANSFER_NETWORK:-}"
+      PAYFONTE_WEBHOOK_URL: "${PAYFONTE_WEBHOOK_URL:-}"
+      PAYFONTE_TIMEOUT: "${PAYFONTE_TIMEOUT:-30}"
+      PAYFONTE_VIRTUAL_ACCOUNT_TTL_MINUTES: "${PAYFONTE_VIRTUAL_ACCOUNT_TTL_MINUTES:-30}"
+    command: celery -A config worker --loglevel=info -Q ${SLIP_REVIEW_IMPORT_QUEUE:-slip_review_import} --concurrency=${SLIP_REVIEW_IMPORT_WORKER_CONCURRENCY:-2} --max-tasks-per-child=${SLIP_REVIEW_IMPORT_MAX_TASKS_PER_CHILD:-50} --prefetch-multiplier=1
+    volumes:
+      - media:/home/appuser/media
+
+  celery-slip-review-leg-worker:
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile
+      target: worker
+    restart: unless-stopped
+    environment:
+      DJANGO_SETTINGS_MODULE: config.settings
+      TZ: Africa/Lagos
+      ENABLE_WEBSOCKETS: "${ENABLE_WEBSOCKETS:-true}"
+      SLIP_REVIEW_PARALLEL_LEG_THRESHOLD: "${SLIP_REVIEW_PARALLEL_LEG_THRESHOLD:-4}"
+      SLIP_REVIEW_ANALYSIS_WORKERS: "${SLIP_REVIEW_ANALYSIS_WORKERS:-4}"
+      SLIP_REVIEW_LEG_CACHE_TTL_SECONDS: "${SLIP_REVIEW_LEG_CACHE_TTL_SECONDS:-900}"
+      SLIP_REVIEW_LEG_CACHE_LOCK_SECONDS: "${SLIP_REVIEW_LEG_CACHE_LOCK_SECONDS:-300}"
+      SLIP_REVIEW_LEG_CACHE_WAIT_SECONDS: "${SLIP_REVIEW_LEG_CACHE_WAIT_SECONDS:-45}"
+      SLIP_REVIEW_STALE_AFTER_SECONDS: "${SLIP_REVIEW_STALE_AFTER_SECONDS:-1200}"
+      SLIP_REVIEW_DEEPSEEK_MAX_GAMES: "${SLIP_REVIEW_DEEPSEEK_MAX_GAMES:-5}"
+      SLIP_REVIEW_STREAM_TICKET_SECONDS: "${SLIP_REVIEW_STREAM_TICKET_SECONDS:-1800}"
+      SLIP_REVIEW_QUEUE: "${SLIP_REVIEW_QUEUE:-slip_review}"
+      SLIP_REVIEW_IMPORT_QUEUE: "${SLIP_REVIEW_IMPORT_QUEUE:-slip_review_import}"
+      SLIP_REVIEW_LEG_QUEUE: "${SLIP_REVIEW_LEG_QUEUE:-slip_review_leg}"
+      SLIP_REVIEW_FINALIZE_QUEUE: "${SLIP_REVIEW_FINALIZE_QUEUE:-slip_review_finalize}"
+      TOKEN_FREE_DAILY_CAP: "${TOKEN_FREE_DAILY_CAP:-50}"
+      TOKEN_FREE_REFILL_THRESHOLD: "${TOKEN_FREE_REFILL_THRESHOLD:-10}"
+      TOKEN_SIGNUP_GRANT: "${TOKEN_SIGNUP_GRANT:-50}"
+      TOKEN_FREE_REFILL_HOUR: "${TOKEN_FREE_REFILL_HOUR:-0}"
+      TOKEN_FREE_REFILL_MINUTE: "${TOKEN_FREE_REFILL_MINUTE:-15}"
+      TOKEN_PURCHASE_PACKAGES: "${TOKEN_PURCHASE_PACKAGES:-240:990,480:1980,720:2970,960:3960,1200:4950}"
+      TOKEN_PURCHASE_CURRENCY: "${TOKEN_PURCHASE_CURRENCY:-NGN}"
+      SLIP_REVIEW_TOKEN_COST_PER_GAME: "${SLIP_REVIEW_TOKEN_COST_PER_GAME:-1}"
+      SLIP_REVIEW_RANDOMIZE_TOKEN_COST: "${SLIP_REVIEW_RANDOMIZE_TOKEN_COST:-5}"
+      TOKEN_RESERVATION_TTL_MINUTES: "${TOKEN_RESERVATION_TTL_MINUTES:-30}"
+      TOKEN_RESERVATION_EXPIRY_MINUTES: "${TOKEN_RESERVATION_EXPIRY_MINUTES:-*/5}"
+      TOKEN_RESERVATION_EXPIRY_LIMIT: "${TOKEN_RESERVATION_EXPIRY_LIMIT:-200}"
+      PAYFONTE_BASE_URL: "${PAYFONTE_BASE_URL:-https://sandbox-api.payfonte.com}"
+      PAYFONTE_CLIENT_ID: "${PAYFONTE_CLIENT_ID:-}"
+      PAYFONTE_CLIENT_SECRET: "${PAYFONTE_CLIENT_SECRET:-}"
+      PAYFONTE_COLLECTION_PROVIDER: "${PAYFONTE_COLLECTION_PROVIDER:-bank-transfer-nigeria}"
+      PAYFONTE_BANK_TRANSFER_NETWORK: "${PAYFONTE_BANK_TRANSFER_NETWORK:-}"
+      PAYFONTE_WEBHOOK_URL: "${PAYFONTE_WEBHOOK_URL:-}"
+      PAYFONTE_TIMEOUT: "${PAYFONTE_TIMEOUT:-30}"
+      PAYFONTE_VIRTUAL_ACCOUNT_TTL_MINUTES: "${PAYFONTE_VIRTUAL_ACCOUNT_TTL_MINUTES:-30}"
+    command: celery -A config worker --loglevel=info -Q ${SLIP_REVIEW_LEG_QUEUE:-slip_review_leg} --concurrency=${SLIP_REVIEW_LEG_WORKER_CONCURRENCY:-8} --max-tasks-per-child=${SLIP_REVIEW_LEG_MAX_TASKS_PER_CHILD:-20} --prefetch-multiplier=1
+    volumes:
+      - media:/home/appuser/media
+
+  celery-slip-review-finalize-worker:
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile
+      target: worker
+    restart: unless-stopped
+    environment:
+      DJANGO_SETTINGS_MODULE: config.settings
+      TZ: Africa/Lagos
+      ENABLE_WEBSOCKETS: "${ENABLE_WEBSOCKETS:-true}"
+      SLIP_REVIEW_STALE_AFTER_SECONDS: "${SLIP_REVIEW_STALE_AFTER_SECONDS:-1200}"
+      SLIP_REVIEW_DEEPSEEK_MAX_GAMES: "${SLIP_REVIEW_DEEPSEEK_MAX_GAMES:-5}"
+      SLIP_REVIEW_STREAM_TICKET_SECONDS: "${SLIP_REVIEW_STREAM_TICKET_SECONDS:-1800}"
+      SLIP_REVIEW_QUEUE: "${SLIP_REVIEW_QUEUE:-slip_review}"
+      SLIP_REVIEW_IMPORT_QUEUE: "${SLIP_REVIEW_IMPORT_QUEUE:-slip_review_import}"
+      SLIP_REVIEW_LEG_QUEUE: "${SLIP_REVIEW_LEG_QUEUE:-slip_review_leg}"
+      SLIP_REVIEW_FINALIZE_QUEUE: "${SLIP_REVIEW_FINALIZE_QUEUE:-slip_review_finalize}"
+      TOKEN_FREE_DAILY_CAP: "${TOKEN_FREE_DAILY_CAP:-50}"
+      TOKEN_FREE_REFILL_THRESHOLD: "${TOKEN_FREE_REFILL_THRESHOLD:-10}"
+      TOKEN_SIGNUP_GRANT: "${TOKEN_SIGNUP_GRANT:-50}"
+      TOKEN_FREE_REFILL_HOUR: "${TOKEN_FREE_REFILL_HOUR:-0}"
+      TOKEN_FREE_REFILL_MINUTE: "${TOKEN_FREE_REFILL_MINUTE:-15}"
+      TOKEN_PURCHASE_PACKAGES: "${TOKEN_PURCHASE_PACKAGES:-240:990,480:1980,720:2970,960:3960,1200:4950}"
+      TOKEN_PURCHASE_CURRENCY: "${TOKEN_PURCHASE_CURRENCY:-NGN}"
+      SLIP_REVIEW_TOKEN_COST_PER_GAME: "${SLIP_REVIEW_TOKEN_COST_PER_GAME:-1}"
+      SLIP_REVIEW_RANDOMIZE_TOKEN_COST: "${SLIP_REVIEW_RANDOMIZE_TOKEN_COST:-5}"
+      TOKEN_RESERVATION_TTL_MINUTES: "${TOKEN_RESERVATION_TTL_MINUTES:-30}"
+      TOKEN_RESERVATION_EXPIRY_MINUTES: "${TOKEN_RESERVATION_EXPIRY_MINUTES:-*/5}"
+      TOKEN_RESERVATION_EXPIRY_LIMIT: "${TOKEN_RESERVATION_EXPIRY_LIMIT:-200}"
+      PAYFONTE_BASE_URL: "${PAYFONTE_BASE_URL:-https://sandbox-api.payfonte.com}"
+      PAYFONTE_CLIENT_ID: "${PAYFONTE_CLIENT_ID:-}"
+      PAYFONTE_CLIENT_SECRET: "${PAYFONTE_CLIENT_SECRET:-}"
+      PAYFONTE_COLLECTION_PROVIDER: "${PAYFONTE_COLLECTION_PROVIDER:-bank-transfer-nigeria}"
+      PAYFONTE_BANK_TRANSFER_NETWORK: "${PAYFONTE_BANK_TRANSFER_NETWORK:-}"
+      PAYFONTE_WEBHOOK_URL: "${PAYFONTE_WEBHOOK_URL:-}"
+      PAYFONTE_TIMEOUT: "${PAYFONTE_TIMEOUT:-30}"
+      PAYFONTE_VIRTUAL_ACCOUNT_TTL_MINUTES: "${PAYFONTE_VIRTUAL_ACCOUNT_TTL_MINUTES:-30}"
+    command: celery -A config worker --loglevel=info -Q ${SLIP_REVIEW_FINALIZE_QUEUE:-slip_review_finalize} --concurrency=${SLIP_REVIEW_FINALIZE_WORKER_CONCURRENCY:-2} --max-tasks-per-child=${SLIP_REVIEW_FINALIZE_MAX_TASKS_PER_CHILD:-50} --prefetch-multiplier=1
+    volumes:
+      - media:/home/appuser/media
+
+  celery-beat:
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile
+      target: worker
+    restart: unless-stopped
+    environment:
+      DJANGO_SETTINGS_MODULE: config.settings
+      TZ: Africa/Lagos
+      ENABLE_WEBSOCKETS: "${ENABLE_WEBSOCKETS:-true}"
+      ALGO_DAILY_QUEUE: "${ALGO_DAILY_QUEUE:-algo_daily}"
+      ALGO_SCORING_QUEUE: "${ALGO_SCORING_QUEUE:-algo_scoring}"
+      ALGO_LLM_QUEUE: "${ALGO_LLM_QUEUE:-algo_llm}"
+      ALGO_STATPAL_QUEUE: "${ALGO_STATPAL_QUEUE:-algo_statpal}"
+      ALGO_SETTLEMENT_QUEUE: "${ALGO_SETTLEMENT_QUEUE:-algo_settlement}"
+      ALGO_MAINTENANCE_QUEUE: "${ALGO_MAINTENANCE_QUEUE:-algo_maintenance}"
+      SLIP_REVIEW_STALE_AFTER_SECONDS: "${SLIP_REVIEW_STALE_AFTER_SECONDS:-1200}"
+      SLIP_REVIEW_RECOVERY_MINUTES: "${SLIP_REVIEW_RECOVERY_MINUTES:-*/5}"
+      SLIP_REVIEW_RECOVERY_LIMIT: "${SLIP_REVIEW_RECOVERY_LIMIT:-25}"
+      SLIP_REVIEW_MARKET_CACHE_BUILD_ENABLED: "${SLIP_REVIEW_MARKET_CACHE_BUILD_ENABLED:-true}"
+      SLIP_REVIEW_MARKET_CACHE_BUILD_HOURS: "${SLIP_REVIEW_MARKET_CACHE_BUILD_HOURS:-0,12}"
+      SLIP_REVIEW_MARKET_CACHE_BUILD_MINUTE: "${SLIP_REVIEW_MARKET_CACHE_BUILD_MINUTE:-40}"
+      SLIP_REVIEW_MARKET_CACHE_BUILD_DAYS: "${SLIP_REVIEW_MARKET_CACHE_BUILD_DAYS:-3}"
+      SLIP_REVIEW_MARKET_CACHE_BUILD_SYNC_FIXTURES: "${SLIP_REVIEW_MARKET_CACHE_BUILD_SYNC_FIXTURES:-true}"
+      SLIP_REVIEW_MARKET_CACHE_BUILD_FORCE: "${SLIP_REVIEW_MARKET_CACHE_BUILD_FORCE:-false}"
+      SLIP_REVIEW_MARKET_CACHE_BUILD_MAX_FIXTURES: "${SLIP_REVIEW_MARKET_CACHE_BUILD_MAX_FIXTURES:-0}"
+      SLIP_REVIEW_MARKET_CACHE_CLEANUP_ENABLED: "${SLIP_REVIEW_MARKET_CACHE_CLEANUP_ENABLED:-true}"
+      SLIP_REVIEW_MARKET_CACHE_CLEANUP_MINUTES: "${SLIP_REVIEW_MARKET_CACHE_CLEANUP_MINUTES:-55}"
+      SLIP_REVIEW_MARKET_CACHE_CLEANUP_GRACE_SECONDS: "${SLIP_REVIEW_MARKET_CACHE_CLEANUP_GRACE_SECONDS:-0}"
+      SLIP_REVIEW_MARKET_CACHE_CLEANUP_LIMIT: "${SLIP_REVIEW_MARKET_CACHE_CLEANUP_LIMIT:-0}"
+      SLIP_REVIEW_QUEUE: "${SLIP_REVIEW_QUEUE:-slip_review}"
+      SLIP_REVIEW_IMPORT_QUEUE: "${SLIP_REVIEW_IMPORT_QUEUE:-slip_review_import}"
+      SLIP_REVIEW_LEG_QUEUE: "${SLIP_REVIEW_LEG_QUEUE:-slip_review_leg}"
+      SLIP_REVIEW_FINALIZE_QUEUE: "${SLIP_REVIEW_FINALIZE_QUEUE:-slip_review_finalize}"
+      TOKEN_FREE_DAILY_CAP: "${TOKEN_FREE_DAILY_CAP:-50}"
+      TOKEN_FREE_REFILL_THRESHOLD: "${TOKEN_FREE_REFILL_THRESHOLD:-10}"
+      TOKEN_SIGNUP_GRANT: "${TOKEN_SIGNUP_GRANT:-50}"
+      TOKEN_FREE_REFILL_HOUR: "${TOKEN_FREE_REFILL_HOUR:-0}"
+      TOKEN_FREE_REFILL_MINUTE: "${TOKEN_FREE_REFILL_MINUTE:-15}"
+      TOKEN_PURCHASE_PACKAGES: "${TOKEN_PURCHASE_PACKAGES:-240:990,480:1980,720:2970,960:3960,1200:4950}"
+      TOKEN_PURCHASE_CURRENCY: "${TOKEN_PURCHASE_CURRENCY:-NGN}"
+      SLIP_REVIEW_TOKEN_COST_PER_GAME: "${SLIP_REVIEW_TOKEN_COST_PER_GAME:-1}"
+      SLIP_REVIEW_RANDOMIZE_TOKEN_COST: "${SLIP_REVIEW_RANDOMIZE_TOKEN_COST:-5}"
+      TOKEN_RESERVATION_TTL_MINUTES: "${TOKEN_RESERVATION_TTL_MINUTES:-30}"
+      TOKEN_RESERVATION_EXPIRY_MINUTES: "${TOKEN_RESERVATION_EXPIRY_MINUTES:-*/5}"
+      TOKEN_RESERVATION_EXPIRY_LIMIT: "${TOKEN_RESERVATION_EXPIRY_LIMIT:-200}"
+      PAYFONTE_BASE_URL: "${PAYFONTE_BASE_URL:-https://sandbox-api.payfonte.com}"
+      PAYFONTE_CLIENT_ID: "${PAYFONTE_CLIENT_ID:-}"
+      PAYFONTE_CLIENT_SECRET: "${PAYFONTE_CLIENT_SECRET:-}"
+      PAYFONTE_COLLECTION_PROVIDER: "${PAYFONTE_COLLECTION_PROVIDER:-bank-transfer-nigeria}"
+      PAYFONTE_BANK_TRANSFER_NETWORK: "${PAYFONTE_BANK_TRANSFER_NETWORK:-}"
+      PAYFONTE_WEBHOOK_URL: "${PAYFONTE_WEBHOOK_URL:-}"
+      PAYFONTE_TIMEOUT: "${PAYFONTE_TIMEOUT:-30}"
+      PAYFONTE_VIRTUAL_ACCOUNT_TTL_MINUTES: "${PAYFONTE_VIRTUAL_ACCOUNT_TTL_MINUTES:-30}"
+    command: celery -A config beat --loglevel=info --schedule=/tmp/celerybeat-schedule
+
+volumes:
+  media:
+    name: betpreneur_media
