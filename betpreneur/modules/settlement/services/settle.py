@@ -384,13 +384,10 @@ class SettlementService:
             | Q(match_date__isnull=True, run__target_date=target_date),
             status=Pick.Status.PENDING,
         )
-        predictions = list(MarketPrediction.objects.filter(
+        predictions = MarketPrediction.objects.filter(
             match_date=target_date,
             status=MarketPrediction.Status.PENDING,
-        ))
-        predictions_by_match = {}
-        for prediction in predictions:
-            predictions_by_match.setdefault(str(prediction.match_id or ""), []).append(prediction)
+        ).order_by("id")
         updated = 0
         predictions_updated = 0
         total_pnl = 0
@@ -408,7 +405,6 @@ class SettlementService:
                 fixture,
                 target_date=target_date,
                 match_id=key,
-                predictions=predictions_by_match.get(key, []),
             )
             feedback_recorded.add(key)
 
@@ -466,7 +462,7 @@ class SettlementService:
                     "pnl": float(pick.pnl or 0),
                 })
 
-        for prediction in predictions:
+        for prediction in predictions.iterator(chunk_size=250):
             fixture = fixture_map.get(str(prediction.match_id))
             if not fixture:
                 continue
@@ -537,7 +533,7 @@ class SettlementService:
             "settled_internal_predictions_sampled": predictions_updated > len(settled_predictions_sample),
         }
 
-    def _record_team_match_feedback(self, fixture, *, target_date, match_id, predictions):
+    def _record_team_match_feedback(self, fixture, *, target_date, match_id):
         goals = fixture.get("goals") or {}
         home_goals = goals.get("home")
         away_goals = goals.get("away")
@@ -554,7 +550,7 @@ class SettlementService:
             detailed_stats = self._statpal_detailed_actual_stats(match_id, fixture.get("provider_match_id"))
             if detailed_stats:
                 actual_stats = detailed_stats
-        prediction_snapshot = self._prediction_feedback_snapshot(predictions)
+        prediction_snapshot = self._prediction_feedback_snapshot(target_date=target_date, match_id=match_id)
         fixture_id = str((fixture.get("fixture") or {}).get("id") or match_id or "")
         provider_match_id = str(fixture.get("provider_match_id") or "").strip()
         source = str(fixture.get("provider") or "settlement")
@@ -646,13 +642,23 @@ class SettlementService:
         return self._statpal_actual_stats(snapshot.payload or {})
 
     @staticmethod
-    def _prediction_feedback_snapshot(predictions):
+    def _prediction_feedback_snapshot(*, target_date, match_id):
+        predictions = (
+            MarketPrediction.objects.filter(match_date=target_date, match_id=match_id)
+            .only(
+                "market",
+                "confidence",
+                "raw_confidence",
+                "odds",
+                "odds_source",
+                "eligible",
+                "published",
+                "insights",
+            )
+            .order_by("-published", "-eligible", "-confidence", "market")[:40]
+        )
         markets = []
-        for prediction in sorted(
-            predictions,
-            key=lambda item: (item.published, item.eligible, item.confidence or 0),
-            reverse=True,
-        )[:40]:
+        for prediction in predictions:
             insights = prediction.insights or {}
             taxonomy = insights.get("market_taxonomy") or {}
             markets.append({
