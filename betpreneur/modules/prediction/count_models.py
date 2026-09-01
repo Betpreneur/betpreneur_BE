@@ -141,6 +141,7 @@ def _team_event_expected(features: FixtureFeatureSet, event: str, config: dict[s
     season_profile = payload.get("season_profile") or {}
     opponent_season_profile = opponent_payload.get("season_profile") or {}
     recent = payload.get("recent_form") or {}
+    feedback = ((features.features or {}).get("prediction_feedback") or {}).get(side) or {}
     referee = (features.features or {}).get("referee") or {}
     league_average = float(config["league_team_average"])
     sources: list[str] = []
@@ -168,6 +169,11 @@ def _team_event_expected(features: FixtureFeatureSet, event: str, config: dict[s
         sources.append("recent_form_profile")
     else:
         recent_value = None
+    feedback_value = _feedback_value(feedback, event)
+    if feedback_value is not None and _plausible_team_rate(feedback_value, config):
+        sources.append("prediction_feedback")
+    else:
+        feedback_value = None
     referee_rate = None
     if event == "cards":
         referee_rate = _referee_team_card_rate(referee, config)
@@ -180,6 +186,7 @@ def _team_event_expected(features: FixtureFeatureSet, event: str, config: dict[s
             (own_season, 0.22),
             (opponent_concedes, 0.18),
             (recent_value, 0.12),
+            (feedback_value, 0.10),
             (referee_rate, 0.18),
         ),
         fallback=league_average,
@@ -206,6 +213,21 @@ def _recent_value(recent: dict[str, Any], *, key: str, side: str) -> float | Non
         return value
     raw_key = key.replace("_per_match", "")
     return _per_match(form5.get(raw_key), form5.get("matches"))
+
+
+def _feedback_value(feedback: dict[str, Any], event: str) -> float | None:
+    summary = feedback.get("summary") if isinstance(feedback.get("summary"), dict) else {}
+    matches = _float(summary.get("matches")) or 0.0
+    if matches < 2:
+        return None
+    key = {
+        "corners": "avg_corners_for",
+        "cards": "avg_cards_for",
+        "sot": "avg_shots_on_target_for",
+    }.get(event)
+    if not key:
+        return None
+    return _float(summary.get(key))
 
 
 def _referee_team_card_rate(referee: dict[str, Any], config: dict[str, Any]) -> float | None:

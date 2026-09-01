@@ -13,7 +13,11 @@ from betpreneur.modules.catalog.api import (
     TeamSeasonProfile,
     normalize_fixture_text,
 )
-from betpreneur.modules.prediction.api import FixtureFeatureSet, build_fixture_features
+from betpreneur.modules.prediction.api import (
+    FixtureFeatureSet,
+    PredictionTeamMatchFeedback,
+    build_fixture_features,
+)
 from betpreneur.modules.scoring.api import FixtureLineup, PlayerAvailability, TeamRateProfile
 
 
@@ -261,3 +265,31 @@ class FixtureFeatureBuilderTests(TestCase):
         self.assertEqual(recent["goals_against_per_match"], 1.6)
         self.assertEqual(recent["corners_for_per_match"], 6.2)
         self.assertEqual(recent["shots_on_target_for_per_match"], 5.1)
+
+    def test_build_fixture_features_includes_previous_prediction_feedback(self):
+        PredictionTeamMatchFeedback.objects.create(
+            fixture_id="previous-1",
+            fixture_name="Arsenal vs Aston Villa",
+            match_date=date(2026, 8, 20),
+            team_name="Arsenal",
+            opponent_name="Aston Villa",
+            side="home",
+            actual_result="loss",
+            goals_for=1,
+            goals_against=2,
+            corners_for=7,
+            corners_against=4,
+            cards_for=2,
+            cards_against=3,
+            prediction_snapshot={
+                "markets": [{"market": "Over 2.5", "confidence": 72, "data_status": "modelled"}]
+            },
+        )
+
+        feature_set = build_fixture_features(self.fixture)
+        feedback = feature_set.features["prediction_feedback"]["home"]
+
+        self.assertEqual(feedback["matches"], 1)
+        self.assertEqual(feedback["summary"]["avg_goals_for"], 1.0)
+        self.assertEqual(feedback["recent"][0]["opponent"], "Aston Villa")
+        self.assertEqual(feedback["recent"][0]["prediction_snapshot"]["markets"][0]["market"], "Over 2.5")

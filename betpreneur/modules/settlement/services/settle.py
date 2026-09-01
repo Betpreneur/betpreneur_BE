@@ -23,10 +23,12 @@ from betpreneur.modules.catalog.api import (
     FixtureCache,
     ProviderFixtureMap,
     SlipReviewMarketCache,
+    StatPalFixtureSnapshot,
     runner_env,
 )
 from betpreneur.modules.markets.api import can_settle_market
 from betpreneur.modules.picks.api import MarketPrediction, Pick
+from betpreneur.modules.prediction.api import record_team_match_feedback
 from betpreneur.modules.slips.api import SlipSelection
 
 from ..models import SettlementRun
@@ -301,9 +303,68 @@ class SettlementService:
             },
             "goals": {"home": home_goals, "away": away_goals},
             "teams": {"home": {"name": home}, "away": {"name": away}},
+            "actual_stats": self._statpal_actual_stats(payload),
             "provider": "statpal",
             "provider_match_id": provider_match_id,
         }
+
+    def _statpal_actual_stats(self, payload):
+        payload = payload if isinstance(payload, dict) else {}
+        team_stats = payload.get("team_stats") if isinstance(payload.get("team_stats"), dict) else {}
+        return {
+            "home": self._statpal_side_actuals(payload, team_stats, "home"),
+            "away": self._statpal_side_actuals(payload, team_stats, "away"),
+            "referee_name": self._statpal_referee_name(payload),
+        }
+
+    def _statpal_side_actuals(self, payload, team_stats, side):
+        stats = team_stats.get(side) if isinstance(team_stats.get(side), dict) else {}
+        return {
+            "corners": self._statpal_nested_float(stats, "corners", "total"),
+            "expected_goals": self._statpal_nested_float(stats, "expected_goals", "total"),
+            "fouls": self._statpal_nested_float(stats, "fouls", "total"),
+            "yellow_cards": self._statpal_event_count(payload, side, "yellowcards"),
+            "red_cards": self._statpal_event_count(payload, side, "redcards"),
+            "shots_on_target": self._statpal_nested_float(stats, "shots_on_goal", "total")
+            or self._statpal_nested_float(stats, "shots_on_target", "total"),
+        }
+
+    @staticmethod
+    def _statpal_nested_float(stats, group, key):
+        group_payload = stats.get(group) if isinstance(stats, dict) else None
+        if not isinstance(group_payload, dict):
+            return None
+        try:
+            value = group_payload.get(key)
+            if value in (None, ""):
+                return None
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _statpal_referee_name(payload):
+        referee = payload.get("referee")
+        if isinstance(referee, dict) and referee.get("name"):
+            return str(referee.get("name") or "")
+        match_info = payload.get("match_info") if isinstance(payload.get("match_info"), dict) else {}
+        referee = match_info.get("referee")
+        if isinstance(referee, dict):
+            return str(referee.get("name") or "")
+        return str(referee or "")
+
+    @staticmethod
+    def _statpal_event_count(payload, side, event_name):
+        event_summary = payload.get("event_summary") if isinstance(payload.get("event_summary"), dict) else {}
+        side_events = event_summary.get(side) if isinstance(event_summary.get(side), dict) else {}
+        events = side_events.get(event_name)
+        if isinstance(events, dict):
+            events = events.get("event")
+        if isinstance(events, list):
+            return len(events)
+        if isinstance(events, dict):
+            return 1
+        return None
 
     @staticmethod
     def _fixture_goals(fixture):
@@ -323,16 +384,33 @@ class SettlementService:
             | Q(match_date__isnull=True, run__target_date=target_date),
             status=Pick.Status.PENDING,
         )
-        predictions = MarketPrediction.objects.filter(
+        predictions = list(MarketPrediction.objects.filter(
             match_date=target_date,
             status=MarketPrediction.Status.PENDING,
-        )
+        ))
+        predictions_by_match = {}
+        for prediction in predictions:
+            predictions_by_match.setdefault(str(prediction.match_id or ""), []).append(prediction)
         updated = 0
         predictions_updated = 0
         total_pnl = 0
-        settled = []
-        settled_predictions = []
+        settled_sample = []
+        settled_predictions_sample = []
+        prediction_status_counts = {"win": 0, "loss": 0, "void": 0}
         first_scorer_cache = {}
+        feedback_recorded = set()
+
+        def record_feedback_once(match_id, fixture):
+            key = str(match_id or "")
+            if not key or key in feedback_recorded:
+                return
+            self._record_team_match_feedback(
+                fixture,
+                target_date=target_date,
+                match_id=key,
+                predictions=predictions_by_match.get(key, []),
+            )
+            feedback_recorded.add(key)
 
         for pick in picks:
             fixture = fixture_map.get(str(pick.match_id))
@@ -344,6 +422,7 @@ class SettlementService:
             away_goals = goals.get("away")
             if home_goals is None or away_goals is None:
                 continue
+            record_feedback_once(pick.match_id, fixture)
 
             teams = fixture.get("teams") or {}
             home_team = (teams.get("home") or {}).get("name")
@@ -377,14 +456,15 @@ class SettlementService:
 
             updated += 1
             total_pnl = round(total_pnl + float(pick.pnl or 0), 2)
-            settled.append({
-                "id": pick.id,
-                "fixture": pick.fixture,
-                "market": pick.market,
-                "status": pick.status,
-                "score": pick.score,
-                "pnl": float(pick.pnl or 0),
-            })
+            if len(settled_sample) < 100:
+                settled_sample.append({
+                    "id": pick.id,
+                    "fixture": pick.fixture,
+                    "market": pick.market,
+                    "status": pick.status,
+                    "score": pick.score,
+                    "pnl": float(pick.pnl or 0),
+                })
 
         for prediction in predictions:
             fixture = fixture_map.get(str(prediction.match_id))
@@ -396,6 +476,7 @@ class SettlementService:
             away_goals = goals.get("away")
             if home_goals is None or away_goals is None:
                 continue
+            record_feedback_once(prediction.match_id, fixture)
 
             teams = fixture.get("teams") or {}
             home_team = (teams.get("home") or {}).get("name")
@@ -411,12 +492,15 @@ class SettlementService:
             if won is None:
                 prediction.status = MarketPrediction.Status.VOID
                 prediction.pnl_simulated = Decimal("0")
+                prediction_status_counts["void"] += 1
             elif won:
                 prediction.status = MarketPrediction.Status.WIN
                 prediction.pnl_simulated = Decimal(str(round(float(stake) * (float(prediction.odds) - 1), 2)))
+                prediction_status_counts["win"] += 1
             else:
                 prediction.status = MarketPrediction.Status.LOSS
                 prediction.pnl_simulated = -stake
+                prediction_status_counts["loss"] += 1
 
             prediction.score = f"{home_goals}-{away_goals}"
             if prediction.market.startswith("Corners "):
@@ -428,15 +512,16 @@ class SettlementService:
             prediction.save(update_fields=["status", "pnl_simulated", "score", "result", "settled_at"])
 
             predictions_updated += 1
-            settled_predictions.append({
-                "id": prediction.id,
-                "fixture": prediction.fixture,
-                "market": prediction.market,
-                "published": prediction.published,
-                "status": prediction.status,
-                "score": prediction.score,
-                "pnl_simulated": float(prediction.pnl_simulated or 0),
-            })
+            if len(settled_predictions_sample) < 100:
+                settled_predictions_sample.append({
+                    "id": prediction.id,
+                    "fixture": prediction.fixture,
+                    "market": prediction.market,
+                    "published": prediction.published,
+                    "status": prediction.status,
+                    "score": prediction.score,
+                    "pnl_simulated": float(prediction.pnl_simulated or 0),
+                })
 
         return {
             "status": "success",
@@ -444,10 +529,147 @@ class SettlementService:
             "updated_count": updated,
             "database_updated_count": updated,
             "internal_predictions_updated_count": predictions_updated,
+            "internal_prediction_status_counts": prediction_status_counts,
             "total_pnl": total_pnl,
-            "settled_picks": settled,
-            "settled_internal_predictions": settled_predictions,
+            "settled_picks": settled_sample,
+            "settled_internal_predictions": settled_predictions_sample,
+            "settled_picks_sampled": updated > len(settled_sample),
+            "settled_internal_predictions_sampled": predictions_updated > len(settled_predictions_sample),
         }
+
+    def _record_team_match_feedback(self, fixture, *, target_date, match_id, predictions):
+        goals = fixture.get("goals") or {}
+        home_goals = goals.get("home")
+        away_goals = goals.get("away")
+        if home_goals is None or away_goals is None:
+            return
+        teams = fixture.get("teams") or {}
+        home_team = (teams.get("home") or {}).get("name") or ""
+        away_team = (teams.get("away") or {}).get("name") or ""
+        if not home_team or not away_team:
+            return
+
+        actual_stats = fixture.get("actual_stats") or {}
+        if not self._actual_stats_have_counts(actual_stats):
+            detailed_stats = self._statpal_detailed_actual_stats(match_id, fixture.get("provider_match_id"))
+            if detailed_stats:
+                actual_stats = detailed_stats
+        prediction_snapshot = self._prediction_feedback_snapshot(predictions)
+        fixture_id = str((fixture.get("fixture") or {}).get("id") or match_id or "")
+        provider_match_id = str(fixture.get("provider_match_id") or "").strip()
+        source = str(fixture.get("provider") or "settlement")
+
+        home_result, away_result = self._team_results(home_goals, away_goals)
+        sides = (
+            ("home", home_team, away_team, home_goals, away_goals, home_result),
+            ("away", away_team, home_team, away_goals, home_goals, away_result),
+        )
+        for side, team, opponent, goals_for, goals_against, result in sides:
+            opponent_side = "away" if side == "home" else "home"
+            side_actuals = actual_stats.get(side) if isinstance(actual_stats.get(side), dict) else {}
+            opponent_actuals = (
+                actual_stats.get(opponent_side) if isinstance(actual_stats.get(opponent_side), dict) else {}
+            )
+            record_team_match_feedback(
+                fixture_id=fixture_id,
+                provider_match_id=provider_match_id,
+                fixture_name=f"{home_team} vs {away_team}",
+                match_date=target_date,
+                team_name=team,
+                opponent_name=opponent,
+                side=side,
+                actual_result=result,
+                goals_for=goals_for,
+                goals_against=goals_against,
+                corners_for=side_actuals.get("corners"),
+                corners_against=opponent_actuals.get("corners"),
+                cards_for=self._cards_total(side_actuals),
+                cards_against=self._cards_total(opponent_actuals),
+                shots_on_target_for=side_actuals.get("shots_on_target"),
+                shots_on_target_against=opponent_actuals.get("shots_on_target"),
+                referee_name=str(actual_stats.get("referee_name") or ""),
+                source=source,
+                prediction_snapshot=prediction_snapshot,
+                actual_stats={
+                    "team": side_actuals,
+                    "opponent": opponent_actuals,
+                    "score": f"{home_goals}-{away_goals}",
+                },
+            )
+
+    @staticmethod
+    def _team_results(home_goals, away_goals):
+        if home_goals == away_goals:
+            return "draw", "draw"
+        if home_goals > away_goals:
+            return "win", "loss"
+        return "loss", "win"
+
+    @staticmethod
+    def _cards_total(actuals):
+        yellow = actuals.get("yellow_cards")
+        red = actuals.get("red_cards")
+        if yellow is None and red is None:
+            return None
+        return float(yellow or 0) + float(red or 0)
+
+    @staticmethod
+    def _actual_stats_have_counts(actual_stats):
+        if not isinstance(actual_stats, dict):
+            return False
+        for side in ("home", "away"):
+            side_stats = actual_stats.get(side) if isinstance(actual_stats.get(side), dict) else {}
+            if side_stats.get("corners") is not None or side_stats.get("yellow_cards") is not None:
+                return True
+        return False
+
+    def _statpal_detailed_actual_stats(self, match_id, provider_match_id=""):
+        keys = {
+            str(match_id or "").strip(),
+            str(provider_match_id or "").strip(),
+            f"statpal:{str(provider_match_id or '').strip()}" if provider_match_id else "",
+        }
+        keys = {key for key in keys if key}
+        if not keys:
+            return {}
+        snapshot = (
+            StatPalFixtureSnapshot.objects.filter(
+                snapshot_type=StatPalFixtureSnapshot.SnapshotType.DETAILED_STATS,
+                status="available",
+            )
+            .filter(Q(match_id__in=keys) | Q(provider_match_id__in=keys))
+            .order_by("-updated_at")
+            .first()
+        )
+        if not snapshot:
+            return {}
+        return self._statpal_actual_stats(snapshot.payload or {})
+
+    @staticmethod
+    def _prediction_feedback_snapshot(predictions):
+        markets = []
+        for prediction in sorted(
+            predictions,
+            key=lambda item: (item.published, item.eligible, item.confidence or 0),
+            reverse=True,
+        )[:40]:
+            insights = prediction.insights or {}
+            taxonomy = insights.get("market_taxonomy") or {}
+            markets.append({
+                "market": prediction.market,
+                "market_family": taxonomy.get("family") or insights.get("market_family") or "",
+                "confidence": prediction.confidence,
+                "raw_confidence": prediction.raw_confidence,
+                "raw_probability": insights.get("raw_probability"),
+                "calibrated_probability": insights.get("calibrated_probability"),
+                "odds": float(prediction.odds) if prediction.odds is not None else None,
+                "odds_source": prediction.odds_source,
+                "eligible": prediction.eligible,
+                "published": prediction.published,
+                "model_sources": insights.get("model_sources") or [],
+                "data_status": insights.get("data_status", ""),
+            })
+        return {"markets": markets, "market_count": len(predictions)}
 
     def update_results(self, *, target_date=None):
         if target_date is not None:

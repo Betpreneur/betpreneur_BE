@@ -84,6 +84,8 @@ def _expected_goals(features: FixtureFeatureSet) -> tuple[float, float, tuple[st
 
     home_expected = _recent_goal_adjustment(payload.get("home") or {}, home_expected, side="home")
     away_expected = _recent_goal_adjustment(payload.get("away") or {}, away_expected, side="away")
+    home_expected = _feedback_goal_adjustment(payload, "home", home_expected)
+    away_expected = _feedback_goal_adjustment(payload, "away", away_expected)
     return round(_clamp(home_expected, 0.15, 5.0), 4), round(_clamp(away_expected, 0.15, 5.0), 4), tuple(warnings)
 
 
@@ -108,6 +110,18 @@ def _recent_goal_adjustment(side_payload: dict[str, Any], expected_goals: float,
     if recent_goals is None:
         return expected_goals
     return (expected_goals * 0.82) + (_clamp(recent_goals, 0.1, 4.5) * 0.18)
+
+
+def _feedback_goal_adjustment(payload: dict[str, Any], side: str, expected_goals: float) -> float:
+    feedback = ((payload.get("prediction_feedback") or {}).get(side) or {}).get("summary") or {}
+    matches = _float(feedback.get("matches")) or 0.0
+    if matches < 2:
+        return expected_goals
+    feedback_goals = _float(feedback.get("avg_goals_for"))
+    if feedback_goals is None:
+        return expected_goals
+    weight = min(0.12, matches / 80.0)
+    return (expected_goals * (1.0 - weight)) + (_clamp(feedback_goals, 0.1, 4.5) * weight)
 
 
 def _scoreline_payload(matrix) -> dict[str, float]:
@@ -163,6 +177,7 @@ def _input_summary(features: FixtureFeatureSet, payload: dict[str, Any]) -> dict
         "league_home_goal_baseline": scoring_environment.get("home_goal_baseline"),
         "league_away_goal_baseline": scoring_environment.get("away_goal_baseline"),
         "score_model_quality": goal_model.get("data_quality"),
+        "prediction_feedback": payload.get("prediction_feedback"),
     }
 
 

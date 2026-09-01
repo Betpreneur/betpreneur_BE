@@ -27,6 +27,7 @@ from betpreneur.modules.scoring.api import (
 )
 
 from .contracts import FixtureFeatureSet, PredictionDiagnostics, TeamStrengthSnapshot
+from .models import PredictionTeamMatchFeedback
 
 QUALITY_RANK = {
     "missing": 0,
@@ -133,6 +134,12 @@ def build_fixture_features(fixture=None, *, fixture_id: str = "") -> FixtureFeat
             "data_freshness": freshness,
             "provider_quality": _provider_quality(intelligence, freshness),
             "referee": referee,
+            "prediction_feedback": _prediction_feedback_payload(
+                home_team=str(fixture_payload.get("home_team") or ""),
+                away_team=str(fixture_payload.get("away_team") or ""),
+                fixture_id=resolved_id,
+                before_date=_as_date(fixture_payload.get("match_date") or fixture_payload.get("kickoff_utc")),
+            ),
         },
         diagnostics=_diagnostics(
             intelligence=intelligence,
@@ -211,6 +218,98 @@ def _public_fixture_payload(fixture: dict[str, Any], *, fixture_id: str) -> dict
         "away_team_id": _side_provider_id(fixture, "away"),
         "source": fixture.get("source") or "",
     }
+
+
+def _prediction_feedback_payload(
+    *, home_team: str, away_team: str, fixture_id: str, before_date: date | None
+) -> dict[str, Any]:
+    return {
+        "home": _team_prediction_feedback(
+            team_name=home_team,
+            opponent_name=away_team,
+            fixture_id=fixture_id,
+            before_date=before_date,
+        ),
+        "away": _team_prediction_feedback(
+            team_name=away_team,
+            opponent_name=home_team,
+            fixture_id=fixture_id,
+            before_date=before_date,
+        ),
+    }
+
+
+def _team_prediction_feedback(
+    *, team_name: str, opponent_name: str, fixture_id: str, before_date: date | None
+) -> dict[str, Any]:
+    team_name = str(team_name or "").strip()
+    if not team_name:
+        return {"matches": 0, "recent": [], "vs_opponent": []}
+    qs = PredictionTeamMatchFeedback.objects.filter(team_name__iexact=team_name).exclude(
+        fixture_id=str(fixture_id or "")
+    )
+    if before_date:
+        qs = qs.filter(match_date__lt=before_date)
+    recent_rows = list(qs.order_by("-match_date", "-id")[:8])
+    opponent_rows = []
+    opponent_name = str(opponent_name or "").strip()
+    if opponent_name:
+        opponent_rows = list(
+            qs.filter(opponent_name__iexact=opponent_name).order_by("-match_date", "-id")[:5]
+        )
+    return {
+        "matches": qs.count(),
+        "recent": [_feedback_row_payload(row) for row in recent_rows],
+        "vs_opponent": [_feedback_row_payload(row) for row in opponent_rows],
+        "summary": _feedback_summary(recent_rows),
+    }
+
+
+def _feedback_row_payload(row: PredictionTeamMatchFeedback) -> dict[str, Any]:
+    return {
+        "fixture_id": row.fixture_id,
+        "fixture": row.fixture_name,
+        "match_date": _iso(row.match_date),
+        "team": row.team_name,
+        "opponent": row.opponent_name,
+        "side": row.side,
+        "actual_result": row.actual_result,
+        "goals_for": row.goals_for,
+        "goals_against": row.goals_against,
+        "corners_for": row.corners_for,
+        "corners_against": row.corners_against,
+        "cards_for": row.cards_for,
+        "cards_against": row.cards_against,
+        "shots_on_target_for": row.shots_on_target_for,
+        "shots_on_target_against": row.shots_on_target_against,
+        "prediction_snapshot": row.prediction_snapshot,
+    }
+
+
+def _feedback_summary(rows: list[PredictionTeamMatchFeedback]) -> dict[str, Any]:
+    if not rows:
+        return {}
+    return {
+        "matches": len(rows),
+        "wins": sum(1 for row in rows if row.actual_result == "win"),
+        "draws": sum(1 for row in rows if row.actual_result == "draw"),
+        "losses": sum(1 for row in rows if row.actual_result == "loss"),
+        "avg_goals_for": _average(row.goals_for for row in rows),
+        "avg_goals_against": _average(row.goals_against for row in rows),
+        "avg_corners_for": _average(row.corners_for for row in rows),
+        "avg_corners_against": _average(row.corners_against for row in rows),
+        "avg_cards_for": _average(row.cards_for for row in rows),
+        "avg_cards_against": _average(row.cards_against for row in rows),
+        "avg_shots_on_target_for": _average(row.shots_on_target_for for row in rows),
+        "avg_shots_on_target_against": _average(row.shots_on_target_against for row in rows),
+    }
+
+
+def _average(values) -> float | None:
+    items = [float(value) for value in values if value is not None]
+    if not items:
+        return None
+    return round(sum(items) / len(items), 3)
 
 
 def _fixture_name(fixture: dict[str, Any]) -> str:

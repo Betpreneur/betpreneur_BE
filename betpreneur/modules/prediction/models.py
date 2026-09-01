@@ -65,3 +65,61 @@ class PredictionTrainingSample(models.Model):
 
     def __str__(self):
         return f"{self.fixture_id} - {self.canonical_market}"
+
+
+class PredictionTeamMatchFeedback(models.Model):
+    class Side(models.TextChoices):
+        HOME = "home", "Home"
+        AWAY = "away", "Away"
+
+    class Result(models.TextChoices):
+        WIN = "win", "Win"
+        DRAW = "draw", "Draw"
+        LOSS = "loss", "Loss"
+
+    fixture_id = models.CharField(max_length=120)
+    provider_match_id = models.CharField(max_length=120, blank=True)
+    fixture_name = models.CharField(max_length=255, blank=True)
+    match_date = models.DateField(null=True, blank=True)
+    league_key = models.CharField(max_length=120, blank=True)
+    season = models.CharField(max_length=32, blank=True)
+    team_id = models.CharField(max_length=120, blank=True)
+    team_name = models.CharField(max_length=255)
+    opponent_id = models.CharField(max_length=120, blank=True)
+    opponent_name = models.CharField(max_length=255, blank=True)
+    side = models.CharField(max_length=10, choices=Side.choices)
+    actual_result = models.CharField(max_length=10, choices=Result.choices)
+    goals_for = models.PositiveSmallIntegerField(null=True, blank=True)
+    goals_against = models.PositiveSmallIntegerField(null=True, blank=True)
+    corners_for = models.FloatField(null=True, blank=True)
+    corners_against = models.FloatField(null=True, blank=True)
+    cards_for = models.FloatField(null=True, blank=True)
+    cards_against = models.FloatField(null=True, blank=True)
+    shots_on_target_for = models.FloatField(null=True, blank=True)
+    shots_on_target_against = models.FloatField(null=True, blank=True)
+    referee_name = models.CharField(max_length=160, blank=True)
+    source = models.CharField(max_length=40, blank=True)
+    prediction_snapshot = models.JSONField(default=dict, blank=True)
+    actual_stats = models.JSONField(default=dict, blank=True)
+    metadata = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "prediction_team_match_feedback"
+        ordering = ["-match_date", "team_name", "fixture_id"]
+        indexes = [
+            models.Index(fields=["team_name", "match_date"], name="pred_feedback_team_date_idx"),
+            models.Index(fields=["opponent_name", "match_date"], name="pred_feedback_opp_date_idx"),
+            models.Index(fields=["league_key", "match_date"], name="pred_feedback_league_idx"),
+            models.Index(fields=["fixture_id"], name="pred_feedback_fixture_idx"),
+        ]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["fixture_id", "team_name", "side"],
+                name="unique_prediction_team_feedback",
+            )
+        ]
+
+    def __str__(self):
+        return f"{self.team_name} feedback - {self.fixture_id}"

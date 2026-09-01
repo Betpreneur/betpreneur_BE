@@ -21,6 +21,7 @@ from .contracts import (
     PredictionDiagnostics,
     RecommendationScore,
     ResultProbabilityOutput,
+    TeamMatchFeedbackRecord,
     TeamStrengthSnapshot,
     TicketSimulation,
     TrainingSampleRecord,
@@ -44,10 +45,11 @@ from .explanation import (
 )
 from .feature_builder import build_fixture_features
 from .market_probabilities import evaluate_market_probability
-from .models import PredictionTrainingSample
+from .models import PredictionTeamMatchFeedback, PredictionTrainingSample
 from .monte_carlo import simulate_ticket_probabilities
 from .poisson import goal_distribution
 from .recommendation import score_recommendation
+from .team_feedback import record_team_match_feedback
 from .training_samples import record_training_sample
 from .value import assess_market_value
 from .walk_forward import evaluate_walk_forward
@@ -122,9 +124,11 @@ __all__ = [
     "GoalModelOutput",
     "MarketProbability",
     "PredictionDiagnostics",
+    "PredictionTeamMatchFeedback",
     "PredictionTrainingSample",
     "RecommendationScore",
     "ResultProbabilityOutput",
+    "TeamMatchFeedbackRecord",
     "TeamStrengthSnapshot",
     "TicketSimulation",
     "TrainingSampleRecord",
@@ -147,6 +151,7 @@ __all__ = [
     "explanation_facts_for_value",
     "goal_distribution",
     "predict_fixture",
+    "record_team_match_feedback",
     "record_training_sample",
     "result_probabilities",
     "score_recommendation",

@@ -25,6 +25,7 @@ class _RatingBuild:
     attack_component: float
     defence_component: float
     recent_form_component: float
+    feedback_component: float
     market_component: float
     decay_factor: float
     evidence_matches: int
@@ -107,6 +108,7 @@ def _build_rating(features: FixtureFeatureSet, side: str) -> _RatingBuild:
     season_profile = side_payload.get("season_profile") or {}
     market_profiles = side_payload.get("market_profiles_by_family") or {}
     coverage = side_payload.get("coverage") or {}
+    feedback = ((features.features or {}).get("prediction_feedback") or {}).get(side) or {}
 
     evidence_matches = int(season_profile.get("matches_played") or 0)
     attack = _float(team.attack_rating if team else None)
@@ -118,8 +120,16 @@ def _build_rating(features: FixtureFeatureSet, side: str) -> _RatingBuild:
     defensive_edge = (1.25 - (defence or 1.25)) + ((opponent_attack or 1.25) - (opponent_defence or 1.25)) * 0.1
     defence_component = _clamp(defensive_edge * 85.0, -80.0, 80.0)
     recent_form_component = _recent_form_component(recent, side=side)
+    feedback_component = _feedback_component(feedback)
     market_component = _market_component(market_profiles, side=side)
-    raw_elo = BASE_ELO + attack_component + defence_component + recent_form_component + market_component
+    raw_elo = (
+        BASE_ELO
+        + attack_component
+        + defence_component
+        + recent_form_component
+        + feedback_component
+        + market_component
+    )
     decay_factor, decay_warnings = _decay_factor(
         data_quality=str(team.data_quality if team else "missing"),
         coverage_status=str(coverage.get("status") or "missing"),
@@ -132,6 +142,7 @@ def _build_rating(features: FixtureFeatureSet, side: str) -> _RatingBuild:
         attack_component=attack_component,
         defence_component=defence_component,
         recent_form_component=recent_form_component,
+        feedback_component=feedback_component,
         market_component=market_component,
         decay_factor=decay_factor,
         evidence_matches=evidence_matches,
@@ -175,6 +186,23 @@ def _market_component(market_profiles: dict[str, Any], *, side: str) -> float:
             continue
         return _clamp((hit_rate - 0.38) * 100.0 * confidence, -35.0, 35.0)
     return 0.0
+
+
+def _feedback_component(feedback: dict[str, Any]) -> float:
+    summary = feedback.get("summary") if isinstance(feedback.get("summary"), dict) else {}
+    matches = _float(summary.get("matches")) or 0.0
+    if matches < 2:
+        return 0.0
+    wins = _float(summary.get("wins")) or 0.0
+    draws = _float(summary.get("draws")) or 0.0
+    ppg = ((wins * 3.0) + draws) / matches
+    goal_diff = (_float(summary.get("avg_goals_for")) or 0.0) - (
+        _float(summary.get("avg_goals_against")) or 0.0
+    )
+    result_signal = (ppg - 1.4) * 18.0
+    goal_signal = goal_diff * 8.0
+    sample_weight = min(1.0, matches / 8.0)
+    return _clamp((result_signal + goal_signal) * sample_weight, -28.0, 28.0)
 
 
 def _decay_factor(*, data_quality: str, coverage_status: str, evidence_matches: int) -> tuple[float, tuple[str, ...]]:
@@ -277,6 +305,7 @@ def _rating_payload(rating: _RatingBuild) -> dict[str, Any]:
         "attack_component": round(rating.attack_component, 2),
         "defence_component": round(rating.defence_component, 2),
         "recent_form_component": round(rating.recent_form_component, 2),
+        "feedback_component": round(rating.feedback_component, 2),
         "market_component": round(rating.market_component, 2),
         "decay_factor": round(rating.decay_factor, 4),
         "evidence_matches": rating.evidence_matches,

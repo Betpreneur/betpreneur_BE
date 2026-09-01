@@ -8,7 +8,7 @@ sold.
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal
 from typing import Any
 
@@ -531,6 +531,50 @@ class TrainingSampleRecord:
             raise ValueError("canonical_market is required")
         _validate_score(self.first_prediction_score, "first_prediction_score")
         _validate_score(self.last_prediction_score, "last_prediction_score")
+
+    def to_dict(self) -> dict[str, Any]:
+        return _as_payload(self)
+
+
+@dataclass(frozen=True, slots=True)
+class TeamMatchFeedbackRecord:
+    """One team's settled match actuals tied to the prediction snapshot."""
+
+    fixture_id: str
+    team_name: str
+    side: str
+    actual_result: str
+    provider_match_id: str = ""
+    fixture_name: str = ""
+    match_date: date | None = None
+    league_key: str = ""
+    season: str = ""
+    team_id: str = ""
+    opponent_id: str = ""
+    opponent_name: str = ""
+    goals_for: int | None = None
+    goals_against: int | None = None
+    corners_for: float | None = None
+    corners_against: float | None = None
+    cards_for: float | None = None
+    cards_against: float | None = None
+    shots_on_target_for: float | None = None
+    shots_on_target_against: float | None = None
+    referee_name: str = ""
+    source: str = ""
+    prediction_snapshot: dict[str, Any] = field(default_factory=dict)
+    actual_stats: dict[str, Any] = field(default_factory=dict)
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if not str(self.fixture_id or "").strip():
+            raise ValueError("fixture_id is required")
+        if not str(self.team_name or "").strip():
+            raise ValueError("team_name is required")
+        if str(self.side or "").strip().lower() not in {"home", "away"}:
+            raise ValueError("side must be home or away")
+        if str(self.actual_result or "").strip().lower() not in {"win", "draw", "loss"}:
+            raise ValueError("actual_result must be win, draw, or loss")
 
     def to_dict(self) -> dict[str, Any]:
         return _as_payload(self)

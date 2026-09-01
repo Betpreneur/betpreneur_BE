@@ -86,6 +86,42 @@ class EloRatingTests(SimpleTestCase):
         self.assertLess(result.elo_gap, 0)
         self.assertGreater(result.away_win, result.home_win)
 
+    def test_prediction_feedback_can_nudge_elo_strength(self):
+        base = self._features(home_attack=1.25, home_defence=1.25, away_attack=1.25, away_defence=1.25)
+        without_feedback = result_probabilities(base)
+        payload = dict(base.features)
+        payload["prediction_feedback"] = {
+            "home": {
+                "summary": {
+                    "matches": 4,
+                    "wins": 4,
+                    "draws": 0,
+                    "losses": 0,
+                    "avg_goals_for": 2.5,
+                    "avg_goals_against": 0.75,
+                }
+            },
+            "away": {
+                "summary": {
+                    "matches": 4,
+                    "wins": 0,
+                    "draws": 1,
+                    "losses": 3,
+                    "avg_goals_for": 0.75,
+                    "avg_goals_against": 2.0,
+                }
+            },
+        }
+
+        with_feedback = result_probabilities(replace(base, features=payload))
+
+        self.assertGreater(with_feedback.home_elo, without_feedback.home_elo)
+        self.assertGreater(with_feedback.home_win, without_feedback.home_win)
+        self.assertGreater(
+            with_feedback.diagnostics.metadata["home_rating"]["feedback_component"],
+            0,
+        )
+
     def test_draw_probability_shrinks_when_elo_gap_is_wide(self):
         close = result_probabilities(
             self._features(home_attack=1.25, home_defence=1.25, away_attack=1.25, away_defence=1.25)
