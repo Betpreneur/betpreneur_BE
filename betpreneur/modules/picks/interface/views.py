@@ -76,6 +76,7 @@ from betpreneur.modules.picks.services.presentation import (
     market_prediction_payload,
     normalise_council_review,
     picks_by_match_for_run,
+    public_game_detail_payload,
 )
 from betpreneur.modules.picks.tasks import generate_daily_picks
 from betpreneur.modules.pricing.api import (
@@ -1490,7 +1491,7 @@ class GameDetailView(APIView):
     @extend_schema(
         operation_id="algo_games_retrieve",
         summary="Game analysis detail",
-        description="Authenticated user endpoint. Returns full model context for one scored fixture, including all markets, fixture context, forms, team news, insights, and official picks if published.",
+        description="Authenticated user endpoint. Returns public game analysis for one scored fixture. Use include=technical for the internal diagnostic payload.",
         tags=["Games"],
         parameters=[GameAnalysisQuerySerializer],
         responses={200: GameDetailResponseSerializer},
@@ -1502,6 +1503,8 @@ class GameDetailView(APIView):
         payload = game_detail_payload(target_date, match_id, request)
         if payload["game"] is None:
             return Response(payload, status=status.HTTP_404_NOT_FOUND)
+        if query.validated_data.get("include") != "technical":
+            payload = public_game_detail_payload(payload)
         return private_cached_response(payload, request=request)
 
 

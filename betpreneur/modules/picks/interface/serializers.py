@@ -256,6 +256,11 @@ class GameAnalysisQuerySerializer(serializers.Serializer):
         required=False,
         default="full",
     )
+    include = serializers.ChoiceField(
+        choices=("public", "technical"),
+        required=False,
+        default="public",
+    )
 
 
 class DailyPicksSummarySerializer(serializers.Serializer):

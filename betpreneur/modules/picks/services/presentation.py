@@ -758,6 +758,194 @@ def game_detail_payload(target_date, match_id, request=None):
     }
 
 
+def public_game_detail_payload(payload):
+    """Project the full game payload into the public product shape."""
+    game = (payload or {}).get("game")
+    if not game:
+        return payload
+
+    market = game.get("recommended_market") or game.get("top_market") or game.get("best_market") or {}
+    cleaned_market = _public_market_detail(market)
+    return {
+        "date": payload.get("date"),
+        "published": payload.get("published", False),
+        "run_id": payload.get("run_id"),
+        "posted_at": payload.get("posted_at"),
+        "game": {
+            "id": game.get("match_id", ""),
+            "match_id": game.get("match_id", ""),
+            "fixture": _public_fixture_detail(game),
+            "analysis": _public_analysis_detail(game, market),
+            "recommended_market": cleaned_market,
+            "recent_form": {
+                "home": _public_recent_form(game.get("home_recent_form")),
+                "away": _public_recent_form(game.get("away_recent_form")),
+            },
+            "lineups": _public_lineup_detail(game.get("team_news") or {}),
+            "market_summary": {
+                "analysed": game.get("market_count", 0),
+                "eligible": game.get("eligible_market_count", 0),
+                "strong_markets": game.get("markets_70_plus", 0),
+                "markets_65_plus": game.get("markets_65_plus", 0),
+            },
+            "official_pick_count": game.get("official_pick_count", 0),
+            "backed_count": game.get("backed_count", 0),
+            "backed_by_me": game.get("backed_by_me", False),
+        },
+    }
+
+
+def _public_fixture_detail(game):
+    return {
+        "name": game.get("fixture", ""),
+        "home_team": {
+            "name": game.get("home_team", ""),
+            "logo": game.get("home_logo", ""),
+        },
+        "away_team": {
+            "name": game.get("away_team", ""),
+            "logo": game.get("away_logo", ""),
+        },
+        "competition": {
+            "name": game.get("competition") or game.get("league", ""),
+            "country": game.get("country", ""),
+            "logo": game.get("competition_logo") or game.get("league_logo", ""),
+            "country_flag": game.get("country_flag", ""),
+        },
+        "kickoff": game.get("kickoff", ""),
+        "round": game.get("round", ""),
+    }
+
+
+def _public_analysis_detail(game, market):
+    insights = (market or {}).get("insights") or {}
+    bettor_view = (market or {}).get("bettor_view") or {}
+    return {
+        "status": (market or {}).get("data_status") or insights.get("data_status") or "modelled",
+        "data_quality": insights.get("data_quality") or game.get("insights", {}).get("data_quality") or "",
+        "data_confidence_score": insights.get("data_confidence_score")
+        or insights.get("data_confidence")
+        or (market or {}).get("data_confidence_score"),
+        "summary": (market or {}).get("analysis_summary") or bettor_view.get("summary") or "",
+        "conclusion": (market or {}).get("analysis_conclusion") or bettor_view.get("conclusion") or "",
+        "positive_evidence": _public_evidence((market or {}).get("positive_evidence") or []),
+        "risk_evidence": _public_risk_evidence((market or {}).get("risk_evidence") or []),
+    }
+
+
+def _public_market_detail(market):
+    if not market:
+        return None
+    insights = market.get("insights") or {}
+    bettor_view = market.get("bettor_view") or {}
+    fair_odds = insights.get("fair_odds")
+    value = insights.get("value_assessment") or {}
+    if fair_odds is None:
+        fair_odds = value.get("fair_odds")
+    confidence = market.get("final_confidence") or market.get("confidence")
+    return {
+        "market": market.get("market", ""),
+        "meaning": market.get("meaning", ""),
+        "confidence_score": confidence,
+        "confidence_label": _public_confidence_label(confidence),
+        "odds": market.get("odds"),
+        "fair_odds": fair_odds,
+        "verdict": _public_market_verdict(market),
+        "summary": market.get("analysis_summary") or bettor_view.get("summary") or "",
+        "positive_evidence": _public_evidence(market.get("positive_evidence") or []),
+        "risk_evidence": _public_risk_evidence(market.get("risk_evidence") or []),
+    }
+
+
+def _public_recent_form(form):
+    form = _recent_form_payload(form)
+    return {
+        "form": form.get("form") or [],
+        "wins": form.get("wins", 0),
+        "draws": form.get("draws", 0),
+        "losses": form.get("losses", 0),
+        "games": form.get("games", 0),
+        "avg_scored": form.get("avg_scored", 0),
+        "avg_conceded": form.get("avg_conceded", 0),
+    }
+
+
+def _public_lineup_detail(team_news):
+    if not isinstance(team_news, dict):
+        return {"status": "unavailable"}
+    home = team_news.get("home") if isinstance(team_news.get("home"), dict) else {}
+    away = team_news.get("away") if isinstance(team_news.get("away"), dict) else {}
+    return {
+        "status": team_news.get("status") or ("available" if team_news.get("available") else "unavailable"),
+        "home": _public_team_news_side(home),
+        "away": _public_team_news_side(away),
+    }
+
+
+def _public_team_news_side(side):
+    missing = side.get("missing_players")
+    if isinstance(missing, list):
+        missing = len(missing)
+    return {
+        "formation": side.get("formation", ""),
+        "missing_players": int(missing or side.get("missing_count") or 0),
+    }
+
+
+def _public_evidence(items, limit=6):
+    return [str(item) for item in items if str(item or "").strip()][:limit]
+
+
+def _public_risk_evidence(items, limit=6):
+    friendly = []
+    for item in items:
+        text = str(item or "").strip()
+        if not text:
+            continue
+        friendly.append(_public_risk_text(text))
+        if len(friendly) >= limit:
+            break
+    return friendly
+
+
+def _public_risk_text(text):
+    replacements = {
+        "lineup_snapshot_missing": "Projected lineup data is not available yet.",
+        "calibration_sample_too_small": "The calibration sample is still small.",
+        "sample_size_penalty": "The supporting sample size is limited.",
+        "league_uncertainty_penalty": "League reliability is still under watch.",
+        "too_much_uncertainty": "The model sees too much uncertainty for a strong pick.",
+        "insufficient_edge": "The available price does not offer enough edge.",
+        "insufficient_ev": "The expected value is not strong enough.",
+    }
+    if text in replacements:
+        return replacements[text]
+    return text.replace("_", " ").capitalize() + "."
+
+
+def _public_confidence_label(score):
+    try:
+        value = int(score or 0)
+    except (TypeError, ValueError):
+        value = 0
+    if value >= 75:
+        return "Strong"
+    if value >= 60:
+        return "Moderate"
+    if value >= 45:
+        return "Low"
+    return "Very Low"
+
+
+def _public_market_verdict(market):
+    status = str(market.get("recommendation_status") or "").lower()
+    if status in {"strong", "recommended", "playable"}:
+        return "supported"
+    if status == "no_edge":
+        return "no_edge"
+    return "caution"
+
+
 def _recent_form_payload(form):
     form = dict(form or {})
     wins = int(form.get("wins") or 0)
