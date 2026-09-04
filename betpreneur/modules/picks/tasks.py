@@ -80,6 +80,7 @@ def publish_daily_run(self, run_id, score_results=None):
         score_results = score_results or []
     algo_run = algo_runner_service.publish_fanout_run(run_id)
     explain_picks_for_run.apply_async(args=[algo_run.id], queue=settings.ALGO_LLM_QUEUE)
+    explain_game_headlines_for_run.apply_async(args=[algo_run.id], queue=settings.ALGO_LLM_QUEUE)
     scored = sum(1 for item in score_results if (item or {}).get("status") == "scored")
     failed = sum(1 for item in score_results if (item or {}).get("status") == "failed")
     if not score_results:
@@ -111,6 +112,22 @@ def publish_daily_run(self, run_id, score_results=None):
 def explain_picks_for_run(self, run_id):
     try:
         return algo_runner_service.explain_picks_for_run(run_id)
+    except Exception as exc:
+        raise self.retry(exc=exc, countdown=120 * (self.request.retries + 1))
+
+
+@shared_task(
+    bind=True,
+    ignore_result=False,
+    max_retries=2,
+    default_retry_delay=120,
+    rate_limit="4/m",
+    soft_time_limit=900,
+    time_limit=1200,
+)
+def explain_game_headlines_for_run(self, run_id):
+    try:
+        return algo_runner_service.explain_game_headlines_for_run(run_id)
     except Exception as exc:
         raise self.retry(exc=exc, countdown=120 * (self.request.retries + 1))
 

@@ -1946,6 +1946,9 @@ class AlgoRunnerService:
             "ev": float(payload.get("ev") or 0),
             "home_recent_form": payload.get("home_recent_form") or {},
             "away_recent_form": payload.get("away_recent_form") or {},
+            "fixture_context": payload.get("fixture_context") or {},
+            "corner_profile": payload.get("corner_profile") or {},
+            "team_news": payload.get("team_news") or {},
             "risk_flags": payload.get("risk_flags") or [],
             "selection_profile": next(
                 (
@@ -2563,6 +2566,112 @@ class AlgoRunnerService:
             ["bettor_view", "summary", "positive_evidence", "risk_evidence", "conclusion"],
         )
         return {"run_id": algo_run.id, "updated": updated, "total": len(picks)}
+
+    def explain_game_headlines_for_run(self, algo_run):
+        if not isinstance(algo_run, AlgoRun):
+            algo_run = AlgoRun.objects.get(id=algo_run)
+
+        from betpreneur.modules.catalog.api import legacy_runner as algo_runner
+        from betpreneur.modules.picks.services.presentation import _game_market_rank, market_prediction_payload
+
+        selected_by_match = {}
+        queryset = (
+            MarketPrediction.objects.filter(run=algo_run, eligible=True)
+            .select_related("selected_pick")
+            .only(
+                "id",
+                "match_id",
+                "fixture",
+                "home_team",
+                "away_team",
+                "league",
+                "kickoff",
+                "market",
+                "meaning",
+                "raw_confidence",
+                "confidence",
+                "odds",
+                "ev",
+                "odds_source",
+                "odds_meta",
+                "eligible",
+                "published",
+                "selected_pick",
+                "selected_pick_id",
+                "risk_flags",
+                "insights",
+                "home_recent_form",
+                "away_recent_form",
+                "fixture_context",
+            )
+            .order_by("match_id", "-confidence", "-ev", "market")
+        )
+        for prediction in queryset.iterator(chunk_size=500):
+            payload = market_prediction_payload(prediction)
+            current = selected_by_match.get(prediction.match_id)
+            if current and _game_market_rank(current[1]) >= _game_market_rank(payload):
+                continue
+            selected_by_match[prediction.match_id] = (prediction, payload)
+
+        if not selected_by_match:
+            return {"run_id": algo_run.id, "updated": 0, "total": 0}
+
+        fixture_context_by_match = {
+            fixture.match_id: {
+                "team_news": fixture.team_news or {},
+                "corner_profile": fixture.corner_profile or {},
+                "fixture_context": fixture.fixture_context or {},
+            }
+            for fixture in AlgoFixture.objects.filter(run=algo_run, match_id__in=selected_by_match.keys()).only(
+                "match_id",
+                "team_news",
+                "corner_profile",
+                "fixture_context",
+            )
+        }
+        predictions = []
+        candidates = []
+        for prediction, payload in selected_by_match.values():
+            context = fixture_context_by_match.get(prediction.match_id) or {}
+            payload.update(context)
+            payload["tier"] = "game_analysis"
+            predictions.append(prediction)
+            candidates.append(self._candidate_dict_for_reasoning(payload))
+
+        with temporary_env(self._runner_env()):
+            algo_runner.enhance_pick_explanations_with_llm(candidates)
+
+        updates = []
+        for prediction, candidate in zip(predictions, candidates):
+            reasoning = candidate.get("reasoning") or ""
+            verdict = candidate.get("model_verdict") or ""
+            if not reasoning and not verdict and not candidate.get("insights"):
+                continue
+            insights = dict(candidate.get("insights") or prediction.insights or {})
+            current_public_analysis = insights.get("public_analysis") or {}
+            public_analysis = dict(current_public_analysis) if isinstance(current_public_analysis, dict) else {}
+            if reasoning:
+                public_analysis["reasoning"] = reasoning
+            if verdict:
+                public_analysis["model_verdict"] = verdict
+            if public_analysis:
+                insights["public_analysis"] = public_analysis
+            if insights != (prediction.insights or {}):
+                prediction.insights = insights
+                updates.append(prediction)
+            if len(updates) >= 500:
+                MarketPrediction.objects.bulk_update(updates, ["insights"], batch_size=500)
+                updates = []
+        if updates:
+            MarketPrediction.objects.bulk_update(updates, ["insights"], batch_size=500)
+        updated = len([candidate for candidate in candidates if candidate.get("reasoning") or candidate.get("model_verdict")])
+        log.info(
+            "DeepSeek game-headline explanation task run=%s updated=%s total=%s",
+            algo_run.id,
+            updated,
+            len(candidates),
+        )
+        return {"run_id": algo_run.id, "updated": updated, "total": len(candidates)}
 
     def _persist_failed_fixture(self, algo_run, fixture, error):
         match_id = str(fixture.get("match_id") or fixture.get("aps_id") or "")

@@ -591,8 +591,9 @@ def market_prediction_payload(prediction):
         "selected_pick_id": prediction.selected_pick_id,
         "selected_tier": _effective_pick_tier(prediction.selected_pick) if prediction.selected_pick_id else "",
     }
-    payload["reasoning"] = _prediction_reasoning_for_market(payload)
-    payload["model_verdict"] = _prediction_verdict_for_market(payload)
+    public_analysis = insights.get("public_analysis") if isinstance(insights.get("public_analysis"), dict) else {}
+    payload["reasoning"] = public_analysis.get("reasoning") or _prediction_reasoning_for_market(payload)
+    payload["model_verdict"] = public_analysis.get("model_verdict") or _prediction_verdict_for_market(payload)
     return payload
 
 
@@ -766,32 +767,28 @@ def public_game_detail_payload(payload):
 
     market = game.get("recommended_market") or game.get("top_market") or game.get("best_market") or {}
     cleaned_market = _public_market_detail(market)
+    public_game = {
+        "id": game.get("match_id", ""),
+        "match_id": game.get("match_id", ""),
+        "fixture": _public_fixture_detail(game),
+        "analysis": _public_analysis_detail(game, market),
+        "recommended_market": cleaned_market,
+        "recent_form": {
+            "home": _public_recent_form(game.get("home_recent_form")),
+            "away": _public_recent_form(game.get("away_recent_form")),
+        },
+        "lineups": _public_lineup_detail(game),
+        "corners": _public_corner_detail(game.get("corner_profile") or {}),
+        "official_pick_count": game.get("official_pick_count", 0),
+        "backed_count": game.get("backed_count", 0),
+        "backed_by_me": game.get("backed_by_me", False),
+    }
     return {
         "date": payload.get("date"),
         "published": payload.get("published", False),
         "run_id": payload.get("run_id"),
         "posted_at": payload.get("posted_at"),
-        "game": {
-            "id": game.get("match_id", ""),
-            "match_id": game.get("match_id", ""),
-            "fixture": _public_fixture_detail(game),
-            "analysis": _public_analysis_detail(game, market),
-            "recommended_market": cleaned_market,
-            "recent_form": {
-                "home": _public_recent_form(game.get("home_recent_form")),
-                "away": _public_recent_form(game.get("away_recent_form")),
-            },
-            "lineups": _public_lineup_detail(game.get("team_news") or {}),
-            "market_summary": {
-                "analysed": game.get("market_count", 0),
-                "eligible": game.get("eligible_market_count", 0),
-                "strong_markets": game.get("markets_70_plus", 0),
-                "markets_65_plus": game.get("markets_65_plus", 0),
-            },
-            "official_pick_count": game.get("official_pick_count", 0),
-            "backed_count": game.get("backed_count", 0),
-            "backed_by_me": game.get("backed_by_me", False),
-        },
+        "game": public_game,
     }
 
 
@@ -820,16 +817,26 @@ def _public_fixture_detail(game):
 def _public_analysis_detail(game, market):
     insights = (market or {}).get("insights") or {}
     bettor_view = (market or {}).get("bettor_view") or {}
+    public_analysis = insights.get("public_analysis") or insights.get("deepseek_analysis") or {}
+    reasoning = public_analysis or (market or {}).get("reasoning") or bettor_view.get("reasoning") or ""
+    if isinstance(reasoning, dict):
+        reasoning = reasoning.get("reasoning") or reasoning.get("explanation") or ""
+    public_verdict = public_analysis.get("model_verdict") if isinstance(public_analysis, dict) else ""
+    verdict = public_verdict or (market or {}).get("model_verdict") or bettor_view.get("conclusion") or insights.get("conclusion") or ""
+    summary = (market or {}).get("analysis_summary") or bettor_view.get("summary") or insights.get("summary") or ""
+    explanation = _public_reasoning_text(reasoning or " ".join([summary, verdict]))
     return {
         "status": (market or {}).get("data_status") or insights.get("data_status") or "modelled",
         "data_quality": insights.get("data_quality") or game.get("insights", {}).get("data_quality") or "",
-        "data_confidence_score": insights.get("data_confidence_score")
-        or insights.get("data_confidence")
-        or (market or {}).get("data_confidence_score"),
-        "summary": (market or {}).get("analysis_summary") or bettor_view.get("summary") or "",
-        "conclusion": (market or {}).get("analysis_conclusion") or bettor_view.get("conclusion") or "",
-        "positive_evidence": _public_evidence((market or {}).get("positive_evidence") or []),
-        "risk_evidence": _public_risk_evidence((market or {}).get("risk_evidence") or []),
+        "confidence_score": (market or {}).get("final_confidence") or (market or {}).get("confidence"),
+        "confidence_label": _public_confidence_label(
+            (market or {}).get("final_confidence") or (market or {}).get("confidence")
+        ),
+        "verdict": _public_market_verdict(market or {}),
+        "headline": summary or verdict,
+        "explanation": explanation,
+        "key_points": _public_evidence((market or {}).get("positive_evidence") or [], limit=4),
+        "risks": _public_risk_evidence((market or {}).get("risk_evidence") or [], limit=3),
     }
 
 
@@ -852,8 +859,6 @@ def _public_market_detail(market):
         "fair_odds": fair_odds,
         "verdict": _public_market_verdict(market),
         "summary": market.get("analysis_summary") or bettor_view.get("summary") or "",
-        "positive_evidence": _public_evidence(market.get("positive_evidence") or []),
-        "risk_evidence": _public_risk_evidence(market.get("risk_evidence") or []),
     }
 
 
@@ -870,30 +875,118 @@ def _public_recent_form(form):
     }
 
 
-def _public_lineup_detail(team_news):
+def _public_lineup_detail(game):
+    team_news = (game or {}).get("team_news") or {}
     if not isinstance(team_news, dict):
         return {"status": "unavailable"}
     home = team_news.get("home") if isinstance(team_news.get("home"), dict) else {}
     away = team_news.get("away") if isinstance(team_news.get("away"), dict) else {}
+    fixture_context = (game or {}).get("fixture_context") or {}
+    statpal = fixture_context.get("statpal") if isinstance(fixture_context, dict) else {}
+    snapshots = (statpal or {}).get("snapshots") if isinstance(statpal, dict) else {}
+    lineup_payload = ((snapshots or {}).get("lineups") or {}).get("payload") or {}
+    injuries_payload = ((snapshots or {}).get("injuries_suspensions") or {}).get("payload") or {}
     return {
-        "status": team_news.get("status") or ("available" if team_news.get("available") else "unavailable"),
-        "home": _public_team_news_side(home),
-        "away": _public_team_news_side(away),
+        "status": team_news.get("lineup_status")
+        or ("available" if team_news.get("lineups_available") else "unavailable"),
+        "home": _public_team_news_side(home, lineup_payload, injuries_payload, "home"),
+        "away": _public_team_news_side(away, lineup_payload, injuries_payload, "away"),
     }
 
 
-def _public_team_news_side(side):
-    missing = side.get("missing_players")
-    if isinstance(missing, list):
-        missing = len(missing)
+def _public_team_news_side(side, lineup_payload=None, injuries_payload=None, side_name="home"):
+    lineup_side = ((lineup_payload or {}).get(side_name) or {}) if isinstance(lineup_payload, dict) else {}
+    injury_side = ((injuries_payload or {}).get(side_name) or {}) if isinstance(injuries_payload, dict) else {}
+    missing_players = _public_missing_players(side, injury_side)
+    formation = side.get("formation") or lineup_side.get("formation") or ""
     return {
-        "formation": side.get("formation", ""),
-        "missing_players": int(missing or side.get("missing_count") or 0),
+        "formation": formation,
+        "missing_players": len(missing_players) or int(
+            side.get("missing_count")
+            or side.get("injuries")
+            or side.get("sidelined_count")
+            or injury_side.get("to_miss_count")
+            or 0
+        ),
+        "injuries": missing_players,
+        "suspensions": _public_player_list(side.get("suspensions") or injury_side.get("suspensions") or []),
     }
 
 
 def _public_evidence(items, limit=6):
     return [str(item) for item in items if str(item or "").strip()][:limit]
+
+
+def _public_corner_detail(corner_profile):
+    if not isinstance(corner_profile, dict) or not corner_profile:
+        return {"status": "unavailable"}
+    return {
+        "status": "available",
+        "data_quality": corner_profile.get("data_quality", ""),
+        "expected_total": corner_profile.get("expected_total"),
+        "home": _public_corner_side(corner_profile.get("home") or {}),
+        "away": _public_corner_side(corner_profile.get("away") or {}),
+    }
+
+
+def _public_corner_side(side):
+    avg_for = side.get("avg_for")
+    avg_against = side.get("avg_against")
+    avg_total = side.get("avg_total")
+    if avg_total is None and avg_for is not None and avg_against is not None:
+        try:
+            avg_total = round(float(avg_for) + float(avg_against), 2)
+        except (TypeError, ValueError):
+            avg_total = None
+    return {
+        "avg_for": avg_for,
+        "avg_against": avg_against,
+        "avg_total": avg_total,
+        "expected_for": side.get("expected_for"),
+    }
+
+
+def _public_missing_players(side, injury_side):
+    players = []
+    for key in ("missing_players", "to_miss", "injuries"):
+        players.extend(_public_player_list(side.get(key) or injury_side.get(key) or []))
+    return _dedupe_public_players(players)[:8]
+
+
+def _public_player_list(value):
+    if not value:
+        return []
+    if isinstance(value, (int, float)):
+        return []
+    if isinstance(value, dict):
+        value = value.get("player") or value.get("players") or value.get("items") or [value]
+    if not isinstance(value, list):
+        value = [value]
+    players = []
+    for item in value:
+        if isinstance(item, dict):
+            name = item.get("name") or item.get("player_name") or item.get("player") or item.get("fullname")
+            if not name:
+                continue
+            players.append({
+                "name": str(name),
+                "reason": item.get("reason") or item.get("type") or item.get("status") or "",
+            })
+        elif str(item or "").strip():
+            players.append({"name": str(item).strip(), "reason": ""})
+    return players
+
+
+def _dedupe_public_players(players):
+    seen = set()
+    deduped = []
+    for player in players:
+        key = str(player.get("name") or "").strip().lower()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        deduped.append(player)
+    return deduped
 
 
 def _public_risk_evidence(items, limit=6):
