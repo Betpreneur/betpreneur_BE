@@ -31,6 +31,17 @@ BEAT_SCHEDULE = {
         ),
         "options": {"expires": timedelta(hours=6).total_seconds()},
     },
+    "settle-recent-results": {
+        "task": "betpreneur.modules.settlement.tasks.settle_recent_results",
+        "schedule": crontab(
+            hour=os.environ.get("ALGO_SETTLE_LOOKBACK_HOUR", "8"),
+            minute=os.environ.get("ALGO_SETTLE_LOOKBACK_MINUTE", "30"),
+        ),
+        "kwargs": {
+            "days": int(os.environ.get("ALGO_SETTLE_LOOKBACK_DAYS", "7")),
+        },
+        "options": {"expires": timedelta(hours=8).total_seconds()},
+    },
     "evaluate-strategy-memory": {
         "task": "betpreneur.modules.analytics.tasks.evaluate_strategy_memory",
         "schedule": crontab(

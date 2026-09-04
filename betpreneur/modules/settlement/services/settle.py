@@ -94,6 +94,15 @@ class SettlementService:
 
     def _check_market(self, pick, home_goals, away_goals, home_team=None, away_team=None, first_scorer=None):
         market = pick.market
+        total = home_goals + away_goals
+        goal_line_result = self._goal_line_result(market, total)
+        if goal_line_result is not None:
+            return goal_line_result
+
+        team_goal_line_result = self._team_goal_line_result(market, home_goals, away_goals)
+        if team_goal_line_result is not None:
+            return team_goal_line_result
+
         if market.startswith("Corners Over ") or market.startswith("Corners Under "):
             corner_total = self._fixture_corner_total(pick.match_id)
             if corner_total is None:
@@ -133,18 +142,12 @@ class SettlementService:
                 return False
             return first_scorer == away_team if first_scorer else None
 
-        total = home_goals + away_goals
         checks = {
             "Home Win": home_goals > away_goals,
             "Away Win": away_goals > home_goals,
             "Draw": home_goals == away_goals,
-            "Over 1.5": total >= 2,
-            "Over 2.5": total >= 3,
-            "Over 3.5": total >= 4,
-            "Under 1.5": total <= 1,
-            "Under 2.5": total <= 2,
-            "Under 3.5": total <= 3,
             "GG / BTTS Yes": home_goals > 0 and away_goals > 0,
+            "BTTS No": home_goals == 0 or away_goals == 0,
             "GG + Over 2.5": home_goals > 0 and away_goals > 0 and total >= 3,
             "DC: 1X": home_goals >= away_goals,
             "DC: X2": away_goals >= home_goals,
@@ -155,6 +158,35 @@ class SettlementService:
             "AH Away +0.5": away_goals >= home_goals,
         }
         return checks.get(market)
+
+    @staticmethod
+    def _goal_line_result(market, total_goals):
+        parts = str(market or "").strip().split()
+        if len(parts) != 2 or parts[0] not in {"Over", "Under"}:
+            return None
+        try:
+            line = float(parts[1])
+        except (TypeError, ValueError):
+            return None
+        if line not in {1.5, 2.5, 3.5, 4.5}:
+            return None
+        return total_goals > line if parts[0] == "Over" else total_goals < line
+
+    @staticmethod
+    def _team_goal_line_result(market, home_goals, away_goals):
+        parts = str(market or "").strip().split()
+        if len(parts) != 4 or parts[:2] not in (["Home", "Team"], ["Away", "Team"]):
+            return None
+        if parts[2] not in {"Over", "Under"}:
+            return None
+        try:
+            line = float(parts[3])
+        except (TypeError, ValueError):
+            return None
+        if line not in {0.5, 1.5, 2.5}:
+            return None
+        goals = home_goals if parts[0] == "Home" else away_goals
+        return goals > line if parts[2] == "Over" else goals < line
 
     def _finished_fixture_map(self, target_date):
         fixture_map = {}
@@ -687,6 +719,30 @@ class SettlementService:
             settle_date,
             lambda: self._settle_database_picks(settle_date),
         )
+
+    def update_recent_results(self, *, days=7, end_date=None):
+        try:
+            window_days = max(1, min(int(days or 7), 60))
+        except (TypeError, ValueError):
+            window_days = 7
+        last_date = end_date or (timezone.localdate() - timedelta(days=1))
+        first_date = last_date - timedelta(days=window_days - 1)
+        results = []
+        current = first_date
+        while current <= last_date:
+            results.append(self.update_results(target_date=current))
+            current += timedelta(days=1)
+        return {
+            "status": "success",
+            "start_date": first_date.isoformat(),
+            "end_date": last_date.isoformat(),
+            "days": window_days,
+            "updated_count": sum(int(item.get("updated_count") or 0) for item in results),
+            "internal_predictions_updated_count": sum(
+                int(item.get("internal_predictions_updated_count") or 0) for item in results
+            ),
+            "results": results,
+        }
 
     def settle_slip_selections(self, *, target_date=None):
         """

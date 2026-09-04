@@ -6,7 +6,7 @@ from django.test import TestCase
 
 from betpreneur.modules.catalog.api import FixtureCache, ProviderFixtureMap
 from betpreneur.modules.markets.api import can_settle_market
-from betpreneur.modules.picks.api import AlgoRun, Pick
+from betpreneur.modules.picks.api import AlgoRun, MarketPrediction, Pick
 from betpreneur.modules.settlement.services.settle import SettlementService
 from betpreneur.modules.slips.api import SlipReview, SlipSelection, slip_recap_payload
 
@@ -23,7 +23,18 @@ def _finished_fixture(match_id, home_goals, away_goals, *, home="Dundee", away="
 
 class CanSettleMarketTests(TestCase):
     def test_supported_markets_are_settleable(self):
-        for market in ["Home Win", "Away Win", "Draw", "Over 2.5", "Under 3.5", "DC: 1X", "DNB Home", "First to Score H"]:
+        for market in [
+            "Home Win",
+            "Away Win",
+            "Draw",
+            "Over 2.5",
+            "Under 3.5",
+            "Under 4.5",
+            "BTTS No",
+            "DC: 1X",
+            "DNB Home",
+            "First to Score H",
+        ]:
             self.assertTrue(can_settle_market(market), market)
 
     def test_corner_lines_are_settleable(self):
@@ -237,6 +248,33 @@ class SettleDailyPickTests(TestCase):
         self.assertEqual(pick.status, Pick.Status.WIN)
         self.assertEqual(pick.score, "2-1")
         self.assertEqual(report["updated_count"], 1)
+
+    def test_under_four_five_market_prediction_is_settled(self):
+        run = AlgoRun.objects.create(target_date=SETTLE_DATE)
+        prediction = MarketPrediction.objects.create(
+            run=run,
+            match_date=SETTLE_DATE,
+            fixture="Dundee vs Aberdeen",
+            home_team="Dundee",
+            away_team="Aberdeen",
+            match_id="1556634",
+            market="Under 4.5",
+            meaning="4 or fewer total goals",
+            raw_confidence=70,
+            confidence=70,
+            odds="1.40",
+            ev="0.050",
+            eligible=True,
+        )
+
+        service = SettlementService()
+        with mock.patch.object(service, "_finished_fixture_map", return_value={"1556634": _finished_fixture(1556634, 2, 1)}):
+            report = service.update_results(target_date=SETTLE_DATE)
+
+        prediction.refresh_from_db()
+        self.assertEqual(prediction.status, MarketPrediction.Status.WIN)
+        self.assertEqual(prediction.score, "2-1")
+        self.assertEqual(report["internal_predictions_updated_count"], 1)
 
 
 class SlipRecapTests(TestCase):
