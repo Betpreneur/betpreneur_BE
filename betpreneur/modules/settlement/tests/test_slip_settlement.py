@@ -13,11 +13,12 @@ from betpreneur.modules.slips.api import SlipReview, SlipSelection, slip_recap_p
 SETTLE_DATE = date(2026, 8, 8)
 
 
-def _finished_fixture(match_id, home_goals, away_goals, *, home="Dundee", away="Aberdeen"):
+def _finished_fixture(match_id, home_goals, away_goals, *, home="Dundee", away="Aberdeen", actual_stats=None):
     return {
         "fixture": {"id": match_id, "status": {"short": "FT"}},
         "goals": {"home": home_goals, "away": away_goals},
         "teams": {"home": {"name": home}, "away": {"name": away}},
+        "actual_stats": actual_stats or {},
     }
 
 
@@ -275,6 +276,114 @@ class SettleDailyPickTests(TestCase):
         self.assertEqual(prediction.status, MarketPrediction.Status.WIN)
         self.assertEqual(prediction.score, "2-1")
         self.assertEqual(report["internal_predictions_updated_count"], 1)
+
+    def test_statpal_team_corner_market_prediction_is_settled_from_actual_stats(self):
+        run = AlgoRun.objects.create(target_date=SETTLE_DATE)
+        prediction = MarketPrediction.objects.create(
+            run=run,
+            match_date=SETTLE_DATE,
+            fixture="Dundee vs Aberdeen",
+            home_team="Dundee",
+            away_team="Aberdeen",
+            match_id="statpal:2026080812345",
+            market="Away Team Corners Over 2.5",
+            meaning="Away team to finish with more than 2.5 corners",
+            raw_confidence=70,
+            confidence=70,
+            odds="1.40",
+            ev="0.050",
+            eligible=True,
+        )
+        fixture = _finished_fixture(
+            "statpal:2026080812345",
+            1,
+            1,
+            actual_stats={
+                "home": {"corners": 2},
+                "away": {"corners": 5},
+            },
+        )
+
+        service = SettlementService()
+        with mock.patch.object(service, "_finished_fixture_map", return_value={"statpal:2026080812345": fixture}):
+            report = service.update_results(target_date=SETTLE_DATE)
+
+        prediction.refresh_from_db()
+        self.assertEqual(prediction.status, MarketPrediction.Status.WIN)
+        self.assertEqual(prediction.result, "5 away team corners")
+        self.assertEqual(report["internal_prediction_status_counts"]["win"], 1)
+
+    def test_statpal_card_market_prediction_is_settled_from_actual_stats(self):
+        run = AlgoRun.objects.create(target_date=SETTLE_DATE)
+        prediction = MarketPrediction.objects.create(
+            run=run,
+            match_date=SETTLE_DATE,
+            fixture="Dundee vs Aberdeen",
+            home_team="Dundee",
+            away_team="Aberdeen",
+            match_id="statpal:2026080812345",
+            market="Cards Under 4.5",
+            meaning="Match to finish with fewer than 4.5 cards",
+            raw_confidence=70,
+            confidence=70,
+            odds="1.40",
+            ev="0.050",
+            eligible=True,
+        )
+        fixture = _finished_fixture(
+            "statpal:2026080812345",
+            1,
+            1,
+            actual_stats={
+                "home": {"yellow_cards": 1, "red_cards": 0},
+                "away": {"yellow_cards": 2, "red_cards": 0},
+            },
+        )
+
+        service = SettlementService()
+        with mock.patch.object(service, "_finished_fixture_map", return_value={"statpal:2026080812345": fixture}):
+            report = service.update_results(target_date=SETTLE_DATE)
+
+        prediction.refresh_from_db()
+        self.assertEqual(prediction.status, MarketPrediction.Status.WIN)
+        self.assertEqual(prediction.result, "3 cards")
+        self.assertEqual(report["internal_prediction_status_counts"]["win"], 1)
+
+    def test_statpal_shots_on_target_market_prediction_is_settled_from_actual_stats(self):
+        run = AlgoRun.objects.create(target_date=SETTLE_DATE)
+        prediction = MarketPrediction.objects.create(
+            run=run,
+            match_date=SETTLE_DATE,
+            fixture="Dundee vs Aberdeen",
+            home_team="Dundee",
+            away_team="Aberdeen",
+            match_id="statpal:2026080812345",
+            market="Shots On Target Over 8.5",
+            meaning="Match to finish with more than 8.5 shots on target",
+            raw_confidence=70,
+            confidence=70,
+            odds="1.40",
+            ev="0.050",
+            eligible=True,
+        )
+        fixture = _finished_fixture(
+            "statpal:2026080812345",
+            1,
+            1,
+            actual_stats={
+                "home": {"shots_on_target": 4},
+                "away": {"shots_on_target": 6},
+            },
+        )
+
+        service = SettlementService()
+        with mock.patch.object(service, "_finished_fixture_map", return_value={"statpal:2026080812345": fixture}):
+            report = service.update_results(target_date=SETTLE_DATE)
+
+        prediction.refresh_from_db()
+        self.assertEqual(prediction.status, MarketPrediction.Status.WIN)
+        self.assertEqual(prediction.result, "10 shots on target")
+        self.assertEqual(report["internal_prediction_status_counts"]["win"], 1)
 
 
 class SlipRecapTests(TestCase):

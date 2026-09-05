@@ -96,7 +96,16 @@ class SettlementService:
         return value
 
 
-    def _check_market(self, pick, home_goals, away_goals, home_team=None, away_team=None, first_scorer=None):
+    def _check_market(
+        self,
+        pick,
+        home_goals,
+        away_goals,
+        home_team=None,
+        away_team=None,
+        first_scorer=None,
+        actual_stats=None,
+    ):
         market = pick.market
         total = home_goals + away_goals
         goal_line_result = self._goal_line_result(market, total)
@@ -106,6 +115,10 @@ class SettlementService:
         team_goal_line_result = self._team_goal_line_result(market, home_goals, away_goals)
         if team_goal_line_result is not None:
             return team_goal_line_result
+
+        stat_line_result = self._stat_line_result(market, actual_stats or {})
+        if stat_line_result is not None:
+            return stat_line_result
 
         if market.startswith("Corners Over ") or market.startswith("Corners Under "):
             corner_total = self._fixture_corner_total(pick.match_id)
@@ -162,6 +175,109 @@ class SettlementService:
             "AH Away +0.5": away_goals >= home_goals,
         }
         return checks.get(market)
+
+    def _market_result_text(self, market, match_id, score, actual_stats=None):
+        stat_value = self._market_stat_value(market, actual_stats or {})
+        stat_name = self._market_stat_label(market)
+        if stat_value is None and market.startswith("Corners "):
+            stat_value = self._fixture_corner_total(match_id)
+            stat_name = "corners"
+        if stat_value is None or not stat_name:
+            return score
+        return f"{self._format_stat_value(stat_value)} {stat_name}"
+
+    @classmethod
+    def _stat_line_result(cls, market, actual_stats):
+        stat_value = cls._market_stat_value(market, actual_stats)
+        if stat_value is None:
+            return None
+        parsed = cls._parse_stat_line_market(market)
+        if not parsed:
+            return None
+        _side, _stat, direction, line = parsed
+        return stat_value > line if direction == "Over" else stat_value < line
+
+    @classmethod
+    def _market_stat_value(cls, market, actual_stats):
+        parsed = cls._parse_stat_line_market(market)
+        if not parsed:
+            return None
+        side, stat, _direction, _line = parsed
+        if side:
+            return cls._side_stat_value(actual_stats, side, stat)
+        return cls._total_stat_value(actual_stats, stat)
+
+    @staticmethod
+    def _parse_stat_line_market(market):
+        text = str(market or "").strip()
+        prefixes = (
+            ("Home Team Shots On Target ", "home", "shots_on_target"),
+            ("Away Team Shots On Target ", "away", "shots_on_target"),
+            ("Shots On Target ", None, "shots_on_target"),
+            ("Home Team Corners ", "home", "corners"),
+            ("Away Team Corners ", "away", "corners"),
+            ("Corners ", None, "corners"),
+            ("Home Team Cards ", "home", "cards"),
+            ("Away Team Cards ", "away", "cards"),
+            ("Cards ", None, "cards"),
+        )
+        for prefix, side, stat in prefixes:
+            if not text.startswith(prefix):
+                continue
+            parts = text[len(prefix):].split()
+            if len(parts) != 2 or parts[0] not in {"Over", "Under"}:
+                return None
+            try:
+                line = float(parts[1])
+            except (TypeError, ValueError):
+                return None
+            return side, stat, parts[0], line
+        return None
+
+    @classmethod
+    def _total_stat_value(cls, actual_stats, stat):
+        home = cls._side_stat_value(actual_stats, "home", stat)
+        away = cls._side_stat_value(actual_stats, "away", stat)
+        if home is None or away is None:
+            return None
+        return home + away
+
+    @classmethod
+    def _side_stat_value(cls, actual_stats, side, stat):
+        if not isinstance(actual_stats, dict):
+            return None
+        side_stats = actual_stats.get(side) if isinstance(actual_stats.get(side), dict) else {}
+        if stat == "cards":
+            return cls._cards_total(side_stats)
+        value = side_stats.get(stat)
+        try:
+            return float(value) if value not in (None, "") else None
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _market_stat_label(market):
+        parsed = SettlementService._parse_stat_line_market(market)
+        if not parsed:
+            return ""
+        side, stat, _direction, _line = parsed
+        labels = {
+            "cards": "cards",
+            "corners": "corners",
+            "shots_on_target": "shots on target",
+        }
+        prefix = f"{side} team " if side else ""
+        return f"{prefix}{labels.get(stat, stat)}"
+
+    @staticmethod
+    def _format_stat_value(value):
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            return str(value)
+        if number.is_integer():
+            return str(int(number))
+        return str(round(number, 2))
 
     @staticmethod
     def _goal_line_result(market, total_goals):
@@ -429,9 +545,15 @@ class SettlementService:
     def _statpal_event_count(payload, side, event_name):
         event_summary = payload.get("event_summary") if isinstance(payload.get("event_summary"), dict) else {}
         side_events = event_summary.get(side) if isinstance(event_summary.get(side), dict) else {}
+        if event_name not in side_events:
+            return None
         events = side_events.get(event_name)
+        if events in ("", None):
+            return 0
         if isinstance(events, dict):
             events = events.get("event")
+        if events in ("", None):
+            return 0
         if isinstance(events, list):
             return len(events)
         if isinstance(events, dict):
@@ -542,13 +664,22 @@ class SettlementService:
             teams = fixture.get("teams") or {}
             home_team = (teams.get("home") or {}).get("name")
             away_team = (teams.get("away") or {}).get("name")
+            actual_stats = fixture.get("actual_stats") if isinstance(fixture.get("actual_stats"), dict) else {}
             first_scorer = None
             if "First to Score" in pick.market:
                 if pick.match_id not in first_scorer_cache:
                     first_scorer_cache[pick.match_id] = self._first_scorer(pick.match_id)
                 first_scorer = first_scorer_cache[pick.match_id]
 
-            won = self._check_market(pick, home_goals, away_goals, home_team, away_team, first_scorer)
+            won = self._check_market(
+                pick,
+                home_goals,
+                away_goals,
+                home_team,
+                away_team,
+                first_scorer,
+                actual_stats,
+            )
             stake = pick.stake or Decimal("0")
             if won is None:
                 pick.status = Pick.Status.VOID
@@ -561,11 +692,7 @@ class SettlementService:
                 pick.pnl = -stake
 
             pick.score = f"{home_goals}-{away_goals}"
-            if pick.market.startswith("Corners "):
-                corner_total = self._fixture_corner_total(pick.match_id)
-                pick.result = f"{corner_total} corners" if corner_total is not None else pick.score
-            else:
-                pick.result = pick.score
+            pick.result = self._market_result_text(pick.market, pick.match_id, pick.score, actual_stats)
             pick.settled_at = timezone.now()
             pick.save(update_fields=["status", "pnl", "score", "result", "settled_at"])
 
@@ -605,13 +732,22 @@ class SettlementService:
                 teams = fixture.get("teams") or {}
                 home_team = (teams.get("home") or {}).get("name")
                 away_team = (teams.get("away") or {}).get("name")
+                actual_stats = fixture.get("actual_stats") if isinstance(fixture.get("actual_stats"), dict) else {}
                 first_scorer = None
                 if "First to Score" in prediction.market:
                     if prediction.match_id not in first_scorer_cache:
                         first_scorer_cache[prediction.match_id] = self._first_scorer(prediction.match_id)
                     first_scorer = first_scorer_cache[prediction.match_id]
 
-                won = self._check_market(prediction, home_goals, away_goals, home_team, away_team, first_scorer)
+                won = self._check_market(
+                    prediction,
+                    home_goals,
+                    away_goals,
+                    home_team,
+                    away_team,
+                    first_scorer,
+                    actual_stats,
+                )
                 stake = Decimal("1000")
                 if won is None:
                     prediction.status = MarketPrediction.Status.VOID
@@ -627,11 +763,12 @@ class SettlementService:
                     prediction_status_counts["loss"] += 1
 
                 prediction.score = f"{home_goals}-{away_goals}"
-                if prediction.market.startswith("Corners "):
-                    corner_total = self._fixture_corner_total(prediction.match_id)
-                    prediction.result = f"{corner_total} corners" if corner_total is not None else prediction.score
-                else:
-                    prediction.result = prediction.score
+                prediction.result = self._market_result_text(
+                    prediction.market,
+                    prediction.match_id,
+                    prediction.score,
+                    actual_stats,
+                )
                 prediction.settled_at = settlement_now
                 prediction_updates.append(prediction)
 
