@@ -21,6 +21,22 @@ COUNT_FAMILIES = {
     "team_shots_on_target": "sot",
 }
 
+GOAL_LINE_BUFFER = {
+    "total_goals": 0.45,
+    "team_total_goals": 0.35,
+}
+CORNER_LINE_BUFFER = {
+    "corners_total": 1.0,
+    "team_corners": 0.75,
+}
+GERMAN_UNDER_GOALS_LEAGUE_TERMS = (
+    "bundesliga",
+    "2. bundesliga",
+    "bundesliga 2",
+    "germany-bundesliga",
+    "germany-2-bundesliga",
+)
+
 
 def evaluate_market_probability(
     fixture_prediction: FixturePrediction, market: str
@@ -245,6 +261,15 @@ def _goal_probability(
         probability = goals.scoreline_matrix.get(
             str(descriptor.selection or descriptor.raw).strip()
         )
+    if _is_german_under_goals_market(prediction, descriptor):
+        warnings.append("german_under_goals_market_blocked")
+    warnings.extend(
+        _line_boundary_warnings(
+            descriptor,
+            _goal_expected_for_descriptor(goals, descriptor),
+            unit="goals",
+        )
+    )
     return (
         _round_probability(probability),
         "poisson_goals",
@@ -272,7 +297,104 @@ def _count_probability(
         probability = counts.line_probabilities.get(event, {}).get(key)
     facts = _count_facts(prediction, counts, event, descriptor)
     warnings = list(counts.diagnostics.warnings)
+    if event == "corners":
+        warnings.extend(
+            _line_boundary_warnings(
+                descriptor,
+                _count_expected_for_descriptor(counts, event, descriptor),
+                unit="corners",
+            )
+        )
     return probability, "poisson_counts", facts, warnings, counts.diagnostics.data_quality
+
+
+def _is_german_under_goals_market(prediction: FixturePrediction, descriptor: MarketDescriptor) -> bool:
+    if descriptor.family not in {"total_goals", "team_total_goals"}:
+        return False
+    if str(descriptor.side or "").lower() != "under":
+        return False
+    haystack = " ".join(
+        str(value or "").lower()
+        for value in (
+            getattr(getattr(prediction, "features", None), "league_key", ""),
+            (((getattr(getattr(prediction, "features", None), "features", {}) or {}).get("league") or {}).get("league_key")),
+            (((getattr(getattr(prediction, "features", None), "features", {}) or {}).get("league") or {}).get("league_name")),
+            (((getattr(getattr(prediction, "features", None), "features", {}) or {}).get("fixture") or {}).get("league")),
+            (((getattr(getattr(prediction, "features", None), "features", {}) or {}).get("fixture") or {}).get("country")),
+        )
+    )
+    if "austria" in haystack:
+        return False
+    return any(term in haystack for term in GERMAN_UNDER_GOALS_LEAGUE_TERMS)
+
+
+def _goal_expected_for_descriptor(goals, descriptor: MarketDescriptor) -> float | None:
+    if goals is None:
+        return None
+    if descriptor.family == "team_total_goals":
+        if descriptor.team == "home":
+            return _float(goals.home_expected_goals)
+        if descriptor.team == "away":
+            return _float(goals.away_expected_goals)
+        return None
+    home = _float(goals.home_expected_goals)
+    away = _float(goals.away_expected_goals)
+    if home is None or away is None:
+        return None
+    return home + away
+
+
+def _count_expected_for_descriptor(counts, event: str, descriptor: MarketDescriptor) -> float | None:
+    if counts is None:
+        return None
+    if descriptor.family.startswith("team_"):
+        return _float(counts.expected_team_counts.get(event, {}).get(descriptor.team or "home"))
+    field = {
+        "corners": "expected_total_corners",
+        "cards": "expected_total_cards",
+        "sot": "expected_total_sot",
+    }.get(event)
+    return _float(getattr(counts, field, None)) if field else None
+
+
+def _line_boundary_warnings(
+    descriptor: MarketDescriptor,
+    expected: float | None,
+    *,
+    unit: str,
+) -> list[str]:
+    line = _float(descriptor.line)
+    side = str(descriptor.side or "").lower()
+    if expected is None or line is None or side not in {"over", "under"}:
+        return []
+
+    if side == "over":
+        margin = expected - line
+    else:
+        margin = line - expected
+
+    if unit == "goals":
+        buffer = GOAL_LINE_BUFFER.get(descriptor.family, 0.45)
+        flags = ["goal_line_boundary"] if margin < buffer else []
+        if side == "under":
+            if line <= 2.5 and expected >= 2.0:
+                flags.append("under25_goal_volatility")
+            elif line <= 3.5 and expected >= 2.75:
+                flags.append("under35_blowout_risk")
+            elif line <= 4.5 and expected >= 3.2:
+                flags.append("under45_high_goal_volatility")
+        return list(dict.fromkeys(flags))
+
+    if unit == "corners":
+        buffer = CORNER_LINE_BUFFER.get(descriptor.family, 1.0)
+        flags = ["corner_line_boundary"] if margin < buffer else []
+        if side == "under" and expected >= line - 1.25:
+            flags.append("corner_under_pressure_risk")
+        if side == "over" and expected <= line + 1.25:
+            flags.append("corner_over_margin_risk")
+        return list(dict.fromkeys(flags))
+
+    return []
 
 
 def _scoreline_total_probability(goals, descriptor: MarketDescriptor) -> float | None:
@@ -432,9 +554,16 @@ def _goal_facts(
     if prefix != "Poisson goal model":
         facts.append(f"{prefix} used the scoreline distribution.")
     line = _float(descriptor.line)
-    if line is not None and total is not None and descriptor.side in {"over", "under"}:
-        direction = "below" if line < total else "above"
-        facts.append(f"Line {line:g} is {direction} the model projection of {total:.2f} goals.")
+    line_expected = _goal_expected_for_descriptor(goals, descriptor)
+    if line is not None and line_expected is not None and descriptor.side in {"over", "under"}:
+        direction = "below" if line < line_expected else "above"
+        if descriptor.family == "team_total_goals":
+            team_label = "home" if descriptor.team == "home" else "away" if descriptor.team == "away" else "team"
+            facts.append(
+                f"Line {line:g} is {direction} the {team_label} team projection of {line_expected:.2f} goals."
+            )
+        else:
+            facts.append(f"Line {line:g} is {direction} the model projection of {line_expected:.2f} goals.")
     facts.extend(_team_market_profile_facts(prediction, descriptor))
     facts.extend(_league_market_profile_facts(prediction, descriptor))
     return facts
@@ -488,10 +617,19 @@ def _count_facts(
             name = str(referee.get("name") or "The assigned referee").strip()
             facts.append(f"{name} averages {referee_cards:.2f} cards across {sample} tracked matches.")
     line = _float(descriptor.line)
-    if line is not None and expected is not None and descriptor.side in {"over", "under"}:
-        direction = "below" if line < expected else "above"
+    line_expected = _count_expected_for_descriptor(counts, event, descriptor)
+    if line is not None and line_expected is not None and descriptor.side in {"over", "under"}:
+        direction = "below" if line < line_expected else "above"
+        if descriptor.family.startswith("team_"):
+            team_label = "home" if descriptor.team == "home" else "away" if descriptor.team == "away" else "team"
+            facts.append(
+                f"Line {line:g} is {direction} the {team_label} team projection of {line_expected:.2f} {label}."
+            )
+            facts.extend(_team_market_profile_facts(prediction, descriptor))
+            facts.extend(_league_market_profile_facts(prediction, descriptor))
+            return facts
         facts.append(
-            f"Line {line:g} is {direction} the model projection of {expected:.2f} {label}."
+            f"Line {line:g} is {direction} the model projection of {line_expected:.2f} {label}."
         )
     facts.extend(_team_market_profile_facts(prediction, descriptor))
     facts.extend(_league_market_profile_facts(prediction, descriptor))

@@ -331,6 +331,16 @@ def _has_weak_market_flag(
         support_level in {"weak", "unsupported", "thin", "missing"}
         or recommendation_score.weak_market_penalty > 0
         or "weak_market_penalty" in warnings
+        or bool(warnings & {
+            "goal_line_boundary",
+            "german_under_goals_market_blocked",
+            "under25_goal_volatility",
+            "under35_blowout_risk",
+            "under45_high_goal_volatility",
+            "corner_line_boundary",
+            "corner_under_pressure_risk",
+            "corner_over_margin_risk",
+        })
     )
 
 

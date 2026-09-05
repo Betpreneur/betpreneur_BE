@@ -1225,6 +1225,13 @@ class AlgoRunnerService:
 
     def _prediction_analysis_available(self, probability, all_games):
         warnings = {str(item) for item in (probability.warnings or ())}
+        if warnings & {
+            "german_under_goals_market_blocked",
+            "under25_goal_volatility",
+            "under35_blowout_risk",
+            "under45_high_goal_volatility",
+        }:
+            return False
         if "fixture_not_found" in warnings or probability.effective_probability is None:
             return False
         both_team_profiles_missing = {"home_team_profile", "away_team_profile"}.issubset(warnings)
@@ -2173,8 +2180,20 @@ class AlgoRunnerService:
             council_score -= 12.0
         if "goal_line_boundary" in risk_flags:
             council_score -= 24.0
+        if "german_under_goals_market_blocked" in risk_flags:
+            council_score -= 70.0
+        if "under25_goal_volatility" in risk_flags:
+            council_score -= 20.0
         if "under35_blowout_risk" in risk_flags:
             council_score -= 28.0
+        if "under45_high_goal_volatility" in risk_flags:
+            council_score -= 18.0
+        if "corner_line_boundary" in risk_flags:
+            council_score -= 18.0
+        if "corner_under_pressure_risk" in risk_flags:
+            council_score -= 12.0
+        if "corner_over_margin_risk" in risk_flags:
+            council_score -= 10.0
         if "nordic_under_volatility" in risk_flags:
             council_score -= 16.0
         return (

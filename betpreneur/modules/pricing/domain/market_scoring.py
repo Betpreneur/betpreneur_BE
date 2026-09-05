@@ -29,7 +29,13 @@ MATCH_CHECKER_SERIOUS_FLAGS = {
     "best_price_far_above_consensus",
     "wide_odds_market",
     "goal_line_boundary",
+    "german_under_goals_market_blocked",
+    "under25_goal_volatility",
     "under35_blowout_risk",
+    "under45_high_goal_volatility",
+    "corner_line_boundary",
+    "corner_under_pressure_risk",
+    "corner_over_margin_risk",
     "nordic_under_volatility",
     "draw_boundary_risk",
 }

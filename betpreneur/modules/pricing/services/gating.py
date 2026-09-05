@@ -78,8 +78,20 @@ def market_display_score(market):
         score -= 3.0
     if "goal_line_boundary" in risk_flags:
         score -= 24.0
+    if "german_under_goals_market_blocked" in risk_flags:
+        score -= 70.0
+    if "under25_goal_volatility" in risk_flags:
+        score -= 20.0
     if "under35_blowout_risk" in risk_flags:
         score -= 28.0
+    if "under45_high_goal_volatility" in risk_flags:
+        score -= 18.0
+    if "corner_line_boundary" in risk_flags:
+        score -= 18.0
+    if "corner_under_pressure_risk" in risk_flags:
+        score -= 12.0
+    if "corner_over_margin_risk" in risk_flags:
+        score -= 10.0
     if "nordic_under_volatility" in risk_flags:
         score -= 16.0
     if "market_suppressed" in risk_flags or "strategy_suppressed" in risk_flags:

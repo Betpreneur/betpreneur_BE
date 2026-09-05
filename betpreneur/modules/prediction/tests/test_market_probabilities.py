@@ -56,7 +56,7 @@ class MarketProbabilityEngineTests(SimpleTestCase):
             expected_total_cards=4.1,
             expected_total_sot=9.7,
             line_probabilities={
-                "corners": {"over_7_5": 0.78, "over_8_5": 0.68},
+                "corners": {"over_7_5": 0.78, "over_8_5": 0.68, "over_9_5": 0.55},
                 "cards": {"over_3_5": 0.61},
                 "sot": {"over_7_5": 0.73},
             },
@@ -212,6 +212,90 @@ class MarketProbabilityEngineTests(SimpleTestCase):
             "Line 7.5 is below the model projection of 10.20 corners.",
             corners.supporting_facts,
         )
+        self.assertIn(
+            "Line 2.5 is below the home team projection of 5.80 corners.",
+            home_corners.supporting_facts,
+        )
+
+    def test_borderline_goal_unders_are_flagged_as_risky(self):
+        prediction = self._prediction()
+        prediction = FixturePrediction(
+            fixture_id=prediction.fixture_id,
+            fixture_name=prediction.fixture_name,
+            features=prediction.features,
+            goals=GoalModelOutput(
+                home_expected_goals=1.1,
+                away_expected_goals=1.06,
+                scoreline_matrix=prediction.goals.scoreline_matrix,
+                diagnostics=prediction.goals.diagnostics,
+            ),
+            counts=prediction.counts,
+            result=prediction.result,
+            diagnostics=prediction.diagnostics,
+        )
+
+        probability = evaluate_market_probability(prediction, "Under 2.5")
+
+        self.assertIn("goal_line_boundary", probability.warnings)
+        self.assertIn("under25_goal_volatility", probability.warnings)
+
+    def test_high_projected_under45_is_flagged_as_volatile(self):
+        prediction = self._prediction()
+        prediction = FixturePrediction(
+            fixture_id=prediction.fixture_id,
+            fixture_name=prediction.fixture_name,
+            features=prediction.features,
+            goals=GoalModelOutput(
+                home_expected_goals=1.35,
+                away_expected_goals=2.28,
+                scoreline_matrix=prediction.goals.scoreline_matrix,
+                diagnostics=prediction.goals.diagnostics,
+            ),
+            counts=prediction.counts,
+            result=prediction.result,
+            diagnostics=prediction.diagnostics,
+        )
+
+        probability = evaluate_market_probability(prediction, "Under 4.5")
+
+        self.assertIn("under45_high_goal_volatility", probability.warnings)
+
+    def test_bundesliga_under_goal_markets_are_blocked(self):
+        prediction = self._prediction()
+        prediction = FixturePrediction(
+            fixture_id=prediction.fixture_id,
+            fixture_name=prediction.fixture_name,
+            features=FixtureFeatureSet(
+                fixture_id=prediction.features.fixture_id,
+                fixture_name=prediction.features.fixture_name,
+                league_key="germany-bundesliga",
+                home_team=prediction.features.home_team,
+                away_team=prediction.features.away_team,
+                features={
+                    **prediction.features.features,
+                    "league": {"league_name": "Bundesliga", "league_key": "germany-bundesliga"},
+                    "fixture": {"league": "Bundesliga", "country": "Germany"},
+                },
+                diagnostics=prediction.features.diagnostics,
+            ),
+            goals=prediction.goals,
+            counts=prediction.counts,
+            result=prediction.result,
+            diagnostics=prediction.diagnostics,
+        )
+
+        total_under = evaluate_market_probability(prediction, "Under 3.5")
+        team_under = evaluate_market_probability(prediction, "Home Team Under 1.5")
+
+        self.assertIn("german_under_goals_market_blocked", total_under.warnings)
+        self.assertIn("german_under_goals_market_blocked", team_under.warnings)
+
+    def test_borderline_corner_lines_are_flagged_as_risky(self):
+        probability = evaluate_market_probability(self._prediction(), "Corners Over 9.5")
+
+        self.assertEqual(probability.raw_probability, 0.55)
+        self.assertIn("corner_line_boundary", probability.warnings)
+        self.assertIn("corner_over_margin_risk", probability.warnings)
 
     def test_early_payout_uses_score_matrix_and_increases_home_win_probability(self):
         prediction = self._prediction()
