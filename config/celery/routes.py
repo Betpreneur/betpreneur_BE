@@ -27,6 +27,7 @@ TASK_ROUTES = {
     "betpreneur.modules.catalog.tasks.sync_fixture_horizon": {"queue": queues.ALGO_STATPAL},
     "betpreneur.modules.scoring.tasks.fit_score_models": {"queue": queues.ALGO_STATPAL},
     "betpreneur.modules.settlement.tasks.settle_daily_results": {"queue": queues.ALGO_SETTLEMENT},
+    "betpreneur.modules.settlement.tasks.settle_recent_results": {"queue": queues.ALGO_SETTLEMENT},
     "betpreneur.modules.settlement.tasks.settle_slip_selections": {"queue": queues.ALGO_SETTLEMENT},
     "betpreneur.modules.scoring.tasks.refresh_imminent_lineups": {"queue": queues.ALGO_MAINTENANCE},
     "betpreneur.modules.scoring.tasks.refresh_player_availability": {

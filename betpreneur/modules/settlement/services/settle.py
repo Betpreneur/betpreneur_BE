@@ -11,11 +11,13 @@ methods about generating picks.
 """
 from __future__ import annotations
 
+import gc
 import logging
 from datetime import timedelta
 from decimal import Decimal
 
 import requests
+from django.db import close_old_connections
 from django.db.models import Q
 from django.utils import timezone
 
@@ -35,6 +37,8 @@ from ..models import SettlementRun
 from .recording import recorded
 
 log = logging.getLogger(__name__)
+
+INTERNAL_SETTLEMENT_BATCH_SIZE = 250
 
 
 class SettlementService:
@@ -409,6 +413,7 @@ class SettlementService:
         return (teams.get("home") or {}).get("name"), (teams.get("away") or {}).get("name")
 
     def _settle_database_picks(self, target_date):
+        self._corner_total_cache.clear()
         fixture_map = self._finished_fixture_map(target_date)
 
         picks = Pick.objects.filter(
@@ -419,6 +424,19 @@ class SettlementService:
         predictions = MarketPrediction.objects.filter(
             match_date=target_date,
             status=MarketPrediction.Status.PENDING,
+        ).only(
+            "id",
+            "match_date",
+            "fixture",
+            "match_id",
+            "market",
+            "odds",
+            "published",
+            "status",
+            "pnl_simulated",
+            "score",
+            "result",
+            "settled_at",
         ).order_by("id")
         updated = 0
         predictions_updated = 0
@@ -428,6 +446,20 @@ class SettlementService:
         prediction_status_counts = {"win": 0, "loss": 0, "void": 0}
         first_scorer_cache = {}
         feedback_recorded = set()
+        prediction_updates = []
+        settlement_now = timezone.now()
+
+        def flush_prediction_updates():
+            if not prediction_updates:
+                return
+            MarketPrediction.objects.bulk_update(
+                prediction_updates,
+                ["status", "pnl_simulated", "score", "result", "settled_at"],
+                batch_size=INTERNAL_SETTLEMENT_BATCH_SIZE,
+            )
+            prediction_updates.clear()
+            close_old_connections()
+            gc.collect()
 
         def record_feedback_once(match_id, fixture):
             key = str(match_id or "")
@@ -536,8 +568,8 @@ class SettlementService:
                 prediction.result = f"{corner_total} corners" if corner_total is not None else prediction.score
             else:
                 prediction.result = prediction.score
-            prediction.settled_at = timezone.now()
-            prediction.save(update_fields=["status", "pnl_simulated", "score", "result", "settled_at"])
+            prediction.settled_at = settlement_now
+            prediction_updates.append(prediction)
 
             predictions_updated += 1
             if len(settled_predictions_sample) < 100:
@@ -550,6 +582,10 @@ class SettlementService:
                     "score": prediction.score,
                     "pnl_simulated": float(prediction.pnl_simulated or 0),
                 })
+            if len(prediction_updates) >= INTERNAL_SETTLEMENT_BATCH_SIZE:
+                flush_prediction_updates()
+
+        flush_prediction_updates()
 
         return {
             "status": "success",
@@ -731,6 +767,8 @@ class SettlementService:
         current = first_date
         while current <= last_date:
             results.append(self.update_results(target_date=current))
+            close_old_connections()
+            gc.collect()
             current += timedelta(days=1)
         return {
             "status": "success",
