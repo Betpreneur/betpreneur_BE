@@ -516,8 +516,17 @@ def _compact_games_payload(target_date, request=None, *, page=1, page_size=20):
             "metrics": _response_metrics(started_at, 0, 0, stage_ms=stage_ms),
         }
 
+    raw_fixture_count = AlgoFixture.objects.filter(run=algo_run).count()
+    returnable_match_ids = (
+        MarketPrediction.objects.filter(run=algo_run, eligible=True)
+        .exclude(market__in=EXCLUDED_MARKETS)
+        .exclude(match_id__isnull=True)
+        .exclude(match_id="")
+        .values_list("match_id", flat=True)
+        .distinct()
+    )
     fixture_queryset = (
-        AlgoFixture.objects.filter(run=algo_run)
+        AlgoFixture.objects.filter(run=algo_run, match_id__in=returnable_match_ids)
         .only(
             "id",
             "fixture",
@@ -539,7 +548,7 @@ def _compact_games_payload(target_date, request=None, *, page=1, page_size=20):
         )
         .order_by("country", "league", "kickoff", "fixture")
     )
-    total_fixtures = fixture_queryset.count()
+    total_games = fixture_queryset.count()
     offset = (page - 1) * page_size
     fixtures = list(fixture_queryset[offset:offset + page_size])
     mark_stage("fixture_page")
@@ -560,7 +569,25 @@ def _compact_games_payload(target_date, request=None, *, page=1, page_size=20):
     top_market_ranks = {}
     recommended_markets_by_match = {}
     recommended_market_ranks = {}
-    predictions = base_predictions.select_related("selected_pick").order_by(
+    predictions = base_predictions.select_related("selected_pick").only(
+        "id",
+        "match_id",
+        "market",
+        "meaning",
+        "raw_confidence",
+        "confidence",
+        "odds",
+        "odds_meta",
+        "ev",
+        "odds_source",
+        "eligible",
+        "published",
+        "risk_flags",
+        "insights",
+        "selected_pick_id",
+        "selected_pick__tier",
+        "selected_pick__insights",
+    ).order_by(
         "match_id",
         "-published",
         "-confidence",
@@ -622,7 +649,8 @@ def _compact_games_payload(target_date, request=None, *, page=1, page_size=20):
         "run_id": algo_run.id,
         "posted_at": algo_run.created_at,
         "summary": {
-            "game_count": total_fixtures,
+            "game_count": total_games,
+            "fixture_count": raw_fixture_count,
             "page_game_count": len(games),
             "published_game_count": sum(1 for game in games if game.get("published")),
             "recommended_game_count": sum(1 for game in games if game.get("recommended_market")),
@@ -636,10 +664,17 @@ def _compact_games_payload(target_date, request=None, *, page=1, page_size=20):
         "strategy": _compact_strategy_payload(run_result.get("strategy_profile", {})),
         "games": games,
         "grouped_games": _group_by_country_and_league(games, "games"),
-        "pagination": _pagination_payload(page, page_size, total_fixtures),
+        "pagination": _pagination_payload(page, page_size, total_games),
     }
     mark_stage("summary")
-    payload["metrics"] = _response_metrics(started_at, total_fixtures, len(games), payload, stage_ms=stage_ms)
+    payload["metrics"] = _response_metrics(
+        started_at,
+        raw_fixture_count,
+        len(games),
+        payload,
+        stage_ms=stage_ms,
+        returnable_games=total_games,
+    )
     return payload
 
 
@@ -687,13 +722,15 @@ def _pagination_payload(page, page_size, total_items):
     }
 
 
-def _response_metrics(started_at, total_fixtures, page_games, payload=None, *, stage_ms=None):
+def _response_metrics(started_at, total_fixtures, page_games, payload=None, *, stage_ms=None, returnable_games=None):
     metrics = {
         "duration_ms": round((time.perf_counter() - started_at) * 1000, 2),
         "total_fixtures": total_fixtures,
         "page_games": page_games,
         "stage_ms": stage_ms or {},
     }
+    if returnable_games is not None:
+        metrics["returnable_games"] = returnable_games
     if payload is not None:
         try:
             metrics["response_bytes"] = len(json.dumps(payload, default=str, separators=(",", ":")).encode())
@@ -1575,7 +1612,7 @@ class GamesView(APIView):
                     target_date,
                     request,
                     page=query.validated_data.get("page") or 1,
-                    page_size=query.validated_data.get("page_size") or 50,
+                    page_size=query.validated_data.get("page_size") or 20,
                 ),
                 request=request,
             )
