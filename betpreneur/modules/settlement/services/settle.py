@@ -192,10 +192,19 @@ class SettlementService:
         goals = home_goals if parts[0] == "Home" else away_goals
         return goals > line if parts[2] == "Over" else goals < line
 
-    def _finished_fixture_map(self, target_date):
+    def _finished_fixture_map(self, target_date, match_ids=None):
         fixture_map = {}
+        wanted_keys = {str(match_id or "").strip() for match_id in (match_ids or []) if str(match_id or "").strip()}
+        wanted_provider_ids = {
+            key.replace("statpal:", "", 1)
+            for key in wanted_keys
+            if key.startswith("statpal:") and key.replace("statpal:", "", 1)
+        }
 
         def add_fixture(keys, fixture):
+            normalized_keys = {str(key or "").strip() for key in keys if str(key or "").strip()}
+            if wanted_keys and not normalized_keys.intersection(wanted_keys | wanted_provider_ids):
+                return
             for key in keys:
                 key = str(key or "").strip()
                 if key:
@@ -215,13 +224,23 @@ class SettlementService:
             if ((fixture.get("fixture") or {}).get("status") or {}).get("short") not in {"FT", "AET", "PEN"}:
                 continue
             keys = [fixture_id]
+            if wanted_keys and str(fixture_id or "") not in wanted_keys:
+                mapped_keys = set(
+                    ProviderFixtureMap.objects.filter(api_fixture_id=str(fixture_id), active=True)
+                    .values_list("provider_event_id", flat=True)
+                )
+                if not mapped_keys.intersection(wanted_keys | wanted_provider_ids):
+                    continue
             for mapping in ProviderFixtureMap.objects.filter(api_fixture_id=str(fixture_id), active=True):
                 keys.extend([mapping.api_fixture_id, mapping.provider_event_id, f"{mapping.provider}:{mapping.provider_event_id}"])
                 if mapping.provider == "statpal":
                     keys.append(f"statpal:{mapping.provider_event_id}")
             add_fixture(keys, fixture)
 
-        for cached in FixtureCache.objects.filter(match_date=target_date, source="statpal"):
+        cached_query = FixtureCache.objects.filter(match_date=target_date, source="statpal")
+        if wanted_keys:
+            cached_query = cached_query.filter(Q(match_id__in=wanted_keys) | Q(match_id__in=wanted_provider_ids))
+        for cached in cached_query.only("match_id", "home_team", "away_team", "api_payload").iterator(chunk_size=100):
             fixture = self._statpal_cached_finished_fixture(cached)
             if not fixture:
                 continue
@@ -243,7 +262,21 @@ class SettlementService:
                 keys.extend([mapped.api_fixture_id, mapped.provider_event_id, f"statpal:{mapped.provider_event_id}"])
             add_fixture(keys, fixture)
 
-        for row in SlipReviewMarketCache.objects.filter(match_date=target_date).exclude(provider_match_id=""):
+        slip_cache_query = SlipReviewMarketCache.objects.filter(match_date=target_date).exclude(provider_match_id="")
+        if wanted_keys:
+            slip_cache_query = slip_cache_query.filter(
+                Q(match_id__in=wanted_keys)
+                | Q(match_id__in=wanted_provider_ids)
+                | Q(provider_match_id__in=wanted_keys)
+                | Q(provider_match_id__in=wanted_provider_ids)
+            )
+        for row in slip_cache_query.only(
+            "match_id",
+            "provider_match_id",
+            "home_team",
+            "away_team",
+            "fixture_payload",
+        ).iterator(chunk_size=100):
             fixture = self._statpal_payload_finished_fixture(
                 row.fixture_payload or {},
                 match_id=row.match_id,
@@ -414,8 +447,6 @@ class SettlementService:
 
     def _settle_database_picks(self, target_date):
         self._corner_total_cache.clear()
-        fixture_map = self._finished_fixture_map(target_date)
-
         picks = Pick.objects.filter(
             Q(match_date=target_date)
             | Q(match_date__isnull=True, run__target_date=target_date),
@@ -438,6 +469,27 @@ class SettlementService:
             "result",
             "settled_at",
         ).order_by("id")
+        pending_match_ids = set(
+            picks.exclude(match_id="").values_list("match_id", flat=True).distinct()
+        )
+        pending_match_ids.update(
+            predictions.exclude(match_id="").values_list("match_id", flat=True).distinct()
+        )
+        if not pending_match_ids:
+            return {
+                "status": "success",
+                "date": target_date.isoformat(),
+                "updated_count": 0,
+                "database_updated_count": 0,
+                "internal_predictions_updated_count": 0,
+                "internal_prediction_status_counts": {"win": 0, "loss": 0, "void": 0},
+                "total_pnl": 0,
+                "settled_picks": [],
+                "settled_internal_predictions": [],
+                "settled_picks_sampled": False,
+                "settled_internal_predictions_sampled": False,
+            }
+        fixture_map = self._finished_fixture_map(target_date, pending_match_ids)
         updated = 0
         predictions_updated = 0
         total_pnl = 0
