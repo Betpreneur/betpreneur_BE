@@ -256,6 +256,8 @@ class GameAnalysisQuerySerializer(serializers.Serializer):
         required=False,
         default="full",
     )
+    page = serializers.IntegerField(required=False, min_value=1, default=1)
+    page_size = serializers.IntegerField(required=False, min_value=1, max_value=100, default=20)
     include = serializers.ChoiceField(
         choices=("public", "technical"),
         required=False,

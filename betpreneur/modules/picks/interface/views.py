@@ -7,10 +7,12 @@ Extracted from the 11k-line apps/algo/views.py.
 # tasks. Dispatching by name keeps the layer order intact — Celery resolves
 # the task on the worker.
 import csv
+import json
 import logging
+import time
 
 from celery import current_app
-from django.db.models import Count
+from django.db.models import Count, Sum
 from django.http import HttpResponse
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
@@ -351,11 +353,8 @@ def _compact_pick_payload(pick, *, backed_game_counts=None, backed_game_ids=None
         "odds": float(pick.odds),
         "ev": float(pick.ev),
         "status": pick.status,
-        "bettor_view": insights.get("bettor_view") or {},
         "analysis_summary": insights.get("summary", ""),
         "analysis_conclusion": insights.get("conclusion", ""),
-        "positive_evidence": insights.get("positive_evidence") or [],
-        "risk_evidence": insights.get("risk_evidence") or [],
         "backed_count": int((backed_game_counts or {}).get(match_id, 0) or 0),
         "backed_by_me": match_id in (backed_game_ids or set()),
     }
@@ -366,6 +365,7 @@ def _compact_market_payload(market):
         return None
     insights = market.get("insights") or {}
     bettor_view = insights.get("bettor_view") or market.get("bettor_view") or {}
+    risk_flags = market.get("risk_flags") or []
     return {
         "market": market.get("market", ""),
         "meaning": market.get("meaning", ""),
@@ -379,12 +379,9 @@ def _compact_market_payload(market):
         "data_status": market.get("data_status", "modelled" if market.get("eligible") else "insufficient_data"),
         "recommended": bool(market.get("recommended")),
         "recommendation_status": market.get("recommendation_status", ""),
-        "risk_flags": market.get("risk_flags") or [],
-        "bettor_view": bettor_view,
+        "risk_count": len(risk_flags),
         "analysis_summary": market.get("analysis_summary") or bettor_view.get("summary", ""),
         "analysis_conclusion": market.get("analysis_conclusion") or bettor_view.get("conclusion", ""),
-        "positive_evidence": market.get("positive_evidence") or bettor_view.get("positive_evidence") or [],
-        "risk_evidence": market.get("risk_evidence") or bettor_view.get("risk_evidence") or [],
     }
 
 
@@ -487,8 +484,19 @@ def _compact_strategy_payload(strategy):
     }
 
 
-def _compact_games_payload(target_date, request=None):
+def _compact_games_payload(target_date, request=None, *, page=1, page_size=20):
+    started_at = time.perf_counter()
+    stage_started_at = started_at
+    stage_ms = {}
+
+    def mark_stage(name):
+        nonlocal stage_started_at
+        now = time.perf_counter()
+        stage_ms[name] = round((now - stage_started_at) * 1000, 2)
+        stage_started_at = now
+
     algo_run = _latest_successful_run(target_date, prefetch=False)
+    mark_stage("run_lookup")
     if not algo_run:
         return {
             "date": target_date,
@@ -504,13 +512,14 @@ def _compact_games_payload(target_date, request=None):
                 "top_pick_count": 0,
             },
             "games": [],
+            "pagination": _pagination_payload(page, page_size, 0),
+            "metrics": _response_metrics(started_at, 0, 0, stage_ms=stage_ms),
         }
 
-    fixtures = list(
+    fixture_queryset = (
         AlgoFixture.objects.filter(run=algo_run)
         .only(
             "id",
-            "run",
             "fixture",
             "home_team",
             "away_team",
@@ -530,11 +539,19 @@ def _compact_games_payload(target_date, request=None):
         )
         .order_by("country", "league", "kickoff", "fixture")
     )
+    total_fixtures = fixture_queryset.count()
+    offset = (page - 1) * page_size
+    fixtures = list(fixture_queryset[offset:offset + page_size])
+    mark_stage("fixture_page")
     match_ids = [str(fixture.match_id or "") for fixture in fixtures if str(fixture.match_id or "")]
     backed_game_counts, backed_game_ids, _user_markets = _bulk_game_back_context(match_ids, request)
-    picks_by_match = picks_by_match_for_run(algo_run)
+    picks_by_match = _compact_picks_by_match_for_run(algo_run, match_ids)
+    mark_stage("backing_and_picks")
 
-    base_predictions = MarketPrediction.objects.filter(run=algo_run).exclude(market__in=EXCLUDED_MARKETS)
+    base_predictions = (
+        MarketPrediction.objects.filter(run=algo_run, match_id__in=match_ids)
+        .exclude(market__in=EXCLUDED_MARKETS)
+    )
     eligible_counts = {
         str(item["match_id"] or ""): item["eligible_count"]
         for item in base_predictions.filter(eligible=True).values("match_id").annotate(eligible_count=Count("id"))
@@ -566,6 +583,7 @@ def _compact_games_payload(target_date, request=None):
             if rank > recommended_market_ranks.get(prediction_match_id, ()):
                 recommended_market_ranks[prediction_match_id] = rank
                 recommended_markets_by_match[prediction_match_id] = payload
+    mark_stage("market_ranking")
 
     games = [
         _compact_fixture_card(
@@ -590,26 +608,98 @@ def _compact_games_payload(target_date, request=None):
             game.get("fixture") or "",
         ),
     )
+    mark_stage("game_cards")
 
-    return {
+    run_result = algo_run.result or {}
+    fixture_totals = AlgoFixture.objects.filter(run=algo_run).aggregate(
+        market_count=Sum("market_count"),
+        markets_70_plus=Sum("markets_70_plus"),
+        markets_65_plus=Sum("markets_65_plus"),
+    )
+    payload = {
         "date": target_date,
         "published": bool(games),
         "run_id": algo_run.id,
         "posted_at": algo_run.created_at,
         "summary": {
-            "game_count": len(games),
+            "game_count": total_fixtures,
+            "page_game_count": len(games),
             "published_game_count": sum(1 for game in games if game.get("published")),
             "recommended_game_count": sum(1 for game in games if game.get("recommended_market")),
-            "market_count": sum(game.get("market_count", 0) for game in games),
+            "market_count": fixture_totals.get("market_count") or run_result.get("market_count", 0) or 0,
             "eligible_market_count": sum(game.get("eligible_market_count", 0) for game in games),
+            "page_market_count": sum(game.get("market_count", 0) for game in games),
             "top_pick_count": sum(len(items) for items in picks_by_match.values()),
-            "markets_70_plus": (algo_run.result or {}).get("markets_70_plus", 0),
-            "markets_65_plus": (algo_run.result or {}).get("markets_65_plus", 0),
+            "markets_70_plus": run_result.get("markets_70_plus", 0) or fixture_totals.get("markets_70_plus") or 0,
+            "markets_65_plus": run_result.get("markets_65_plus", 0) or fixture_totals.get("markets_65_plus") or 0,
         },
-        "strategy": _compact_strategy_payload((algo_run.result or {}).get("strategy_profile", {})),
+        "strategy": _compact_strategy_payload(run_result.get("strategy_profile", {})),
         "games": games,
         "grouped_games": _group_by_country_and_league(games, "games"),
+        "pagination": _pagination_payload(page, page_size, total_fixtures),
     }
+    mark_stage("summary")
+    payload["metrics"] = _response_metrics(started_at, total_fixtures, len(games), payload, stage_ms=stage_ms)
+    return payload
+
+
+def _compact_picks_by_match_for_run(algo_run, match_ids):
+    grouped = {}
+    if not match_ids:
+        return grouped
+    queryset = (
+        Pick.objects.filter(run=algo_run, match_id__in=match_ids)
+        .exclude(market__in=EXCLUDED_MARKETS)
+        .only(
+            "id",
+            "match_date",
+            "fixture",
+            "home_team",
+            "away_team",
+            "league",
+            "kickoff",
+            "match_id",
+            "tier",
+            "market",
+            "meaning",
+            "confidence",
+            "odds",
+            "ev",
+            "status",
+            "insights",
+        )
+        .order_by("match_id", "tier", "-confidence", "-ev")
+    )
+    for pick in queryset:
+        grouped.setdefault(str(pick.match_id or ""), []).append(pick)
+    return grouped
+
+
+def _pagination_payload(page, page_size, total_items):
+    total_pages = (total_items + page_size - 1) // page_size if page_size else 0
+    return {
+        "page": page,
+        "page_size": page_size,
+        "total_items": total_items,
+        "total_pages": total_pages,
+        "has_next": page < total_pages,
+        "has_previous": page > 1 and total_pages > 0,
+    }
+
+
+def _response_metrics(started_at, total_fixtures, page_games, payload=None, *, stage_ms=None):
+    metrics = {
+        "duration_ms": round((time.perf_counter() - started_at) * 1000, 2),
+        "total_fixtures": total_fixtures,
+        "page_games": page_games,
+        "stage_ms": stage_ms or {},
+    }
+    if payload is not None:
+        try:
+            metrics["response_bytes"] = len(json.dumps(payload, default=str, separators=(",", ":")).encode())
+        except (TypeError, ValueError):
+            pass
+    return metrics
 
 
 def _all_games_payload(target_date, request=None):
@@ -1480,7 +1570,15 @@ class GamesView(APIView):
         query.is_valid(raise_exception=True)
         target_date = query.validated_data.get("date") or timezone.localdate()
         if query.validated_data.get("view") == "compact":
-            return private_cached_response(_compact_games_payload(target_date, request), request=request)
+            return private_cached_response(
+                _compact_games_payload(
+                    target_date,
+                    request,
+                    page=query.validated_data.get("page") or 1,
+                    page_size=query.validated_data.get("page_size") or 50,
+                ),
+                request=request,
+            )
         return private_cached_response(_all_games_payload(target_date, request), request=request)
 
 
