@@ -324,7 +324,10 @@ class SettlementService:
 
     def _statpal_payload_finished_fixture(self, payload, *, match_id="", home_team="", away_team=""):
         payload = payload if isinstance(payload, dict) else {}
-        status = payload.get("status") or (payload.get("fixture") or {}).get("status")
+        fixture_payload = payload.get("fixture") if isinstance(payload.get("fixture"), dict) else {}
+        home_payload = payload.get("home") if isinstance(payload.get("home"), dict) else {}
+        away_payload = payload.get("away") if isinstance(payload.get("away"), dict) else {}
+        status = payload.get("status") or fixture_payload.get("status")
         if isinstance(status, dict):
             status = status.get("short") or status.get("long") or status.get("status")
         home_goals = self._settlement_int_or_none(
@@ -357,13 +360,13 @@ class SettlementService:
             home_team
             or payload.get("home_name")
             or payload.get("hname")
-            or ((payload.get("home") or {}).get("name") if isinstance(payload.get("home"), dict) else "")
+            or home_payload.get("name")
         )
         away = (
             away_team
             or payload.get("away_name")
             or payload.get("aname")
-            or ((payload.get("away") or {}).get("name") if isinstance(payload.get("away"), dict) else "")
+            or away_payload.get("name")
         )
         return {
             "fixture": {
