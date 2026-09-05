@@ -10,6 +10,8 @@ from __future__ import annotations
 import re
 from decimal import Decimal, InvalidOperation
 
+from django.db.models import Case, Count, IntegerField, Value, When
+
 from betpreneur.modules.markets.api import describe_market
 from betpreneur.modules.picks.interface.serializers import PickSerializer
 from betpreneur.modules.picks.models import AlgoFixture, AlgoRun, GameBack, MarketPrediction, Pick
@@ -44,10 +46,21 @@ def _pick_final_confidence(pick):
 
 
 def _latest_successful_run(target_date, *, prefetch=True):
-    queryset = AlgoRun.objects.filter(target_date=target_date, status=AlgoRun.Status.SUCCESS)
+    queryset = (
+        AlgoRun.objects.filter(target_date=target_date, status=AlgoRun.Status.SUCCESS)
+        .exclude(result__publish_policy="on_demand_fixture_analysis")
+        .annotate(
+            fixture_total=Count("fixtures", distinct=True),
+            daily_policy_rank=Case(
+                When(result__publish_policy__in=["strict_accuracy_gate", "celery_fanout_pipeline"], then=Value(1)),
+                default=Value(0),
+                output_field=IntegerField(),
+            ),
+        )
+    )
     if prefetch:
         queryset = queryset.prefetch_related("picks", "fixtures", "market_predictions")
-    return queryset.order_by("-created_at").first()
+    return queryset.order_by("-daily_policy_rank", "-fixture_total", "-created_at").first()
 
 
 def _top_pick_sort_key(pick):
