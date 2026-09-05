@@ -581,64 +581,73 @@ class SettlementService:
                     "pnl": float(pick.pnl or 0),
                 })
 
-        for prediction in predictions.iterator(chunk_size=250):
-            fixture = fixture_map.get(str(prediction.match_id))
-            if not fixture:
-                continue
+        last_prediction_id = 0
+        while True:
+            prediction_batch = list(
+                predictions.filter(id__gt=last_prediction_id)[:INTERNAL_SETTLEMENT_BATCH_SIZE]
+            )
+            if not prediction_batch:
+                break
 
-            goals = fixture.get("goals") or {}
-            home_goals = goals.get("home")
-            away_goals = goals.get("away")
-            if home_goals is None or away_goals is None:
-                continue
-            record_feedback_once(prediction.match_id, fixture)
+            for prediction in prediction_batch:
+                last_prediction_id = prediction.id
+                fixture = fixture_map.get(str(prediction.match_id))
+                if not fixture:
+                    continue
 
-            teams = fixture.get("teams") or {}
-            home_team = (teams.get("home") or {}).get("name")
-            away_team = (teams.get("away") or {}).get("name")
-            first_scorer = None
-            if "First to Score" in prediction.market:
-                if prediction.match_id not in first_scorer_cache:
-                    first_scorer_cache[prediction.match_id] = self._first_scorer(prediction.match_id)
-                first_scorer = first_scorer_cache[prediction.match_id]
+                goals = fixture.get("goals") or {}
+                home_goals = goals.get("home")
+                away_goals = goals.get("away")
+                if home_goals is None or away_goals is None:
+                    continue
+                record_feedback_once(prediction.match_id, fixture)
 
-            won = self._check_market(prediction, home_goals, away_goals, home_team, away_team, first_scorer)
-            stake = Decimal("1000")
-            if won is None:
-                prediction.status = MarketPrediction.Status.VOID
-                prediction.pnl_simulated = Decimal("0")
-                prediction_status_counts["void"] += 1
-            elif won:
-                prediction.status = MarketPrediction.Status.WIN
-                prediction.pnl_simulated = Decimal(str(round(float(stake) * (float(prediction.odds) - 1), 2)))
-                prediction_status_counts["win"] += 1
-            else:
-                prediction.status = MarketPrediction.Status.LOSS
-                prediction.pnl_simulated = -stake
-                prediction_status_counts["loss"] += 1
+                teams = fixture.get("teams") or {}
+                home_team = (teams.get("home") or {}).get("name")
+                away_team = (teams.get("away") or {}).get("name")
+                first_scorer = None
+                if "First to Score" in prediction.market:
+                    if prediction.match_id not in first_scorer_cache:
+                        first_scorer_cache[prediction.match_id] = self._first_scorer(prediction.match_id)
+                    first_scorer = first_scorer_cache[prediction.match_id]
 
-            prediction.score = f"{home_goals}-{away_goals}"
-            if prediction.market.startswith("Corners "):
-                corner_total = self._fixture_corner_total(prediction.match_id)
-                prediction.result = f"{corner_total} corners" if corner_total is not None else prediction.score
-            else:
-                prediction.result = prediction.score
-            prediction.settled_at = settlement_now
-            prediction_updates.append(prediction)
+                won = self._check_market(prediction, home_goals, away_goals, home_team, away_team, first_scorer)
+                stake = Decimal("1000")
+                if won is None:
+                    prediction.status = MarketPrediction.Status.VOID
+                    prediction.pnl_simulated = Decimal("0")
+                    prediction_status_counts["void"] += 1
+                elif won:
+                    prediction.status = MarketPrediction.Status.WIN
+                    prediction.pnl_simulated = Decimal(str(round(float(stake) * (float(prediction.odds) - 1), 2)))
+                    prediction_status_counts["win"] += 1
+                else:
+                    prediction.status = MarketPrediction.Status.LOSS
+                    prediction.pnl_simulated = -stake
+                    prediction_status_counts["loss"] += 1
 
-            predictions_updated += 1
-            if len(settled_predictions_sample) < 100:
-                settled_predictions_sample.append({
-                    "id": prediction.id,
-                    "fixture": prediction.fixture,
-                    "market": prediction.market,
-                    "published": prediction.published,
-                    "status": prediction.status,
-                    "score": prediction.score,
-                    "pnl_simulated": float(prediction.pnl_simulated or 0),
-                })
-            if len(prediction_updates) >= INTERNAL_SETTLEMENT_BATCH_SIZE:
-                flush_prediction_updates()
+                prediction.score = f"{home_goals}-{away_goals}"
+                if prediction.market.startswith("Corners "):
+                    corner_total = self._fixture_corner_total(prediction.match_id)
+                    prediction.result = f"{corner_total} corners" if corner_total is not None else prediction.score
+                else:
+                    prediction.result = prediction.score
+                prediction.settled_at = settlement_now
+                prediction_updates.append(prediction)
+
+                predictions_updated += 1
+                if len(settled_predictions_sample) < 100:
+                    settled_predictions_sample.append({
+                        "id": prediction.id,
+                        "fixture": prediction.fixture,
+                        "market": prediction.market,
+                        "published": prediction.published,
+                        "status": prediction.status,
+                        "score": prediction.score,
+                        "pnl_simulated": float(prediction.pnl_simulated or 0),
+                    })
+
+            flush_prediction_updates()
 
         flush_prediction_updates()
 
