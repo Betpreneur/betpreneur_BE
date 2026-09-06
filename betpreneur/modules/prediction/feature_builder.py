@@ -319,8 +319,20 @@ def _average(values) -> float | None:
 
 
 def _scoreline_profile_payload(*, home: dict[str, Any], away: dict[str, Any], snapshots: dict[str, Any]) -> dict[str, Any]:
-    home_rows = _recent_fixture_rows(home.get("recent_form") or {}, preferred_scope="home")
-    away_rows = _recent_fixture_rows(away.get("recent_form") or {}, preferred_scope="away")
+    home_team = getattr(home.get("strength_snapshot"), "team_name", "") if home.get("strength_snapshot") else ""
+    away_team = getattr(away.get("strength_snapshot"), "team_name", "") if away.get("strength_snapshot") else ""
+    home_rows = _recent_fixture_rows(
+        home.get("recent_form") or {},
+        preferred_scope="home",
+        source="home_recent",
+        team_name=home_team,
+    )
+    away_rows = _recent_fixture_rows(
+        away.get("recent_form") or {},
+        preferred_scope="away",
+        source="away_recent",
+        team_name=away_team,
+    )
     h2h_rows = _h2h_fixture_rows(snapshots)
     combined_rows = [*home_rows, *away_rows, *h2h_rows]
     return {
@@ -331,7 +343,13 @@ def _scoreline_profile_payload(*, home: dict[str, Any], away: dict[str, Any], sn
     }
 
 
-def _recent_fixture_rows(recent_form: dict[str, Any], *, preferred_scope: str) -> list[dict[str, Any]]:
+def _recent_fixture_rows(
+    recent_form: dict[str, Any],
+    *,
+    preferred_scope: str,
+    source: str,
+    team_name: str,
+) -> list[dict[str, Any]]:
     form = (
         (recent_form.get(preferred_scope) or {}).get("10")
         or (recent_form.get("all") or {}).get("10")
@@ -341,7 +359,11 @@ def _recent_fixture_rows(recent_form: dict[str, Any], *, preferred_scope: str) -
     )
     stats = form.get("stats") if isinstance(form.get("stats"), dict) else {}
     rows = stats.get("fixtures") if isinstance(stats.get("fixtures"), list) else []
-    return [_scoreline_row(row) for row in rows if _scoreline_row(row)]
+    return [
+        parsed
+        for row in rows
+        if (parsed := _scoreline_row(row, source=source, team_name=team_name))
+    ]
 
 
 def _h2h_fixture_rows(snapshots: dict[str, Any]) -> list[dict[str, Any]]:
@@ -362,6 +384,9 @@ def _h2h_fixture_rows(snapshots: dict[str, Any]) -> list[dict[str, Any]]:
             "match_date": _iso(row.get("date")),
             "fixture": f"{row.get('team1_name') or ''} vs {row.get('team2_name') or ''}".strip(),
             "opponent": row.get("team2_name") or "",
+            "source": "head_to_head",
+            "team_name": row.get("team1_name") or "",
+            "opponent_name": row.get("team2_name") or "",
             "result": "W" if goals_for > goals_against else "D" if goals_for == goals_against else "L",
             "goals_for": goals_for,
             "goals_against": goals_against,
@@ -369,7 +394,7 @@ def _h2h_fixture_rows(snapshots: dict[str, Any]) -> list[dict[str, Any]]:
     return rows
 
 
-def _scoreline_row(row: dict[str, Any]) -> dict[str, Any]:
+def _scoreline_row(row: dict[str, Any], *, source: str = "", team_name: str = "") -> dict[str, Any]:
     if not isinstance(row, dict):
         return {}
     goals_for = _int_or_none(row.get("goals_for"))
@@ -381,6 +406,9 @@ def _scoreline_row(row: dict[str, Any]) -> dict[str, Any]:
         "match_date": row.get("match_date") or "",
         "fixture": row.get("fixture") or "",
         "opponent": row.get("opponent") or "",
+        "source": source or row.get("source") or "",
+        "team_name": team_name or row.get("team_name") or "",
+        "opponent_name": row.get("opponent") or row.get("opponent_name") or "",
         "result": row.get("result") or ("W" if goals_for > goals_against else "D" if goals_for == goals_against else "L"),
         "goals_for": goals_for,
         "goals_against": goals_against,
@@ -414,6 +442,9 @@ def _scoreline_profile(rows: list[dict[str, Any]]) -> dict[str, Any]:
                 "match_date": row.get("match_date") or "",
                 "fixture": row.get("fixture") or "",
                 "opponent": row.get("opponent") or "",
+                "source": row.get("source") or "",
+                "team_name": row.get("team_name") or "",
+                "opponent_name": row.get("opponent_name") or row.get("opponent") or "",
                 "result": row.get("result") or "",
                 "goals_for": row.get("goals_for"),
                 "goals_against": row.get("goals_against"),

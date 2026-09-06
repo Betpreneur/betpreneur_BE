@@ -67,7 +67,7 @@ class PublicReasoningTests(SimpleTestCase):
                             "Home average: 1.86 xG.",
                             "Away average: 1.17 xG.",
                             "Line 2.5 is below the model projection of 3.03 goals.",
-                            "Recent scoreline sample: 2-2, 3-1, 1-2.",
+                            "Tracked scorelines used: Everton 2-2 Leeds; Everton 3-1 Newcastle; H2H: Everton vs Manchester Utd 1-2.",
                             "Recent scorelines average 3.40 total goals across 10 tracked matches.",
                             "Recent scoreline Over 2.5 rate: 70.0%.",
                         ],
@@ -96,5 +96,8 @@ class PublicReasoningTests(SimpleTestCase):
         )
 
         game = payload["game"]
-        self.assertIn("Recent scoreline sample: 2-2, 3-1, 1-2.", game["analysis"]["key_points"])
+        self.assertIn(
+            "Tracked scorelines used: Everton 2-2 Leeds; Everton 3-1 Newcastle; H2H: Everton vs Manchester Utd 1-2.",
+            game["analysis"]["key_points"],
+        )
         self.assertEqual(game["recent_form"]["home"]["scorelines"][0]["scoreline"], "2-2")

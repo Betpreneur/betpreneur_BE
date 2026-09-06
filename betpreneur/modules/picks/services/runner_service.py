@@ -1427,13 +1427,22 @@ class AlgoRunnerService:
     def _prediction_recent_form_payload(self, prediction, side):
         features = ((prediction.features.features or {}).get(side) or {}) if prediction.features else {}
         recent = features.get("recent_form") or {}
-        form = (recent.get("all") or {}).get("10") or (recent.get("all") or {}).get("5") or {}
+        venue_form = (recent.get(side) or {}).get("10") or (recent.get(side) or {}).get("5") or {}
+        form = venue_form or (recent.get("all") or {}).get("10") or (recent.get("all") or {}).get("5") or {}
         season = features.get("season_profile") or {}
         matches = self._prediction_number(form.get("matches"))
         if matches is None:
             matches = self._prediction_number(season.get("matches_played"))
         if matches is None:
-            return {"games": 0, "wins": 0, "draws": 0, "losses": 0, "scope": "overall", "form": ""}
+            return {
+                "games": 0,
+                "wins": 0,
+                "draws": 0,
+                "losses": 0,
+                "scope": "overall",
+                "form": "",
+                "fixtures": [],
+            }
         wins = int(self._prediction_number(form.get("wins")) or 0)
         draws = int(self._prediction_number(form.get("draws")) or 0)
         losses = int(self._prediction_number(form.get("losses")) or max(0, matches - wins - draws))
@@ -1458,7 +1467,40 @@ class AlgoRunnerService:
             "avg_conceded": avg_conceded or 0,
             "source": season.get("source") or "stored_team_intelligence",
             "data_quality": season.get("data_quality") or features.get("coverage", {}).get("status") or "",
+            "fixtures": self._prediction_recent_fixture_rows(form),
         }
+
+    def _merge_prediction_recent_form(self, source_form, computed_form):
+        if not source_form:
+            return computed_form or {}
+        merged = dict(source_form)
+        computed_form = computed_form or {}
+        if not merged.get("fixtures") and computed_form.get("fixtures"):
+            merged["fixtures"] = computed_form["fixtures"]
+        return merged
+
+    def _prediction_recent_fixture_rows(self, form):
+        stats = form.get("stats") if isinstance(form.get("stats"), dict) else {}
+        fixtures = stats.get("fixtures") if isinstance(stats.get("fixtures"), list) else []
+        rows = []
+        for fixture in fixtures[:10]:
+            if not isinstance(fixture, dict):
+                continue
+            goals_for = self._prediction_number(fixture.get("goals_for"))
+            goals_against = self._prediction_number(fixture.get("goals_against"))
+            if goals_for is None or goals_against is None:
+                continue
+            rows.append(
+                {
+                    "match_date": fixture.get("match_date") or fixture.get("date") or "",
+                    "fixture": fixture.get("fixture") or "",
+                    "opponent": fixture.get("opponent") or "",
+                    "result": fixture.get("result") or "",
+                    "goals_for": int(goals_for),
+                    "goals_against": int(goals_against),
+                }
+            )
+        return rows
 
     def _prediction_team_intelligence_payload(self, prediction, side):
         features = ((prediction.features.features or {}).get(side) or {}) if prediction.features else {}
@@ -1586,9 +1628,16 @@ class AlgoRunnerService:
             "league": ((prediction.features.features or {}).get("league") or {}) if prediction.features else {},
             "data_freshness": ((prediction.features.features or {}).get("data_freshness") or {}) if prediction.features else {},
             "provider_quality": ((prediction.features.features or {}).get("provider_quality") or {}) if prediction.features else {},
+            "scoreline_profile": ((prediction.features.features or {}).get("scoreline_profile") or {}) if prediction.features else {},
         }
-        home_recent_form = source_payload.get("home_recent_form") or self._prediction_recent_form_payload(prediction, "home")
-        away_recent_form = source_payload.get("away_recent_form") or self._prediction_recent_form_payload(prediction, "away")
+        home_recent_form = self._merge_prediction_recent_form(
+            source_payload.get("home_recent_form"),
+            self._prediction_recent_form_payload(prediction, "home"),
+        )
+        away_recent_form = self._merge_prediction_recent_form(
+            source_payload.get("away_recent_form"),
+            self._prediction_recent_form_payload(prediction, "away"),
+        )
         corner_profile = source_payload.get("corner_profile") or self._prediction_corner_profile_payload(prediction)
         insights = {
             "prediction_engine": "prediction.api.predict_fixture",

@@ -578,13 +578,13 @@ def _recent_scoreline_facts(prediction: FixturePrediction, descriptor: MarketDes
     if games < 4:
         return []
     scorelines = [
-        str(row.get("scoreline"))
+        label
         for row in (profile.get("scorelines") or [])[:5]
-        if isinstance(row, dict) and row.get("scoreline")
+        if isinstance(row, dict) and (label := _traceable_scoreline_label(row))
     ]
     facts = []
     if scorelines:
-        facts.append(f"Recent scoreline sample: {', '.join(scorelines)}.")
+        facts.append(f"Tracked scorelines used: {'; '.join(scorelines)}.")
     avg_total = _float(profile.get("avg_total_goals"))
     over_25 = _float(profile.get("over_2_5_rate"))
     over_35 = _float(profile.get("over_3_5_rate"))
@@ -599,6 +599,23 @@ def _recent_scoreline_facts(prediction: FixturePrediction, descriptor: MarketDes
         if btts is not None:
             facts.append(f"Recent scoreline BTTS rate: {btts:.1f}%.")
     return facts
+
+
+def _traceable_scoreline_label(row: dict[str, Any]) -> str:
+    scoreline = str(row.get("scoreline") or "").strip()
+    if not scoreline:
+        return ""
+    source = str(row.get("source") or "").strip()
+    fixture = str(row.get("fixture") or "").strip()
+    team = str(row.get("team_name") or "").strip()
+    opponent = str(row.get("opponent_name") or row.get("opponent") or "").strip()
+    if source == "head_to_head":
+        return f"H2H: {fixture} {scoreline}" if fixture else f"H2H {scoreline}"
+    if team and opponent:
+        return f"{team} {scoreline} {opponent}"
+    if fixture:
+        return f"{fixture} {scoreline}"
+    return scoreline
 
 
 def _result_facts(result) -> list[str]:

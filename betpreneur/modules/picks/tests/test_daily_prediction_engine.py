@@ -366,6 +366,18 @@ class DailyPredictionEngineTests(TestCase):
                                     "goals_against_per_match": 1.6,
                                     "form": ["D", "W", "L"],
                                     "scope": "all",
+                                    "stats": {
+                                        "fixtures": [
+                                            {
+                                                "match_date": "2026-09-01",
+                                                "fixture": "Alpha FC vs Beta FC",
+                                                "opponent": "Beta FC",
+                                                "result": "D",
+                                                "goals_for": 2,
+                                                "goals_against": 2,
+                                            }
+                                        ],
+                                    },
                                 }
                             }
                         },
@@ -380,6 +392,31 @@ class DailyPredictionEngineTests(TestCase):
         self.assertEqual(payload["games"], 10)
         self.assertEqual(payload["avg_scored"], 1.7)
         self.assertEqual(payload["avg_conceded"], 1.6)
+        self.assertEqual(payload["fixtures"][0]["goals_for"], 2)
+        self.assertEqual(payload["fixtures"][0]["goals_against"], 2)
+
+    def test_prediction_recent_form_enriches_source_with_computed_fixtures(self):
+        service = AlgoRunnerService()
+
+        payload = service._merge_prediction_recent_form(
+            {"games": 10, "wins": 8, "draws": 0, "losses": 2, "form": ["W"]},
+            {
+                "games": 10,
+                "fixtures": [
+                    {
+                        "match_date": "2026-09-01",
+                        "fixture": "Arsenal vs Leeds",
+                        "opponent": "Leeds",
+                        "result": "W",
+                        "goals_for": 3,
+                        "goals_against": 1,
+                    }
+                ],
+            },
+        )
+
+        self.assertEqual(payload["games"], 10)
+        self.assertEqual(payload["fixtures"][0]["goals_for"], 3)
 
     def test_daily_fixture_scoring_uses_prediction_api_and_persists_policy_context(self):
         run = AlgoRun.objects.create(target_date=date(2026, 8, 28), status=AlgoRun.Status.RUNNING)

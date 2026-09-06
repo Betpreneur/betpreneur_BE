@@ -103,9 +103,23 @@ class MarketProbabilityEngineTests(SimpleTestCase):
                             "over_3_5_rate": 60.0,
                             "btts_rate": 80.0,
                             "scorelines": [
-                                {"scoreline": "4-2"},
-                                {"scoreline": "2-2"},
-                                {"scoreline": "3-1"},
+                                {
+                                    "scoreline": "4-2",
+                                    "source": "home_recent",
+                                    "team_name": "Home FC",
+                                    "opponent_name": "Team A",
+                                },
+                                {
+                                    "scoreline": "2-2",
+                                    "source": "away_recent",
+                                    "team_name": "Away FC",
+                                    "opponent_name": "Team B",
+                                },
+                                {
+                                    "scoreline": "3-1",
+                                    "source": "head_to_head",
+                                    "fixture": "Home FC vs Away FC",
+                                },
                             ],
                         }
                     },
@@ -129,7 +143,10 @@ class MarketProbabilityEngineTests(SimpleTestCase):
             "Line 2.5 is below the model projection of 3.10 goals.",
             probability.supporting_facts,
         )
-        self.assertIn("Recent scoreline sample: 4-2, 2-2, 3-1.", probability.supporting_facts)
+        self.assertIn(
+            "Tracked scorelines used: Home FC 4-2 Team A; Away FC 2-2 Team B; H2H: Home FC vs Away FC 3-1.",
+            probability.supporting_facts,
+        )
         self.assertIn(
             "Recent scorelines average 3.80 total goals across 5 tracked matches.",
             probability.supporting_facts,
