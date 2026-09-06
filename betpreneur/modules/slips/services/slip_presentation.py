@@ -398,8 +398,23 @@ def _public_rejection_analysis(selection, risk_evidence=None):
             owned_market_only=False,
         )
     cleaned = _clean_rejection_evidence(facts, limit=5)
-    if score is not None:
+    recommendation = (selection or {}).get("recommendation") or {}
+    replacement = (selection or {}).get("ai_pick") or (recommendation.get("pick") or {})
+    has_replacement = bool(replacement.get("market")) and not market_matches(
+        market, replacement.get("market")
+    )
+    if score is not None and score < 55:
         lead = f"{market} is rejected because the model gives it only {score}% support."
+    elif has_replacement:
+        lead = (
+            f"{market} is replaced because the model found stronger match evidence for "
+            f"{replacement.get('market')}."
+        )
+    elif score is not None:
+        lead = (
+            f"{market} is not accepted as a confident pick because the supporting evidence "
+            "does not clear the review gate."
+        )
     else:
         lead = f"{market} is rejected because the available match evidence is not strong enough."
     return {

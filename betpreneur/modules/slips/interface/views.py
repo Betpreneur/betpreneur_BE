@@ -1181,7 +1181,10 @@ def _build_bettor_public_payload(review, technical_public, *, enhance=False):
         user_pick = selection.get("user_pick") or selection.get("your_pick") or {}
         recommendation = _bettor_recommendation(selection)
         positive_evidence, risk_evidence = _split_bettor_evidence(selection)
-        rejection_analysis = _public_rejection_analysis(selection, risk_evidence)
+        rejection_analysis = _public_rejection_analysis(
+            selection,
+            [*risk_evidence, *positive_evidence],
+        )
         match = selection.get("match") or ""
         selected_pick = recommendation.get("pick")
         changed = recommendation.get("action") == "replace"

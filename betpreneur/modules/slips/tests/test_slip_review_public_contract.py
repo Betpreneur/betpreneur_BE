@@ -983,6 +983,29 @@ class SlipReviewPublicContractTests(SimpleTestCase):
         self.assertIn("Home recent scorelines", joined)
         self.assertIn("Away recent scorelines", joined)
 
+    def test_bettor_public_does_not_call_strong_support_only_when_replaced(self):
+        result = _sample_replace_result()
+        result["selected_market"]["advisory_score"] = 71
+        result["selected_market"]["confidence"] = 71
+        result["selected_market"]["final_confidence"] = 71
+        result["selected_market"]["explanation_facts"] = [
+            "Projected total goals: 2.98.",
+            "Home recent scorelines: Heerenveen 2-1 Utrecht; Heerenveen 1-1 Sparta.",
+            "Away recent scorelines: AZ Alkmaar 3-1 Zwolle; AZ Alkmaar 2-0 Groningen.",
+        ]
+        review = SimpleNamespace(id=39, source="sportybet", status="partial")
+
+        payload = _build_bettor_public_payload(
+            review,
+            _manual_review_summary([result])["public"],
+            enhance=False,
+        )
+
+        analysis = payload["games"][0]["analysis"]
+        self.assertIn("is replaced because the model found stronger match evidence", analysis["rejection_reason"])
+        self.assertNotIn("only 71% support", " ".join(analysis["why_rejected"]))
+        self.assertIn("Home recent scorelines", " ".join(analysis["why_rejected"]))
+
     def test_public_confidence_label_matches_pick_band(self):
         self.assertEqual(_public_confidence_label(64), "Moderate")
         self.assertEqual(_public_confidence_label(65), "Moderate")
@@ -1613,6 +1636,7 @@ class SlipReviewPayloadDbTests(TestCase):
         self.assertEqual(payload["game"]["user_pick"]["market"], "Away Win")
         self.assertIn("analysis", payload["game"])
         self.assertIn("positive_evidence", payload["game"]["analysis"])
+        self.assertIn("why_rejected", payload["game"]["analysis"])
         self.assertIn("recommendation", payload["game"])
         self.assertEqual(payload["recommended_pick"]["match"], "Norway vs England")
 
