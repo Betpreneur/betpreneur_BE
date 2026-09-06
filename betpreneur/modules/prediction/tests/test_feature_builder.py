@@ -98,6 +98,9 @@ class FixtureFeatureBuilderTests(TestCase):
             {"match_id": "r4", "match_date": "2026-08-09", "fixture": "Team D vs Arsenal", "opponent": "Team D", "result": "L", "goals_for": 1, "goals_against": 2},
             {"match_id": "r5", "match_date": "2026-08-04", "fixture": "Arsenal vs Team E", "opponent": "Team E", "result": "W", "goals_for": 2, "goals_against": 1},
         ]
+        home_fixture_rows = [
+            {"match_id": "h1", "match_date": "2026-08-18", "fixture": "Arsenal vs Home Team", "opponent": "Home Team", "result": "W", "goals_for": 1, "goals_against": 0},
+        ]
         for team, scope in ((self.home, "all"), (self.home, "home"), (self.away, "all"), (self.away, "away")):
             TeamRecentFormProfile.objects.create(
                 team=team,
@@ -114,7 +117,7 @@ class FixtureFeatureBuilderTests(TestCase):
                 goals_against=5,
                 corners_for=32,
                 shots_on_target_for=21,
-                stats={"fixtures": recent_fixture_rows},
+                stats={"fixtures": home_fixture_rows if scope == "home" else recent_fixture_rows},
             )
         TeamMarketProfile.objects.create(
             team=self.home,

@@ -1427,8 +1427,9 @@ class AlgoRunnerService:
     def _prediction_recent_form_payload(self, prediction, side):
         features = ((prediction.features.features or {}).get(side) or {}) if prediction.features else {}
         recent = features.get("recent_form") or {}
+        overall_form = (recent.get("all") or {}).get("10") or (recent.get("all") or {}).get("5") or {}
         venue_form = (recent.get(side) or {}).get("10") or (recent.get(side) or {}).get("5") or {}
-        form = venue_form or (recent.get("all") or {}).get("10") or (recent.get("all") or {}).get("5") or {}
+        form = overall_form or venue_form or {}
         season = features.get("season_profile") or {}
         matches = self._prediction_number(form.get("matches"))
         if matches is None:

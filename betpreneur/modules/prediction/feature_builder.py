@@ -323,13 +323,13 @@ def _scoreline_profile_payload(*, home: dict[str, Any], away: dict[str, Any], sn
     away_team = getattr(away.get("strength_snapshot"), "team_name", "") if away.get("strength_snapshot") else ""
     home_rows = _recent_fixture_rows(
         home.get("recent_form") or {},
-        preferred_scope="home",
+        preferred_scope="all",
         source="home_recent",
         team_name=home_team,
     )
     away_rows = _recent_fixture_rows(
         away.get("recent_form") or {},
-        preferred_scope="away",
+        preferred_scope="all",
         source="away_recent",
         team_name=away_team,
     )

@@ -379,6 +379,30 @@ class DailyPredictionEngineTests(TestCase):
                                         ],
                                     },
                                 }
+                            },
+                            "home": {
+                                "10": {
+                                    "matches": 10,
+                                    "wins": 8,
+                                    "draws": 0,
+                                    "losses": 2,
+                                    "goals_for_per_match": 2.0,
+                                    "goals_against_per_match": 0.8,
+                                    "form": ["W"],
+                                    "scope": "home",
+                                    "stats": {
+                                        "fixtures": [
+                                            {
+                                                "match_date": "2026-08-30",
+                                                "fixture": "Alpha FC vs Venue Only",
+                                                "opponent": "Venue Only",
+                                                "result": "W",
+                                                "goals_for": 5,
+                                                "goals_against": 0,
+                                            }
+                                        ],
+                                    },
+                                }
                             }
                         },
                         "season_profile": {"source": "statpal", "data_quality": "limited"},
