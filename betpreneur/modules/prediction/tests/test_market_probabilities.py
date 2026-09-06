@@ -96,6 +96,53 @@ class MarketProbabilityEngineTests(SimpleTestCase):
                         "avg_cards_per_match": 4.8,
                     },
                     "scoreline_profile": {
+                        "home_recent": {
+                            "scorelines": [
+                                {
+                                    "scoreline": "4-2",
+                                    "source": "home_recent",
+                                    "team_name": "Home FC",
+                                    "opponent_name": "Team A",
+                                },
+                                {
+                                    "scoreline": "2-1",
+                                    "source": "home_recent",
+                                    "team_name": "Home FC",
+                                    "opponent_name": "Team C",
+                                },
+                                {
+                                    "scoreline": "1-1",
+                                    "source": "home_recent",
+                                    "team_name": "Home FC",
+                                    "opponent_name": "Team D",
+                                },
+                            ],
+                        },
+                        "away_recent": {
+                            "scorelines": [
+                                {
+                                    "scoreline": "2-2",
+                                    "source": "away_recent",
+                                    "team_name": "Away FC",
+                                    "opponent_name": "Team B",
+                                },
+                                {
+                                    "scoreline": "3-0",
+                                    "source": "away_recent",
+                                    "team_name": "Away FC",
+                                    "opponent_name": "Team E",
+                                },
+                            ],
+                        },
+                        "head_to_head": {
+                            "scorelines": [
+                                {
+                                    "scoreline": "3-1",
+                                    "source": "head_to_head",
+                                    "fixture": "Home FC vs Away FC",
+                                },
+                            ],
+                        },
                         "combined": {
                             "games": 5,
                             "avg_total_goals": 3.8,
@@ -144,7 +191,15 @@ class MarketProbabilityEngineTests(SimpleTestCase):
             probability.supporting_facts,
         )
         self.assertIn(
-            "Tracked scorelines used: Home FC 4-2 Team A; Away FC 2-2 Team B; H2H: Home FC vs Away FC 3-1.",
+            "Home recent scorelines: Home FC 4-2 Team A; Home FC 2-1 Team C; Home FC 1-1 Team D.",
+            probability.supporting_facts,
+        )
+        self.assertIn(
+            "Away recent scorelines: Away FC 2-2 Team B; Away FC 3-0 Team E.",
+            probability.supporting_facts,
+        )
+        self.assertIn(
+            "Head-to-head scorelines: H2H: Home FC vs Away FC 3-1.",
             probability.supporting_facts,
         )
         self.assertIn(

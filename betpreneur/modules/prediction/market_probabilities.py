@@ -573,18 +573,13 @@ def _goal_facts(
 def _recent_scoreline_facts(prediction: FixturePrediction, descriptor: MarketDescriptor) -> list[str]:
     feature_set = getattr(prediction, "features", None)
     feature_payload = getattr(feature_set, "features", None) or {}
-    profile = (feature_payload.get("scoreline_profile") or {}).get("combined") or {}
+    scoreline_profile = feature_payload.get("scoreline_profile") or {}
+    profile = scoreline_profile.get("combined") or {}
     games = int(_float(profile.get("games")) or 0)
     if games < 4:
         return []
-    scorelines = [
-        label
-        for row in (profile.get("scorelines") or [])[:5]
-        if isinstance(row, dict) and (label := _traceable_scoreline_label(row))
-    ]
     facts = []
-    if scorelines:
-        facts.append(f"Tracked scorelines used: {'; '.join(scorelines)}.")
+    facts.extend(_scoreline_evidence_bullets(scoreline_profile))
     avg_total = _float(profile.get("avg_total_goals"))
     over_25 = _float(profile.get("over_2_5_rate"))
     over_35 = _float(profile.get("over_3_5_rate"))
@@ -599,6 +594,71 @@ def _recent_scoreline_facts(prediction: FixturePrediction, descriptor: MarketDes
         if btts is not None:
             facts.append(f"Recent scoreline BTTS rate: {btts:.1f}%.")
     return facts
+
+
+def _scoreline_evidence_bullets(scoreline_profile: dict[str, Any]) -> list[str]:
+    buckets = (
+        ("home_recent", "Home recent scorelines", 3),
+        ("away_recent", "Away recent scorelines", 3),
+        ("head_to_head", "Head-to-head scorelines", 2),
+    )
+    bullets = []
+    for bucket, label, limit in buckets:
+        values = _scoreline_labels_for_bucket(scoreline_profile, bucket, limit=limit)
+        if values:
+            bullets.append(f"{label}: {'; '.join(values)}.")
+    if bullets:
+        return bullets
+    values = _balanced_scoreline_labels(scoreline_profile)
+    return [f"Tracked scorelines used: {'; '.join(values)}."] if values else []
+
+
+def _scoreline_labels_for_bucket(scoreline_profile: dict[str, Any], bucket: str, *, limit: int) -> list[str]:
+    profile = scoreline_profile.get(bucket) if isinstance(scoreline_profile.get(bucket), dict) else {}
+    labels = []
+    seen = set()
+    for row in (profile.get("scorelines") or [])[:limit]:
+        if not isinstance(row, dict):
+            continue
+        label = _traceable_scoreline_label(row)
+        if not label or label in seen:
+            continue
+        seen.add(label)
+        labels.append(label)
+    return labels
+
+
+def _balanced_scoreline_labels(scoreline_profile: dict[str, Any], limit: int = 6) -> list[str]:
+    buckets = (
+        ("home_recent", 3),
+        ("away_recent", 3),
+        ("head_to_head", 2),
+    )
+    labels: list[str] = []
+    seen = set()
+    for bucket, bucket_limit in buckets:
+        profile = scoreline_profile.get(bucket) if isinstance(scoreline_profile.get(bucket), dict) else {}
+        for row in (profile.get("scorelines") or [])[:bucket_limit]:
+            if not isinstance(row, dict):
+                continue
+            label = _traceable_scoreline_label(row)
+            if not label or label in seen:
+                continue
+            seen.add(label)
+            labels.append(label)
+            if len(labels) >= limit:
+                return labels
+    if labels:
+        return labels
+    combined = scoreline_profile.get("combined") if isinstance(scoreline_profile.get("combined"), dict) else {}
+    for row in (combined.get("scorelines") or [])[:limit]:
+        if not isinstance(row, dict):
+            continue
+        label = _traceable_scoreline_label(row)
+        if label and label not in seen:
+            seen.add(label)
+            labels.append(label)
+    return labels
 
 
 def _traceable_scoreline_label(row: dict[str, Any]) -> str:
