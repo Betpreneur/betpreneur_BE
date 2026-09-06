@@ -112,6 +112,50 @@ class PoissonGoalModelTests(SimpleTestCase):
         self.assertGreater(high.over_2_5_probability, low.over_2_5_probability)
         self.assertGreater(high.btts_probability, low.btts_probability)
 
+    def test_recent_scoreline_profile_adjusts_goal_expectation(self):
+        base = goal_distribution(self._features(home_attack=1.0, home_defence=1.0, away_attack=1.0, away_defence=1.0))
+        features = self._features(home_attack=1.0, home_defence=1.0, away_attack=1.0, away_defence=1.0)
+        payload = dict(features.features)
+        payload["scoreline_profile"] = {
+            "combined": {
+                "games": 8,
+                "avg_total_goals": 4.4,
+                "over_2_5_rate": 87.5,
+                "over_3_5_rate": 62.5,
+                "over_4_5_rate": 37.5,
+                "btts_rate": 75.0,
+                "low_total_rate": 12.5,
+                "volatility": "high",
+                "scorelines": [
+                    {"scoreline": "4-2"},
+                    {"scoreline": "3-2"},
+                    {"scoreline": "2-2"},
+                    {"scoreline": "3-1"},
+                ],
+            }
+        }
+        features = FixtureFeatureSet(
+            fixture_id=features.fixture_id,
+            fixture_name=features.fixture_name,
+            league_key=features.league_key,
+            season=features.season,
+            home_team=features.home_team,
+            away_team=features.away_team,
+            features=payload,
+            diagnostics=features.diagnostics,
+        )
+
+        output = goal_distribution(features)
+
+        self.assertGreater(output.home_expected_goals + output.away_expected_goals, base.home_expected_goals + base.away_expected_goals)
+        self.assertGreater(output.over_2_5_probability, base.over_2_5_probability)
+        self.assertIn("recent_scorelines_support_over25", output.diagnostics.warnings)
+        self.assertIn("recent_scorelines_high_goal_volatility", output.diagnostics.warnings)
+        self.assertEqual(
+            output.diagnostics.metadata["inputs"]["scoreline_profile"]["recent_scorelines"][:2],
+            ["4-2", "3-2"],
+        )
+
     def test_contract_rejects_invalid_goal_probability_fields(self):
         with self.assertRaises(ValueError):
             goal_distribution(self._features()).__class__(

@@ -94,7 +94,21 @@ class MarketProbabilityEngineTests(SimpleTestCase):
                         "name": "Michael Salisbury",
                         "sample_matches": 12,
                         "avg_cards_per_match": 4.8,
-                    }
+                    },
+                    "scoreline_profile": {
+                        "combined": {
+                            "games": 5,
+                            "avg_total_goals": 3.8,
+                            "over_2_5_rate": 80.0,
+                            "over_3_5_rate": 60.0,
+                            "btts_rate": 80.0,
+                            "scorelines": [
+                                {"scoreline": "4-2"},
+                                {"scoreline": "2-2"},
+                                {"scoreline": "3-1"},
+                            ],
+                        }
+                    },
                 },
             ),
             goals=goals,
@@ -115,6 +129,12 @@ class MarketProbabilityEngineTests(SimpleTestCase):
             "Line 2.5 is below the model projection of 3.10 goals.",
             probability.supporting_facts,
         )
+        self.assertIn("Recent scoreline sample: 4-2, 2-2, 3-1.", probability.supporting_facts)
+        self.assertIn(
+            "Recent scorelines average 3.80 total goals across 5 tracked matches.",
+            probability.supporting_facts,
+        )
+        self.assertIn("Recent scoreline Over 2.5 rate: 80.0%.", probability.supporting_facts)
 
     def test_result_market_uses_elo(self):
         probability = evaluate_market_probability(self._prediction(), "Home Win")

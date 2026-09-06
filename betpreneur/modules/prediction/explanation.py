@@ -252,6 +252,12 @@ def classify(text: str, *, source: str = "", kind: FactKind | None = None) -> Fa
 
 _WARNING_REASONS = {
     "scoreline_matrix_missing": "No scoreline distribution was available for this fixture.",
+    "limited_scoreline_profile": "The recent scoreline sample is still limited.",
+    "recent_scorelines_support_over25": "Recent scorelines show repeated 3+ goal matches.",
+    "recent_scorelines_high_goal_volatility": "Recent scorelines show high goal volatility.",
+    "recent_scorelines_blowout_risk": "Recent scorelines include enough 5+ goal matches to treat high unders carefully.",
+    "recent_scorelines_low_total_cluster": "Recent scorelines lean toward low total goals.",
+    "recent_scorelines_btts_pressure": "Recent scorelines show both teams scoring often.",
     "count_model_unavailable": "No count model was available for this market.",
     "elo_unavailable": "No team ratings were available for this fixture.",
 }

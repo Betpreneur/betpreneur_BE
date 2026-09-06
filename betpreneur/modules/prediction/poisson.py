@@ -86,6 +86,12 @@ def _expected_goals(features: FixtureFeatureSet) -> tuple[float, float, tuple[st
     away_expected = _recent_goal_adjustment(payload.get("away") or {}, away_expected, side="away")
     home_expected = _feedback_goal_adjustment(payload, "home", home_expected)
     away_expected = _feedback_goal_adjustment(payload, "away", away_expected)
+    home_expected, away_expected, scoreline_warnings = _scoreline_profile_adjustment(
+        payload,
+        home_expected,
+        away_expected,
+    )
+    warnings.extend(scoreline_warnings)
     return round(_clamp(home_expected, 0.15, 5.0), 4), round(_clamp(away_expected, 0.15, 5.0), 4), tuple(warnings)
 
 
@@ -122,6 +128,44 @@ def _feedback_goal_adjustment(payload: dict[str, Any], side: str, expected_goals
         return expected_goals
     weight = min(0.12, matches / 80.0)
     return (expected_goals * (1.0 - weight)) + (_clamp(feedback_goals, 0.1, 4.5) * weight)
+
+
+def _scoreline_profile_adjustment(
+    payload: dict[str, Any],
+    home_expected: float,
+    away_expected: float,
+) -> tuple[float, float, tuple[str, ...]]:
+    profile = ((payload.get("scoreline_profile") or {}).get("combined") or {})
+    games = _float(profile.get("games")) or 0.0
+    if games < 4:
+        return home_expected, away_expected, ("limited_scoreline_profile",) if games else ()
+
+    warnings: list[str] = []
+    avg_total = _float(profile.get("avg_total_goals"))
+    expected_total = home_expected + away_expected
+    if avg_total is not None and expected_total > 0:
+        weight = min(0.18, max(0.06, games / 90.0))
+        adjusted_total = (expected_total * (1.0 - weight)) + (_clamp(avg_total, 0.5, 5.5) * weight)
+        scale = _clamp(adjusted_total / expected_total, 0.88, 1.14)
+        home_expected *= scale
+        away_expected *= scale
+
+    over_25 = _float(profile.get("over_2_5_rate")) or 0.0
+    over_35 = _float(profile.get("over_3_5_rate")) or 0.0
+    over_45 = _float(profile.get("over_4_5_rate")) or 0.0
+    low_total = _float(profile.get("low_total_rate")) or 0.0
+    btts = _float(profile.get("btts_rate")) or 0.0
+    if over_25 >= 65:
+        warnings.append("recent_scorelines_support_over25")
+    if over_35 >= 45:
+        warnings.append("recent_scorelines_high_goal_volatility")
+    if over_45 >= 25:
+        warnings.append("recent_scorelines_blowout_risk")
+    if low_total >= 70:
+        warnings.append("recent_scorelines_low_total_cluster")
+    if btts >= 65:
+        warnings.append("recent_scorelines_btts_pressure")
+    return home_expected, away_expected, tuple(warnings)
 
 
 def _scoreline_payload(matrix) -> dict[str, float]:
@@ -178,6 +222,26 @@ def _input_summary(features: FixtureFeatureSet, payload: dict[str, Any]) -> dict
         "league_away_goal_baseline": scoring_environment.get("away_goal_baseline"),
         "score_model_quality": goal_model.get("data_quality"),
         "prediction_feedback": payload.get("prediction_feedback"),
+        "scoreline_profile": _scoreline_profile_input_summary(payload.get("scoreline_profile") or {}),
+    }
+
+
+def _scoreline_profile_input_summary(scoreline_profile: dict[str, Any]) -> dict[str, Any]:
+    combined = scoreline_profile.get("combined") or {}
+    return {
+        "games": combined.get("games"),
+        "avg_total_goals": combined.get("avg_total_goals"),
+        "over_2_5_rate": combined.get("over_2_5_rate"),
+        "over_3_5_rate": combined.get("over_3_5_rate"),
+        "over_4_5_rate": combined.get("over_4_5_rate"),
+        "btts_rate": combined.get("btts_rate"),
+        "low_total_rate": combined.get("low_total_rate"),
+        "volatility": combined.get("volatility"),
+        "recent_scorelines": [
+            row.get("scoreline")
+            for row in (combined.get("scorelines") or [])[:8]
+            if isinstance(row, dict) and row.get("scoreline")
+        ],
     }
 
 

@@ -94,6 +94,11 @@ def build_fixture_features(fixture=None, *, fixture_id: str = "") -> FixtureFeat
     snapshots = _snapshot_payloads(fixture_obj=fixture_obj, fixture_id=resolved_id)
     referee = _referee_context(fixture_payload, snapshots)
     league_features = _league_features(intelligence, goal_model=goal_model)
+    scoreline_profile = _scoreline_profile_payload(
+        home=home_features,
+        away=away_features,
+        snapshots=snapshots,
+    )
     freshness = _freshness_payload(
         intelligence=intelligence,
         goal_model=goal_model,
@@ -134,6 +139,7 @@ def build_fixture_features(fixture=None, *, fixture_id: str = "") -> FixtureFeat
             "data_freshness": freshness,
             "provider_quality": _provider_quality(intelligence, freshness),
             "referee": referee,
+            "scoreline_profile": scoreline_profile,
             "prediction_feedback": _prediction_feedback_payload(
                 home_team=str(fixture_payload.get("home_team") or ""),
                 away_team=str(fixture_payload.get("away_team") or ""),
@@ -310,6 +316,143 @@ def _average(values) -> float | None:
     if not items:
         return None
     return round(sum(items) / len(items), 3)
+
+
+def _scoreline_profile_payload(*, home: dict[str, Any], away: dict[str, Any], snapshots: dict[str, Any]) -> dict[str, Any]:
+    home_rows = _recent_fixture_rows(home.get("recent_form") or {}, preferred_scope="home")
+    away_rows = _recent_fixture_rows(away.get("recent_form") or {}, preferred_scope="away")
+    h2h_rows = _h2h_fixture_rows(snapshots)
+    combined_rows = [*home_rows, *away_rows, *h2h_rows]
+    return {
+        "home_recent": _scoreline_profile(home_rows),
+        "away_recent": _scoreline_profile(away_rows),
+        "head_to_head": _scoreline_profile(h2h_rows),
+        "combined": _scoreline_profile(combined_rows),
+    }
+
+
+def _recent_fixture_rows(recent_form: dict[str, Any], *, preferred_scope: str) -> list[dict[str, Any]]:
+    form = (
+        (recent_form.get(preferred_scope) or {}).get("10")
+        or (recent_form.get("all") or {}).get("10")
+        or (recent_form.get(preferred_scope) or {}).get("5")
+        or (recent_form.get("all") or {}).get("5")
+        or {}
+    )
+    stats = form.get("stats") if isinstance(form.get("stats"), dict) else {}
+    rows = stats.get("fixtures") if isinstance(stats.get("fixtures"), list) else []
+    return [_scoreline_row(row) for row in rows if _scoreline_row(row)]
+
+
+def _h2h_fixture_rows(snapshots: dict[str, Any]) -> list[dict[str, Any]]:
+    by_type = (snapshots or {}).get("by_type") or {}
+    h2h = by_type.get(StatPalFixtureSnapshot.SnapshotType.HEAD_TO_HEAD) or {}
+    payload = h2h.get("payload") if isinstance(h2h.get("payload"), dict) else {}
+    recent = payload.get("recent_meetings") if isinstance(payload.get("recent_meetings"), list) else []
+    rows = []
+    for row in recent[:10]:
+        if not isinstance(row, dict):
+            continue
+        goals_for = _int_or_none(row.get("team1_score"))
+        goals_against = _int_or_none(row.get("team2_score"))
+        if goals_for is None or goals_against is None:
+            continue
+        rows.append({
+            "match_id": row.get("match_id") or row.get("provider_match_id") or "",
+            "match_date": _iso(row.get("date")),
+            "fixture": f"{row.get('team1_name') or ''} vs {row.get('team2_name') or ''}".strip(),
+            "opponent": row.get("team2_name") or "",
+            "result": "W" if goals_for > goals_against else "D" if goals_for == goals_against else "L",
+            "goals_for": goals_for,
+            "goals_against": goals_against,
+        })
+    return rows
+
+
+def _scoreline_row(row: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(row, dict):
+        return {}
+    goals_for = _int_or_none(row.get("goals_for"))
+    goals_against = _int_or_none(row.get("goals_against"))
+    if goals_for is None or goals_against is None:
+        return {}
+    return {
+        "match_id": row.get("match_id") or "",
+        "match_date": row.get("match_date") or "",
+        "fixture": row.get("fixture") or "",
+        "opponent": row.get("opponent") or "",
+        "result": row.get("result") or ("W" if goals_for > goals_against else "D" if goals_for == goals_against else "L"),
+        "goals_for": goals_for,
+        "goals_against": goals_against,
+        "scoreline": f"{goals_for}-{goals_against}",
+        "total_goals": goals_for + goals_against,
+    }
+
+
+def _scoreline_profile(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    clean_rows = [row for row in rows if isinstance(row, dict)]
+    games = len(clean_rows)
+    if not games:
+        return {
+            "games": 0,
+            "scorelines": [],
+            "avg_total_goals": None,
+            "volatility": "unknown",
+        }
+    totals = [int(row.get("total_goals") or 0) for row in clean_rows]
+    over_15 = _rate(sum(1 for total in totals if total > 1.5), games)
+    over_25 = _rate(sum(1 for total in totals if total > 2.5), games)
+    over_35 = _rate(sum(1 for total in totals if total > 3.5), games)
+    over_45 = _rate(sum(1 for total in totals if total > 4.5), games)
+    low_total = _rate(sum(1 for total in totals if total <= 2), games)
+    volatility = "high" if over_35 >= 45 or over_25 >= 70 else "low" if low_total >= 70 else "medium"
+    return {
+        "games": games,
+        "scorelines": [
+            {
+                "match_id": row.get("match_id") or "",
+                "match_date": row.get("match_date") or "",
+                "fixture": row.get("fixture") or "",
+                "opponent": row.get("opponent") or "",
+                "result": row.get("result") or "",
+                "goals_for": row.get("goals_for"),
+                "goals_against": row.get("goals_against"),
+                "scoreline": row.get("scoreline") or f"{row.get('goals_for')}-{row.get('goals_against')}",
+                "total_goals": row.get("total_goals"),
+            }
+            for row in clean_rows[:10]
+        ],
+        "avg_total_goals": round(sum(totals) / games, 2),
+        "over_1_5_rate": over_15,
+        "over_2_5_rate": over_25,
+        "over_3_5_rate": over_35,
+        "over_4_5_rate": over_45,
+        "btts_rate": _rate(
+            sum(1 for row in clean_rows if int(row.get("goals_for") or 0) > 0 and int(row.get("goals_against") or 0) > 0),
+            games,
+        ),
+        "clean_sheet_rate": _rate(sum(1 for row in clean_rows if int(row.get("goals_against") or 0) == 0), games),
+        "failed_to_score_rate": _rate(sum(1 for row in clean_rows if int(row.get("goals_for") or 0) == 0), games),
+        "scored_2_plus_rate": _rate(sum(1 for row in clean_rows if int(row.get("goals_for") or 0) >= 2), games),
+        "conceded_2_plus_rate": _rate(sum(1 for row in clean_rows if int(row.get("goals_against") or 0) >= 2), games),
+        "low_total_rate": low_total,
+        "volatility": volatility,
+    }
+
+
+def _rate(count: int, games: int) -> float | None:
+    if not games:
+        return None
+    return round((count / games) * 100, 1)
+
+
+def _int_or_none(value) -> int | None:
+    if value in (None, ""):
+        return None
+    try:
+        return int(float(value))
+    except (TypeError, ValueError):
+        return None
 
 
 def _fixture_name(fixture: dict[str, Any]) -> str:
@@ -663,6 +806,10 @@ def _snapshot_payloads(*, fixture_obj: FixtureCache | None, fixture_id: str) -> 
             "fetched_at": _iso(snapshot.fetched_at),
             "expires_at": _iso(snapshot.expires_at),
         }
+        if snapshot.snapshot_type == StatPalFixtureSnapshot.SnapshotType.HEAD_TO_HEAD:
+            by_type[snapshot.snapshot_type]["payload"] = {
+                "recent_meetings": (snapshot.payload or {}).get("recent_meetings") or [],
+            }
     return {
         "odds": {
             "prematch": by_type.get(StatPalFixtureSnapshot.SnapshotType.PREMATCH_ODDS, {"available": False}),

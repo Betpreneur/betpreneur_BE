@@ -564,8 +564,40 @@ def _goal_facts(
             )
         else:
             facts.append(f"Line {line:g} is {direction} the model projection of {line_expected:.2f} goals.")
+    facts.extend(_recent_scoreline_facts(prediction, descriptor))
     facts.extend(_team_market_profile_facts(prediction, descriptor))
     facts.extend(_league_market_profile_facts(prediction, descriptor))
+    return facts
+
+
+def _recent_scoreline_facts(prediction: FixturePrediction, descriptor: MarketDescriptor) -> list[str]:
+    feature_set = getattr(prediction, "features", None)
+    feature_payload = getattr(feature_set, "features", None) or {}
+    profile = (feature_payload.get("scoreline_profile") or {}).get("combined") or {}
+    games = int(_float(profile.get("games")) or 0)
+    if games < 4:
+        return []
+    scorelines = [
+        str(row.get("scoreline"))
+        for row in (profile.get("scorelines") or [])[:5]
+        if isinstance(row, dict) and row.get("scoreline")
+    ]
+    facts = []
+    if scorelines:
+        facts.append(f"Recent scoreline sample: {', '.join(scorelines)}.")
+    avg_total = _float(profile.get("avg_total_goals"))
+    over_25 = _float(profile.get("over_2_5_rate"))
+    over_35 = _float(profile.get("over_3_5_rate"))
+    btts = _float(profile.get("btts_rate"))
+    if avg_total is not None:
+        facts.append(f"Recent scorelines average {avg_total:.2f} total goals across {games} tracked matches.")
+    if descriptor.family in {"total_goals", "btts"}:
+        if over_25 is not None:
+            facts.append(f"Recent scoreline Over 2.5 rate: {over_25:.1f}%.")
+        if over_35 is not None:
+            facts.append(f"Recent scoreline Over 3.5 rate: {over_35:.1f}%.")
+        if btts is not None:
+            facts.append(f"Recent scoreline BTTS rate: {btts:.1f}%.")
     return facts
 
 

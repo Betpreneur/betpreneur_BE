@@ -91,6 +91,13 @@ class FixtureFeatureBuilderTests(TestCase):
             data_quality="medium",
             source="statpal",
         )
+        recent_fixture_rows = [
+            {"match_id": "r1", "match_date": "2026-08-20", "fixture": "Arsenal vs Team A", "opponent": "Team A", "result": "W", "goals_for": 4, "goals_against": 2},
+            {"match_id": "r2", "match_date": "2026-08-17", "fixture": "Team B vs Arsenal", "opponent": "Team B", "result": "D", "goals_for": 2, "goals_against": 2},
+            {"match_id": "r3", "match_date": "2026-08-13", "fixture": "Arsenal vs Team C", "opponent": "Team C", "result": "W", "goals_for": 3, "goals_against": 1},
+            {"match_id": "r4", "match_date": "2026-08-09", "fixture": "Team D vs Arsenal", "opponent": "Team D", "result": "L", "goals_for": 1, "goals_against": 2},
+            {"match_id": "r5", "match_date": "2026-08-04", "fixture": "Arsenal vs Team E", "opponent": "Team E", "result": "W", "goals_for": 2, "goals_against": 1},
+        ]
         for team, scope in ((self.home, "all"), (self.home, "home"), (self.away, "all"), (self.away, "away")):
             TeamRecentFormProfile.objects.create(
                 team=team,
@@ -107,6 +114,7 @@ class FixtureFeatureBuilderTests(TestCase):
                 goals_against=5,
                 corners_for=32,
                 shots_on_target_for=21,
+                stats={"fixtures": recent_fixture_rows},
             )
         TeamMarketProfile.objects.create(
             team=self.home,
@@ -183,6 +191,29 @@ class FixtureFeatureBuilderTests(TestCase):
             summary={"markets": 14},
             fetched_at=timezone.now(),
         )
+        StatPalFixtureSnapshot.objects.create(
+            fixture=self.fixture,
+            match_id="fixture-123",
+            provider_match_id="fixture-123",
+            provider_competition_id="3037",
+            snapshot_type=StatPalFixtureSnapshot.SnapshotType.HEAD_TO_HEAD,
+            status="available",
+            source_endpoint="SOCCER_HEAD_TO_HEAD",
+            payload={
+                "recent_meetings": [
+                    {
+                        "match_id": "h2h-1",
+                        "date": "2026-04-01",
+                        "team1_name": "Arsenal",
+                        "team2_name": "Chelsea",
+                        "team1_score": 3,
+                        "team2_score": 2,
+                    }
+                ],
+            },
+            summary={"recent_meetings_count": 1},
+            fetched_at=timezone.now(),
+        )
         for index, cards in enumerate((5, 4, 6), start=1):
             StatPalFixtureSnapshot.objects.create(
                 match_id=f"historic-{index}",
@@ -225,6 +256,9 @@ class FixtureFeatureBuilderTests(TestCase):
         self.assertEqual(features["referee"]["avg_cards_per_match"], 5.0)
         self.assertIn("total_goals", features["market_family_history"]["home"])
         self.assertIn("corners_total", features["market_family_history"]["league"])
+        self.assertEqual(features["scoreline_profile"]["home_recent"]["scorelines"][0]["scoreline"], "4-2")
+        self.assertEqual(features["scoreline_profile"]["head_to_head"]["scorelines"][0]["scoreline"], "3-2")
+        self.assertGreaterEqual(features["scoreline_profile"]["combined"]["over_2_5_rate"], 80)
 
     def test_build_fixture_features_supports_dict_input(self):
         feature_set = build_fixture_features(
