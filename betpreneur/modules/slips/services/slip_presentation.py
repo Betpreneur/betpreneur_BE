@@ -289,6 +289,10 @@ def _stats_backed_evidence(
         text = _clean_public_slip_evidence_text(item)
         if text:
             evidence.append(text)
+    for item in (selection or {}).get("explanation_facts") or []:
+        text = _clean_public_slip_evidence_text(item)
+        if text:
+            evidence.append(text)
 
     context_line = _public_market_context_line(selection, market_payload)
     if include_context and context_line and len(evidence) < 2:
@@ -348,6 +352,60 @@ def _stats_backed_evidence(
         evidence.append(period_line)
 
     return list(dict.fromkeys(evidence))[:5]
+
+
+def _clean_rejection_evidence(items, *, limit=5):
+    cleaned = []
+    for item in items or []:
+        text = _clean_public_slip_evidence_text(item)
+        lowered = text.lower()
+        if not text:
+            continue
+        if (
+            "statpal reference" in lowered
+            or "your price is" in lowered
+            or "reference price" in lowered
+        ):
+            continue
+        cleaned.append(text[:240])
+    return list(dict.fromkeys(cleaned))[:limit]
+
+
+def _public_rejection_analysis(selection, risk_evidence=None):
+    verdict = (selection or {}).get("verdict") or {}
+    verdict_code = verdict.get("code") if isinstance(verdict, dict) else verdict
+    simple_verdict = _simple_pick_verdict(selection)
+    if str(verdict_code or "").lower() not in {"replace", "remove"} and simple_verdict != "risky":
+        return {}
+
+    public_user_pick = (selection or {}).get("user_pick") or {}
+    technical_user_pick = (selection or {}).get("your_pick") or {}
+    user_pick = {**technical_user_pick, **public_user_pick}
+    market = user_pick.get("market") or "This pick"
+    score = _public_score(
+        user_pick.get("confidence_score")
+        if user_pick.get("confidence_score") is not None
+        else user_pick.get("score")
+        if user_pick.get("score") is not None
+        else user_pick.get("decision_score")
+    )
+    facts = list(risk_evidence or [])
+    if not facts:
+        facts = _stats_backed_evidence(
+            selection,
+            market_payload=user_pick,
+            include_context=True,
+            owned_market_only=False,
+        )
+    cleaned = _clean_rejection_evidence(facts, limit=5)
+    if score is not None:
+        lead = f"{market} is rejected because the model gives it only {score}% support."
+    else:
+        lead = f"{market} is rejected because the available match evidence is not strong enough."
+    return {
+        "rejection_reason": lead,
+        "why_rejected": list(dict.fromkeys([lead, *cleaned]))[:5],
+    }
 
 
 def _split_bettor_evidence(selection):

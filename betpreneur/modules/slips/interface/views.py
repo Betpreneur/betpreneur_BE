@@ -183,6 +183,7 @@ from betpreneur.modules.slips.services.importers import (
 )
 from betpreneur.modules.slips.services.slip_presentation import (
     _bettor_recommendation,
+    _public_rejection_analysis,
     _replacement_market_for_slip,
     _slip_review_market_cache_payload,
     _split_bettor_evidence,
@@ -1072,6 +1073,9 @@ def _public_selection_card(item):
         "price_check": price_check,
         "why": why,
         "reason_codes": reason_codes,
+        "explanation_facts": selected_market.get("explanation_facts")
+        or selected_market.get("supporting_facts")
+        or [],
         "home_recent_form": item.get("home_recent_form") or {},
         "away_recent_form": item.get("away_recent_form") or {},
         "corner_profile": item.get("corner_profile") or {},
@@ -1177,6 +1181,7 @@ def _build_bettor_public_payload(review, technical_public, *, enhance=False):
         user_pick = selection.get("user_pick") or selection.get("your_pick") or {}
         recommendation = _bettor_recommendation(selection)
         positive_evidence, risk_evidence = _split_bettor_evidence(selection)
+        rejection_analysis = _public_rejection_analysis(selection, risk_evidence)
         match = selection.get("match") or ""
         selected_pick = recommendation.get("pick")
         changed = recommendation.get("action") == "replace"
@@ -1200,6 +1205,7 @@ def _build_bettor_public_payload(review, technical_public, *, enhance=False):
                     "positive_evidence": positive_evidence,
                     "risk_evidence": risk_evidence,
                     "conclusion": _bettor_conclusion(selection),
+                    **rejection_analysis,
                 },
                 "recommendation": recommendation,
             }
@@ -1355,14 +1361,15 @@ def _enhance_bettor_public_with_deepseek(payload):
                     "role": "user",
                     "content": (
                         "Rewrite each game into bettor-facing analysis. For each game return: index, "
-                        "user_pick_summary, positive_evidence, risk_evidence, conclusion, recommendation_why. "
+                        "user_pick_summary, positive_evidence, risk_evidence, conclusion, recommendation_why, why_rejected. "
                         "Evidence arrays must only rephrase supplied football/statistical evidence and must be short bullet strings. "
                         "Each evidence item should include an actual stat when supplied, such as confidence %, expected goals, "
                         "recent W-D-L, goals scored/conceded, corner totals, card totals, shot volume, or period-specific context. "
+                        "For rejected, removed, or replaced user picks, why_rejected must explain why the submitted pick failed using the supplied stats. "
                         "Never write bullets like 'Your price is close to the StatPal reference'. "
                         "Shape: {\"games\":[{\"index\":0,\"user_pick_summary\":\"...\","
                         "\"positive_evidence\":[\"...\"],\"risk_evidence\":[\"...\"],"
-                        "\"conclusion\":\"...\",\"recommendation_why\":[\"...\"]}]}.\n"
+                        "\"conclusion\":\"...\",\"recommendation_why\":[\"...\"],\"why_rejected\":[\"...\"]}]}.\n"
                         f"Data:\n{json.dumps(compact_games, ensure_ascii=True)}"
                     ),
                 },
@@ -1386,6 +1393,11 @@ def _enhance_bettor_public_with_deepseek(payload):
                     game["analysis"]["positive_evidence"] = cleaned
             if isinstance(update.get("risk_evidence"), list):
                 game["analysis"]["risk_evidence"] = _clean_bettor_evidence_items(update["risk_evidence"])
+            if isinstance(update.get("why_rejected"), list):
+                cleaned = _clean_bettor_evidence_items(update["why_rejected"], limit=5)
+                if cleaned:
+                    game["analysis"]["why_rejected"] = cleaned
+                    game["analysis"]["rejection_reason"] = cleaned[0]
             if update.get("conclusion"):
                 conclusion = _clean_public_slip_evidence_text(update["conclusion"])
                 if conclusion:

@@ -960,6 +960,29 @@ class SlipReviewPublicContractTests(SimpleTestCase):
         self.assertNotIn("detailed_stats", joined)
         self.assertNotIn("injuries_suspensions", joined)
 
+    def test_bettor_public_explains_why_rejected_with_scoreline_facts(self):
+        result = _sample_replace_result()
+        result["selected_market"]["explanation_facts"] = [
+            "Home recent scorelines: Everton 1-1 Bournemouth; Everton 2-0 Crystal Palace.",
+            "Away recent scorelines: Manchester Utd 5-2 Ipswich; Manchester Utd 0-2 Hull.",
+            "Recent scoreline Over 2.5 rate: 70.0%.",
+        ]
+        result["selected_market"]["advisory_score"] = 34
+        review = SimpleNamespace(id=38, source="sportybet", status="partial")
+
+        payload = _build_bettor_public_payload(
+            review,
+            _manual_review_summary([result])["public"],
+            enhance=False,
+        )
+
+        analysis = payload["games"][0]["analysis"]
+        self.assertIn("why_rejected", analysis)
+        self.assertIn("Away Win is rejected because the model gives it only", analysis["rejection_reason"])
+        joined = " ".join(analysis["why_rejected"])
+        self.assertIn("Home recent scorelines", joined)
+        self.assertIn("Away recent scorelines", joined)
+
     def test_public_confidence_label_matches_pick_band(self):
         self.assertEqual(_public_confidence_label(64), "Moderate")
         self.assertEqual(_public_confidence_label(65), "Moderate")
