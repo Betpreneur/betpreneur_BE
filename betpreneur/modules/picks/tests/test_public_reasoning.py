@@ -2,6 +2,7 @@ from django.test import SimpleTestCase
 
 from betpreneur.modules.picks.services.presentation import (
     _market_reasoning_for_game,
+    public_game_detail_payload,
     _public_reasoning_text,
 )
 
@@ -41,3 +42,59 @@ class PublicReasoningTests(SimpleTestCase):
         self.assertIn("Expected goals sit around 1.75.", reasoning)
         self.assertNotIn("Pricing is based on", reasoning)
         self.assertNotIn("api_football", reasoning)
+
+    def test_public_game_detail_exposes_recent_scoreline_context(self):
+        payload = public_game_detail_payload(
+            {
+                "date": "2026-09-06",
+                "published": False,
+                "run_id": 371,
+                "posted_at": "2026-09-06T00:48:50.927930Z",
+                "game": {
+                    "match_id": "statpal:2026090618418",
+                    "fixture": "Everton vs Manchester Utd",
+                    "home_team": "Everton",
+                    "away_team": "Manchester Utd",
+                    "top_market": {
+                        "market": "Over 2.5",
+                        "meaning": "3 or more total goals",
+                        "confidence": 58,
+                        "odds": 1.73,
+                        "recommendation_status": "no_edge",
+                        "analysis_summary": "Over 2.5 has 58% calibrated model confidence.",
+                        "positive_evidence": [
+                            "Projected total goals: 3.03.",
+                            "Home average: 1.86 xG.",
+                            "Away average: 1.17 xG.",
+                            "Line 2.5 is below the model projection of 3.03 goals.",
+                            "Recent scoreline sample: 2-2, 3-1, 1-2.",
+                            "Recent scorelines average 3.40 total goals across 10 tracked matches.",
+                            "Recent scoreline Over 2.5 rate: 70.0%.",
+                        ],
+                    },
+                    "home_recent_form": {
+                        "form": ["D", "W"],
+                        "wins": 1,
+                        "draws": 1,
+                        "losses": 0,
+                        "games": 2,
+                        "avg_scored": 2.0,
+                        "avg_conceded": 1.5,
+                        "fixtures": [
+                            {
+                                "match_date": "2026-09-01",
+                                "fixture": "Everton vs Leeds",
+                                "result": "D",
+                                "goals_for": 2,
+                                "goals_against": 2,
+                            }
+                        ],
+                    },
+                    "away_recent_form": {},
+                },
+            }
+        )
+
+        game = payload["game"]
+        self.assertIn("Recent scoreline sample: 2-2, 3-1, 1-2.", game["analysis"]["key_points"])
+        self.assertEqual(game["recent_form"]["home"]["scorelines"][0]["scoreline"], "2-2")

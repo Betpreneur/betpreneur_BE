@@ -848,7 +848,7 @@ def _public_analysis_detail(game, market):
         "verdict": _public_market_verdict(market or {}),
         "headline": summary or verdict,
         "explanation": explanation,
-        "key_points": _public_evidence((market or {}).get("positive_evidence") or [], limit=4),
+        "key_points": _public_evidence((market or {}).get("positive_evidence") or [], limit=8),
         "risks": _public_risk_evidence((market or {}).get("risk_evidence") or [], limit=3),
     }
 
@@ -885,6 +885,7 @@ def _public_recent_form(form):
         "games": form.get("games", 0),
         "avg_scored": form.get("avg_scored", 0),
         "avg_conceded": form.get("avg_conceded", 0),
+        "scorelines": _public_recent_scorelines(form.get("fixtures") or []),
     }
 
 
@@ -927,7 +928,36 @@ def _public_team_news_side(side, lineup_payload=None, injuries_payload=None, sid
 
 
 def _public_evidence(items, limit=6):
-    return [str(item) for item in items if str(item or "").strip()][:limit]
+    clean = [str(item) for item in items if str(item or "").strip()]
+    scoreline_items = [item for item in clean if "scoreline" in item.lower()]
+    other_items = [item for item in clean if item not in scoreline_items]
+    return [*other_items[:4], *scoreline_items, *other_items[4:]][:limit]
+
+
+def _public_recent_scorelines(fixtures, limit=5):
+    if not isinstance(fixtures, list):
+        return []
+    scorelines = []
+    for fixture in fixtures:
+        if not isinstance(fixture, dict):
+            continue
+        goals_for = fixture.get("goals_for")
+        goals_against = fixture.get("goals_against")
+        if goals_for is None or goals_against is None:
+            continue
+        scorelines.append(
+            {
+                "date": fixture.get("match_date") or fixture.get("date") or "",
+                "fixture": fixture.get("fixture") or "",
+                "result": fixture.get("result") or "",
+                "goals_for": goals_for,
+                "goals_against": goals_against,
+                "scoreline": f"{goals_for}-{goals_against}",
+            }
+        )
+        if len(scorelines) >= limit:
+            break
+    return scorelines
 
 
 def _public_corner_detail(corner_profile):
