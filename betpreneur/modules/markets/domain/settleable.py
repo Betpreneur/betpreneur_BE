@@ -38,9 +38,23 @@ def can_settle_market(market):
     market = str(market or "").strip()
     if not market:
         return False
-    if market.startswith("Corners Over ") or market.startswith("Corners Under "):
+    stat_line_prefixes = (
+        "Corners ",
+        "Home Team Corners ",
+        "Away Team Corners ",
+        "Cards ",
+        "Home Team Cards ",
+        "Away Team Cards ",
+        "Shots On Target ",
+        "Home Team Shots On Target ",
+        "Away Team Shots On Target ",
+    )
+    if market.startswith(stat_line_prefixes):
+        parts = market.rsplit(" ", 2)
+        if len(parts) != 3 or parts[-2] not in {"Over", "Under"}:
+            return False
         try:
-            float(market.rsplit(" ", 1)[-1])
+            float(parts[-1])
         except (TypeError, ValueError):
             return False
         return True

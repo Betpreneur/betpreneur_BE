@@ -41,13 +41,19 @@ class CanSettleMarketTests(TestCase):
     def test_corner_lines_are_settleable(self):
         self.assertTrue(can_settle_market("Corners Over 9.5"))
         self.assertTrue(can_settle_market("Corners Under 11.5"))
+        self.assertTrue(can_settle_market("Home Team Corners Over 2.5"))
+        self.assertTrue(can_settle_market("Away Team Corners Under 5.5"))
+        self.assertTrue(can_settle_market("Cards Over 3.5"))
+        self.assertTrue(can_settle_market("Home Team Cards Under 2.5"))
+        self.assertTrue(can_settle_market("Shots On Target Over 8.5"))
+        self.assertTrue(can_settle_market("Away Team Shots On Target Under 5.5"))
 
     def test_corner_market_without_a_numeric_line_is_not_settleable(self):
         self.assertFalse(can_settle_market("Corners Over many"))
 
     def test_unsupported_bookmaker_markets_are_not_settleable(self):
         # These all appeared on a real SportyBet slip and must never be settled as a void.
-        for market in ["Over 9.5", "Cards Over 3.5", "Vitoria Guimaraes 2+", "Haller, Sebastian", ""]:
+        for market in ["Over 9.5", "Cards Over many", "Vitoria Guimaraes 2+", "Haller, Sebastian", ""]:
             self.assertFalse(can_settle_market(market), market)
 
 
