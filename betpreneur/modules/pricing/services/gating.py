@@ -32,6 +32,11 @@ def setting_bool(name, default=False):
 def market_publicly_paused(market_name):
     if market_name == "DC: 12":
         return not setting_bool("ALGO_PUBLISH_DC12", False)
+    descriptor = describe_market(market_name)
+    side = str(descriptor.side or descriptor.selection or "").lower()
+    market_text = f" {str(market_name or '').lower()} "
+    if side == "under" or " under " in market_text:
+        return True
     return False
 
 

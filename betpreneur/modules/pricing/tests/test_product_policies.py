@@ -100,6 +100,54 @@ class ProductPolicyTests(SimpleTestCase):
         self.assertIn("insufficient_ev", assessment.reasons)
         self.assertNotEqual(assessment.tier, Tier.BANKER)
 
+    def test_top_picks_policy_allows_reasonable_non_under_value_pick(self):
+        market = _market("BTTS Yes", calibrated=0.61, confidence=61, family="both_teams_to_score")
+        value = ValueAssessment(
+            fixture_id="fixture-1",
+            market="BTTS Yes",
+            calibrated_probability=0.61,
+            available_odds=1.72,
+            edge=0.008,
+            ev=0.012,
+            sample_size_penalty=10,
+            diagnostics=PredictionDiagnostics(metadata={"estimated_odds": False}),
+        )
+        score = RecommendationScore(
+            fixture_id="fixture-1",
+            market="BTTS Yes",
+            recommendation_score=68,
+            market_fit_score=61,
+            uncertainty_penalty=10,
+        )
+
+        assessment = assess_top_picks_policy(market, value, score)
+
+        self.assertTrue(assessment.publishable)
+        self.assertEqual(assessment.tier, Tier.VALUE_GEM)
+        self.assertEqual(assessment.reasons, ())
+
+    def test_top_picks_policy_blocks_publicly_paused_under_market(self):
+        market = _market("Under 3.5", calibrated=0.84, confidence=84)
+        value = ValueAssessment(
+            fixture_id="fixture-1",
+            market="Under 3.5",
+            calibrated_probability=0.84,
+            available_odds=1.35,
+            edge=0.09,
+            ev=0.134,
+            diagnostics=PredictionDiagnostics(metadata={"estimated_odds": False}),
+        )
+        score = RecommendationScore(
+            fixture_id="fixture-1",
+            market="Under 3.5",
+            recommendation_score=88,
+        )
+
+        assessment = assess_top_picks_policy(market, value, score)
+
+        self.assertFalse(assessment.publishable)
+        self.assertIn("market_publicly_paused", assessment.reasons)
+
     def test_top_picks_policy_does_not_make_weak_market_a_banker(self):
         market = _market("Over 1.5", calibrated=0.84, confidence=84, quality="limited")
         market = MarketProbability(
@@ -190,12 +238,13 @@ class ProductPolicyTests(SimpleTestCase):
         self.assertEqual(assessment.suggested_alternative.market, "Over 1.5")
         self.assertTrue(assessment.suggested_alternative.thesis_preserved)
 
-    def test_slip_review_policy_keeps_supported_user_pick_without_top_pick_tier(self):
+    def test_slip_review_policy_pauses_supported_under_pick_without_top_pick_tier(self):
         user_pick = _market("Under 3.5", calibrated=0.72, confidence=72, family="total_goals")
 
         assessment = assess_slip_review_policy(user_pick)
 
-        self.assertTrue(assessment.supported)
-        self.assertEqual(assessment.verdict, "supported")
+        self.assertFalse(assessment.supported)
+        self.assertEqual(assessment.verdict, "review")
         self.assertIsNone(assessment.suggested_alternative)
+        self.assertIn("market_publicly_paused", assessment.reasons)
         self.assertFalse(hasattr(assessment, "tier"))

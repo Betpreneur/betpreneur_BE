@@ -412,6 +412,8 @@ def _normalise_fixture_markets(item, picks_by_match, request=None, user_backed_m
     for market in item.get("markets") or []:
         if market.get("market") in EXCLUDED_MARKETS:
             continue
+        if market_publicly_paused(market.get("market")):
+            continue
         payload = dict(market)
         payload["council_review"] = normalise_council_review(
             payload.get("insights"),
@@ -423,7 +425,7 @@ def _normalise_fixture_markets(item, picks_by_match, request=None, user_backed_m
             or _tier_for_confidence(payload.get("confidence"))
         )
         selected_pick = pick_by_market.get(payload.get("market"))
-        payload["publicly_paused"] = market_publicly_paused(payload.get("market"))
+        payload["publicly_paused"] = False
         if selected_pick:
             payload["selected"] = True
             payload["selected_pick_id"] = selected_pick.id
@@ -563,7 +565,11 @@ def game_summary_from_fixture(
 def picks_by_match_for_run(algo_run):
     grouped = {}
     for pick in sorted(
-        [pick for pick in algo_run.picks.all() if pick.market not in EXCLUDED_MARKETS],
+        [
+            pick
+            for pick in algo_run.picks.all()
+            if pick.market not in EXCLUDED_MARKETS and not market_publicly_paused(pick.market)
+        ],
         key=_top_pick_sort_key,
         reverse=True,
     ):
@@ -673,7 +679,7 @@ def _fixture_summary_for_match(algo_run, match_id):
         for prediction in MarketPrediction.objects.filter(run=algo_run, match_id=target_match_id)
         .select_related("selected_pick")
         .order_by("-confidence", "-ev", "market")
-        if prediction.market not in EXCLUDED_MARKETS
+        if prediction.market not in EXCLUDED_MARKETS and not market_publicly_paused(prediction.market)
     ]
     return {
         "fixture": fixture.fixture,
@@ -715,11 +721,13 @@ def game_detail_payload(target_date, match_id, request=None):
         }
 
     target_match_id = str(match_id)
-    match_picks = list(
-        Pick.objects.filter(run=algo_run, match_id=target_match_id)
+    match_picks = [
+        pick
+        for pick in Pick.objects.filter(run=algo_run, match_id=target_match_id)
         .exclude(market__in=EXCLUDED_MARKETS)
         .order_by("-confidence", "-ev", "market")
-    )
+        if not market_publicly_paused(pick.market)
+    ]
     picks_by_match = {target_match_id: sorted(match_picks, key=_top_pick_sort_key, reverse=True)}
     fixture_summary = _fixture_summary_for_match(algo_run, target_match_id)
     if not fixture_summary:

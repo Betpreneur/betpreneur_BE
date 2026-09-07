@@ -37,6 +37,7 @@ from betpreneur.modules.pricing.api import (
     market_family_group,
     market_profile_fit_score,
     market_similarity_score,
+    market_publicly_paused,
     match_checker_alternative_reason,
     match_checker_status,
     normalise_market_name,
@@ -119,9 +120,8 @@ def _generated_market_names_for_family(descriptor):
                 else ("2.5", "3.5", "4.5", "5.5", "6.5")
             )
             return [
-                f"{period_prefix}{prefix} {side.title()} {line}"
+                f"{period_prefix}{prefix} Over {line}"
                 for line in lines
-                for side in ("over", "under")
             ]
         lines = (
             ("1.5", "2.5", "3.5", "4.5", "5.5")
@@ -129,22 +129,19 @@ def _generated_market_names_for_family(descriptor):
             else ("7.5", "8.5", "9.5", "10.5", "11.5")
         )
         return [
-            f"{period_prefix}Corners {side.title()} {line}"
+            f"{period_prefix}Corners Over {line}"
             for line in lines
-            for side in ("over", "under")
         ]
     if family in {"cards_total", "team_cards", "cards"}:
         if descriptor.team in {"home", "away"}:
             prefix = "Home Team Cards" if descriptor.team == "home" else "Away Team Cards"
             return [
-                f"{prefix} {side.title()} {line}"
+                f"{prefix} Over {line}"
                 for line in ("1.5", "2.5", "3.5")
-                for side in ("over", "under")
             ]
         return [
-            f"Cards {side.title()} {line}"
+            f"Cards Over {line}"
             for line in ("2.5", "3.5", "4.5", "5.5")
-            for side in ("over", "under")
         ]
     if family in {"shots_on_target_total", "team_shots_on_target"}:
         if descriptor.team in {"home", "away"}:
@@ -154,33 +151,28 @@ def _generated_market_names_for_family(descriptor):
                 else "Away Team Shots On Target"
             )
             return [
-                f"{prefix} {side.title()} {line}"
+                f"{prefix} Over {line}"
                 for line in ("2.5", "3.5", "4.5", "5.5")
-                for side in ("over", "under")
             ]
         return [
-            f"Shots On Target {side.title()} {line}"
+            f"Shots On Target Over {line}"
             for line in ("6.5", "7.5", "8.5", "9.5", "10.5", "11.5")
-            for side in ("over", "under")
         ]
     if family == "booking_points":
         return [
-            f"Booking Points {side.title()} {line}"
+            f"Booking Points Over {line}"
             for line in ("35.5", "45.5", "55.5", "65.5")
-            for side in ("over", "under")
         ]
     if family in {"total_goals", "team_total_goals"}:
         if family == "team_total_goals" and descriptor.team in {"home", "away"}:
             prefix = "Home Team" if descriptor.team == "home" else "Away Team"
             return [
-                f"{prefix} {side.title()} {line}"
+                f"{prefix} Over {line}"
                 for line in ("1.5", "2.5")
-                for side in ("over", "under")
             ]
         return [
-            f"{side.title()} {line}"
+            f"Over {line}"
             for line in ("1.5", "2.5", "3.5", "4.5")
-            for side in ("over", "under")
         ]
     if family in {"result_total_goals", "double_chance_total_goals"}:
         return [
@@ -192,8 +184,6 @@ def _generated_market_names_for_family(descriptor):
             "DC: 12",
             "Over 1.5",
             "Over 2.5",
-            "Under 2.5",
-            "Under 3.5",
         ]
     if family in {"match_result", "double_chance", "draw_no_bet", "asian_handicap", "handicap"}:
         return [
@@ -250,21 +240,13 @@ FIXTURE_WIDE_RECOMMENDATION_MARKETS = (
     "Over 1.5",
     "Over 2.5",
     "Over 3.5",
-    "Under 1.5",
-    "Under 2.5",
-    "Under 3.5",
-    "Under 4.5",
     "GG / BTTS Yes",
     "BTTS No",
     # Team goals; 0.5 lines stay out of recommendations.
     "Home Team Over 1.5",
     "Away Team Over 1.5",
-    "Home Team Under 2.5",
-    "Away Team Under 2.5",
     # First-half goals.
     "1H Over 1.5",
-    "1H Under 1.5",
-    "1H Under 2.5",
     # Count markets; these only survive if the count model can score them.
     "Corners Over 7.5",
     "Corners Over 8.5",
@@ -418,8 +400,6 @@ def _is_broad_safe_market(market):
     if family == "double_chance":
         return True
     if family == "total_goals" and side == "over" and line is not None and line <= 1.5:
-        return True
-    if family == "total_goals" and side == "under" and line is not None and line >= 4.5:
         return True
     return False
 
@@ -759,6 +739,8 @@ def _blocked_slip_recommendation_market(market):
     descriptor = describe_market(market_name)
     if not descriptor.recognized:
         return False
+    if market_publicly_paused(market_name):
+        return True
     if descriptor.family in {"asian_handicap", "handicap"}:
         return True
     line = float_or_none(descriptor.line)
@@ -2274,6 +2256,12 @@ def _text_mentions_blocked_slip_recommendation_market(text):
         "2h over 0.5",
         "home team over 0.5",
         "away team over 0.5",
+        "under 1.5",
+        "under 2.5",
+        "under 3.5",
+        "under 4.5",
+        "home team under",
+        "away team under",
         "shots over 0.5",
         "shots on target over 0.5",
     )

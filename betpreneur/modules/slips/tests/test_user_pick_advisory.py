@@ -5,6 +5,7 @@ from django.test import SimpleTestCase, TestCase
 
 from betpreneur.modules.markets.api import describe_market
 from betpreneur.modules.pricing.api import (
+    market_publicly_paused,
     market_profile_fit_score,
     with_market_capability,
     with_statpal_advisory,
@@ -1250,6 +1251,22 @@ class UserPickAdvisoryTests(SimpleTestCase):
         self.assertTrue(_blocked_slip_recommendation_market({"market": "1H Over 0.5"}))
         self.assertTrue(_blocked_slip_recommendation_market({"market": "AH Home +0.5"}))
         self.assertTrue(_blocked_slip_recommendation_market({"market": "AH Away +0.5"}))
+
+    def test_recommendation_policy_blocks_under_replacements(self):
+        for market in (
+            "Under 1.5",
+            "Under 2.5",
+            "Under 3.5",
+            "Under 4.5",
+            "Home Team Under 2.5",
+            "Away Team Under 3.5",
+            "Corners Under 8.5",
+            "Home Team Corners Under 3.5",
+            "Cards Under 4.5",
+            "Shots On Target Under 8.5",
+        ):
+            self.assertTrue(market_publicly_paused(market), market)
+            self.assertTrue(_blocked_slip_recommendation_market({"market": market}), market)
 
     def test_generated_match_corner_markets_start_at_bookable_over_lines(self):
         names = set(_generated_market_names_for_family(describe_market("Corners Over 8.5")))

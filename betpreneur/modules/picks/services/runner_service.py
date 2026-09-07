@@ -56,6 +56,7 @@ from betpreneur.modules.pricing.api import (
     assess_league_market_trust,
     assess_recommendation,
     assess_top_picks_policy,
+    market_publicly_paused,
 )
 from betpreneur.platform.config import temporary_env
 from betpreneur.platform.db.json import json_safe
@@ -1213,6 +1214,8 @@ class AlgoRunnerService:
             *list(top_picks.warnings or ()),
             *self._prediction_odds_quality_flags(odds_meta),
         ]
+        if market_publicly_paused(probability.market):
+            flags.append("market_publicly_paused")
         return list(dict.fromkeys(str(flag) for flag in flags if flag))
 
     def _prediction_all_games_eligible(self, probability, value, all_games):
@@ -1224,6 +1227,8 @@ class AlgoRunnerService:
         return True
 
     def _prediction_analysis_available(self, probability, all_games):
+        if market_publicly_paused(probability.market):
+            return False
         warnings = {str(item) for item in (probability.warnings or ())}
         if warnings & {
             "german_under_goals_market_blocked",

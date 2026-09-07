@@ -491,15 +491,8 @@ def broad_fallback_candidate_allowed(selected_market, candidate):
         return False
     taxonomy = (candidate or {}).get("market_taxonomy") or describe_market((candidate or {}).get("market")).to_dict()
     side = str(taxonomy.get("selection") or taxonomy.get("side") or "").lower()
-    line = float_or_none(taxonomy.get("line"))
-    family = taxonomy.get("family") or ""
     if side == "under":
-        if family == "total_goals" and line is not None and line >= 4.5:
-            return False
-        if family == "team_total_goals" and line is not None and line >= 2.5:
-            return False
-        if candidate_group == "corners" and line is not None and line >= 10.5:
-            return False
+        return False
     return True
 
 

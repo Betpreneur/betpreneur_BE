@@ -17,24 +17,25 @@ from ..contracts import (
     TopPicksPolicyAssessment,
 )
 from ..domain.tiers import Tier
+from .gating import market_publicly_paused
 
-TOP_PICK_MIN_SCORE = 70.0
-TOP_PICK_MIN_EDGE = 0.02
-TOP_PICK_MIN_EV = 0.01
+TOP_PICK_MIN_SCORE = 64.0
+TOP_PICK_MIN_EDGE = 0.005
+TOP_PICK_MIN_EV = 0.0
 BANKER_MIN_PROBABILITY = 0.72
 BANKER_MIN_SCORE = 82.0
 BANKER_MIN_EDGE = 0.03
 BANKER_MAX_UNCERTAINTY = 4.0
 BANKER_MAX_CORRELATION = 2.0
 BANKER_MAX_VOLATILITY = 3.0
-VALUE_GEM_MIN_PROBABILITY = 0.58
-VALUE_GEM_MIN_SCORE = 74.0
-VALUE_GEM_MIN_EDGE = 0.02
-VALUE_GEM_MAX_SAMPLE_PENALTY = 8.0
-VALUE_GEM_MIN_MARKET_FIT = 65.0
+VALUE_GEM_MIN_PROBABILITY = 0.56
+VALUE_GEM_MIN_SCORE = 68.0
+VALUE_GEM_MIN_EDGE = 0.005
+VALUE_GEM_MAX_SAMPLE_PENALTY = 12.0
+VALUE_GEM_MIN_MARKET_FIT = 60.0
 WILD_CARD_MIN_PROBABILITY = 0.55
-WILD_CARD_MIN_SCORE = 66.0
-WILD_CARD_MIN_EV = 0.04
+WILD_CARD_MIN_SCORE = 62.0
+WILD_CARD_MIN_EV = 0.01
 WILD_CARD_MIN_VALUE_SCORE = 10.0
 WILD_CARD_STAKE_WARNING = "Higher-variance pick: use reduced stake sizing."
 SLIP_SUPPORTED_SCORE = 70.0
@@ -69,13 +70,15 @@ def assess_top_picks_policy(
     )
     if score is None or score < TOP_PICK_MIN_SCORE:
         reasons.append("below_exposure_score")
+    if market_publicly_paused(market_probability.market):
+        reasons.append("market_publicly_paused")
     if not has_real_odds:
         reasons.append("real_odds_required")
     if value_assessment.edge is None or value_assessment.edge < TOP_PICK_MIN_EDGE:
         reasons.append("insufficient_edge")
     if value_assessment.ev is None or value_assessment.ev < TOP_PICK_MIN_EV:
         reasons.append("insufficient_ev")
-    if recommendation_score.total_penalty >= 18:
+    if recommendation_score.total_penalty >= 26:
         reasons.append("too_much_uncertainty")
 
     tier, tier_reasons, stake_warning = _technical_tier(
@@ -114,7 +117,8 @@ def assess_slip_review_policy(
 ) -> SlipReviewPolicyAssessment:
     """Slip Review evaluates the user thesis and nearby alternatives."""
     user_score = user_pick.confidence_score
-    supported = user_score is not None and user_score >= min_supported_score
+    paused = market_publicly_paused(user_pick.market)
+    supported = not paused and user_score is not None and user_score >= min_supported_score
     alternative = (
         None
         if supported
@@ -123,6 +127,8 @@ def assess_slip_review_policy(
     reasons = []
     if user_score is None:
         reasons.append("user_pick_unmodelled")
+    elif paused:
+        reasons.append("market_publicly_paused")
     elif supported:
         reasons.append("user_pick_supported")
     else:
@@ -155,6 +161,7 @@ def _best_slip_alternative(
         item
         for item in candidates
         if item.confidence_delta is not None and item.confidence_delta >= min_delta
+        and not market_publicly_paused(item.market)
     ]
     if not candidates:
         return None

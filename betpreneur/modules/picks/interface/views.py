@@ -153,7 +153,7 @@ def _fixture_summary_for_pick(pick):
             for prediction in MarketPrediction.objects.filter(run=pick.run, match_id=str(pick.match_id or ""))
             .select_related("selected_pick")
             .order_by("-confidence", "-ev", "market")
-            if prediction.market not in EXCLUDED_MARKETS
+            if prediction.market not in EXCLUDED_MARKETS and not market_publicly_paused(prediction.market)
         ]
         return {
             "fixture": fixture.fixture,
@@ -262,7 +262,7 @@ def _fixture_summaries_for_run(algo_run):
         .order_by("match_id", "-confidence", "-ev", "market")
     )
     for prediction in predictions:
-        if prediction.market in EXCLUDED_MARKETS:
+        if prediction.market in EXCLUDED_MARKETS or market_publicly_paused(prediction.market):
             continue
         markets_by_match.setdefault(str(prediction.match_id or ""), []).append(
             market_prediction_payload(prediction)
@@ -517,16 +517,24 @@ def _compact_games_payload(target_date, request=None, *, page=1, page_size=20):
         }
 
     raw_fixture_count = AlgoFixture.objects.filter(run=algo_run).count()
-    returnable_match_ids = (
+    public_match_ids = []
+    seen_public_match_ids = set()
+    eligible_rows = (
         MarketPrediction.objects.filter(run=algo_run, eligible=True)
         .exclude(market__in=EXCLUDED_MARKETS)
         .exclude(match_id__isnull=True)
         .exclude(match_id="")
-        .values_list("match_id", flat=True)
-        .distinct()
+        .values_list("match_id", "market")
+        .order_by("match_id")
     )
+    for match_id, market in eligible_rows.iterator(chunk_size=1000):
+        key = str(match_id or "")
+        if not key or key in seen_public_match_ids or market_publicly_paused(market):
+            continue
+        seen_public_match_ids.add(key)
+        public_match_ids.append(key)
     fixture_queryset = (
-        AlgoFixture.objects.filter(run=algo_run, match_id__in=returnable_match_ids)
+        AlgoFixture.objects.filter(run=algo_run, match_id__in=public_match_ids)
         .only(
             "id",
             "fixture",
@@ -598,6 +606,8 @@ def _compact_games_payload(target_date, request=None, *, page=1, page_size=20):
         prediction_match_id = str(prediction.match_id or "")
         payload = market_prediction_payload(prediction)
         payload["publicly_paused"] = market_publicly_paused(payload.get("market"))
+        if payload["publicly_paused"]:
+            continue
         payload.update(_apply_council_recommendation_gate(payload))
         payload["display_score"] = round(market_display_score(payload)[0], 3)
         if market_analysis_displayable(payload):
@@ -706,6 +716,8 @@ def _compact_picks_by_match_for_run(algo_run, match_ids):
         .order_by("match_id", "tier", "-confidence", "-ev")
     )
     for pick in queryset:
+        if market_publicly_paused(pick.market):
+            continue
         grouped.setdefault(str(pick.match_id or ""), []).append(pick)
     return grouped
 
@@ -815,7 +827,7 @@ def _markets_for_pick_detail(pick, fixture_summary):
     markets = []
     selected_market = None
     for market in fixture_summary.get("markets") or []:
-        if market.get("market") in EXCLUDED_MARKETS:
+        if market.get("market") in EXCLUDED_MARKETS or market_publicly_paused(market.get("market")):
             continue
         payload = dict(market)
         is_selected = payload.get("market") == pick.market
@@ -1066,7 +1078,11 @@ def _daily_picks_payload(target_date, request=None):
         }
 
     picks = sorted(
-        [pick for pick in algo_run.picks.all() if pick.market not in EXCLUDED_MARKETS],
+        [
+            pick
+            for pick in algo_run.picks.all()
+            if pick.market not in EXCLUDED_MARKETS and not market_publicly_paused(pick.market)
+        ],
         key=_top_pick_sort_key,
         reverse=True,
     )
@@ -1097,7 +1113,7 @@ def _daily_picks_payload(target_date, request=None):
         markets = [
             market
             for market in item.get("markets") or []
-            if market.get("market") not in EXCLUDED_MARKETS
+            if market.get("market") not in EXCLUDED_MARKETS and not market_publicly_paused(market.get("market"))
         ]
         fixtures[match_id] = {
             "fixture": item.get("fixture", ""),
@@ -1286,7 +1302,11 @@ def _compact_daily_picks_payload(target_date, request=None):
         }
 
     picks = sorted(
-        list(Pick.objects.filter(run=algo_run).exclude(market__in=EXCLUDED_MARKETS)),
+        [
+            pick
+            for pick in Pick.objects.filter(run=algo_run).exclude(market__in=EXCLUDED_MARKETS)
+            if not market_publicly_paused(pick.market)
+        ],
         key=_top_pick_sort_key,
         reverse=True,
     )
@@ -1551,6 +1571,7 @@ class TopPickView(APIView):
                 [
                     pick
                     for pick in Pick.objects.filter(run=algo_run).exclude(market__in=EXCLUDED_MARKETS)
+                    if not market_publicly_paused(pick.market)
                 ],
                 key=_top_pick_sort_key,
                 reverse=True,
@@ -1684,7 +1705,7 @@ class DailyPicksDownloadView(APIView):
         writer.writerow(["date", "fixture", "league", "kickoff", "tier", "market", "confidence", "odds", "ev", "status"])
         if algo_run:
             for pick in algo_run.picks.all().order_by("kickoff", "-confidence"):
-                if pick.market in EXCLUDED_MARKETS:
+                if pick.market in EXCLUDED_MARKETS or market_publicly_paused(pick.market):
                     continue
                 writer.writerow([
                     pick.match_date,
