@@ -1,4 +1,7 @@
 import json
+import os
+import subprocess
+import sys
 from datetime import UTC, datetime
 from unittest.mock import patch
 
@@ -10,11 +13,29 @@ from betpreneur.modules.picks.services.runner_service import AlgoRunnerService
 
 
 class DailyStatPalFixtureSourceTests(SimpleTestCase):
+    def test_api_football_context_settings_load_from_environment(self):
+        expected = {
+            "ALGO_API_FOOTBALL_CONTEXT_ENABLED": "True",
+            "ALGO_API_FOOTBALL_CONTEXT_RECENT_FIXTURES": "10",
+            "ALGO_API_FOOTBALL_CONTEXT_FIXTURE_STATS_ENABLED": "True",
+        }
+        result = subprocess.run(
+            [sys.executable, "-c", "import json; from config.settings.base import GRIND_ALGO; "
+             "print(json.dumps({k: v for k, v in GRIND_ALGO.items() if k.startswith('ALGO_API_FOOTBALL_CONTEXT_')}))"],
+            env={**os.environ, **expected},
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=30,
+        )
+        self.assertEqual(json.loads(result.stdout), expected)
+
     @override_settings(
         GRIND_ALGO={
             "APS_KEY": "test-key",
             "ALGO_API_FOOTBALL_CONTEXT_ENABLED": "true",
             "ALGO_API_FOOTBALL_CONTEXT_RECENT_FIXTURES": "2",
+            "ALGO_API_FOOTBALL_CONTEXT_FIXTURE_STATS_ENABLED": "True",
         }
     )
     def test_api_football_phase1_context_collects_provider_snapshots(self):
@@ -46,6 +67,10 @@ class DailyStatPalFixtureSourceTests(SimpleTestCase):
         with (
             patch.object(algo_runner, "fetch_prediction_data", return_value={"predictions": {"under_over": "+2.5"}}),
             patch.object(algo_runner, "aps_get", side_effect=fake_aps_get),
+            patch.object(algo_runner, "fetch_fixture_statistics", return_value=[
+                {"team": {"id": 33}, "statistics": [{"type": "Corner Kicks", "value": 6}]},
+                {"team": {"id": 45}, "statistics": [{"type": "Corner Kicks", "value": 4}]},
+            ]) as fetch_stats,
         ):
             context = service._api_football_phase1_context(fixture)
 
@@ -56,6 +81,11 @@ class DailyStatPalFixtureSourceTests(SimpleTestCase):
         self.assertEqual(snapshots["team_statistics_away"]["payload"]["team"]["id"], 45)
         self.assertEqual(len(snapshots["recent_fixtures_home"]["payload"]), 2)
         self.assertEqual(len(snapshots["recent_fixtures_away"]["payload"]), 2)
+        self.assertEqual(fetch_stats.call_count, 4)
+        for side, expected_corners in (("home", 6), ("away", 4)):
+            samples = snapshots[f"fixture_statistics_{side}"]["payload"]
+            self.assertEqual(len(samples), 2)
+            self.assertEqual(samples[0]["corner_kicks_for"], expected_corners)
 
     def test_statpal_only_fixture_scores_without_api_football_fixture_calls(self):
         fixture = {
