@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 from functools import cache
+from math import isfinite
 from typing import Any
 
 from betpreneur.modules.markets.api import MarketDescriptor, describe_market
+from betpreneur.modules.scoring.api import build_score_matrix
 
 from .calibration import calibrate_probability
 from .contracts import FixturePrediction, MarketProbability, PredictionDiagnostics
@@ -646,6 +648,11 @@ def _apply_api_football_goal_context(
         team_probability, label = team_stats_adjustment
         adjusted = (adjusted * 0.88) + (team_probability * 0.12)
         facts.append(f"API-Football team statistics support {label} at {_percent(team_probability)}%.")
+        stats = api["team_statistics"]
+        home_for, home_against = _api_team_goal_rates(stats["home"], "home")
+        away_for, away_against = _api_team_goal_rates(stats["away"], "away")
+        facts.append(f"Home scoring average: {home_for:.2f}; away concession average: {away_against:.2f} goals per match.")
+        facts.append(f"Away scoring average: {away_for:.2f}; home concession average: {home_against:.2f} goals per match.")
         if abs(team_probability - probability) >= 0.22:
             warnings.append("api_football_team_statistics_disagree")
 
@@ -671,7 +678,9 @@ def _api_recent_scoreline_probability(api: dict[str, Any], descriptor: MarketDes
     side = str(descriptor.side or "").lower()
     if line is None or side not in {"over", "under"}:
         return None
-    key = "over_2_5_rate" if line <= 2.5 else "over_3_5_rate" if line <= 3.5 else "over_4_5_rate"
+    key = {1.5: "over_1_5_rate", 2.5: "over_2_5_rate", 3.5: "over_3_5_rate", 4.5: "over_4_5_rate"}.get(line)
+    if key is None:
+        return None
     rate = _float(profile.get(key))
     if rate is None:
         return None
@@ -725,7 +734,7 @@ def _api_under_over_line(value) -> tuple[str, float] | None:
 
 
 def _api_team_statistics_goal_adjustment(api: dict[str, Any], descriptor: MarketDescriptor) -> tuple[float, str] | None:
-    if descriptor.family not in {"total_goals", "team_total_goals"}:
+    if descriptor.family not in {"total_goals", "team_total_goals", "btts"}:
         return None
     team_stats = api.get("team_statistics") if isinstance(api.get("team_statistics"), dict) else {}
     home = team_stats.get("home") if isinstance(team_stats.get("home"), dict) else {}
@@ -734,26 +743,52 @@ def _api_team_statistics_goal_adjustment(api: dict[str, Any], descriptor: Market
         return None
     side = str(descriptor.side or "").lower()
     line = _float(descriptor.line)
-    if line is None or side not in {"over", "under"}:
+    if descriptor.family != "btts" and (
+        line is None or not isfinite(line) or line < 0 or line % 1 != 0.5 or side not in {"over", "under"}
+    ):
         return None
-    if descriptor.family == "team_total_goals":
-        bucket = home if descriptor.team == "home" else away if descriptor.team == "away" else {}
-        avg = _float((((bucket.get("goals_for") or {}).get("average") or {}).get("total")))
-        if avg is None:
+    home_rates = _api_team_goal_rates(home, "home")
+    away_rates = _api_team_goal_rates(away, "away")
+    if home_rates is None or away_rates is None:
+        return None
+    home_for, home_against = home_rates
+    away_for, away_against = away_rates
+    # Match each attack with the opponent's concession rate. This remains a
+    # supporting estimate, blended at 12% with the primary goal model.
+    home_expected = (home_for + away_against) / 2
+    away_expected = (away_for + home_against) / 2
+    matrix = build_score_matrix(home_expected, away_expected)
+    if descriptor.family == "btts":
+        if side not in {"yes", "no"}:
             return None
-        estimate = _clamp((avg - (line - 0.5)) / 1.8, 0.05, 0.95)
-        if side == "under":
+        estimate = matrix.sum_where(lambda h, a: h > 0 and a > 0)
+        if side == "no":
             estimate = 1.0 - estimate
-        return estimate, descriptor.canonical or "team goals"
-    home_for = _float((((home.get("goals_for") or {}).get("average") or {}).get("total")))
-    away_for = _float((((away.get("goals_for") or {}).get("average") or {}).get("total")))
-    if home_for is None or away_for is None:
-        return None
-    total_avg = home_for + away_for
-    estimate = _clamp((total_avg - (line - 0.5)) / 2.6, 0.05, 0.95)
-    if side == "under":
-        estimate = 1.0 - estimate
-    return estimate, descriptor.canonical or "total goals"
+    else:
+        if descriptor.family == "team_total_goals" and descriptor.team not in {"home", "away"}:
+            return None
+        def wins(h, a):
+            goals = h + a if descriptor.family == "total_goals" else h if descriptor.team == "home" else a
+            return goals > line if side == "over" else goals < line
+        estimate = matrix.sum_where(wins)
+    return estimate, descriptor.canonical or descriptor.raw
+
+
+def _api_team_goal_rates(team: dict[str, Any], venue: str) -> tuple[float, float] | None:
+    played = ((team.get("record") or {}).get("played") or {})
+    scored = ((team.get("goals_for") or {}).get("average") or {})
+    conceded = ((team.get("goals_against") or {}).get("average") or {})
+    # Use venue splits only with enough games; otherwise use overall form.
+    for scope in (venue, "total"):
+        games = _float(played.get(scope))
+        attack = _float(scored.get(scope))
+        defence = _float(conceded.get(scope))
+        if games is None or not isfinite(games) or games < 6:
+            continue
+        if any(value is None or not isfinite(value) or not 0 <= value <= 6 for value in (attack, defence)):
+            continue
+        return attack, defence
+    return None
 
 
 def _scoreline_evidence_bullets(scoreline_profile: dict[str, Any]) -> list[str]:

@@ -1,4 +1,9 @@
 from django.test import SimpleTestCase
+from betpreneur.modules.markets.api import describe_market
+from betpreneur.modules.prediction.market_probabilities import (
+    _api_recent_scoreline_probability,
+    _api_team_statistics_goal_adjustment,
+)
 
 from betpreneur.modules.prediction.api import (
     CountModelOutput,
@@ -14,6 +19,63 @@ from betpreneur.modules.prediction.api import (
 
 
 class MarketProbabilityEngineTests(SimpleTestCase):
+    def _api_goal_stats(self, conceded=1.0):
+        return {"team_statistics": {
+            side: {
+                "available": True,
+                "record": {"played": {"total": 10}},
+                "goals_for": {"average": {"total": 1.5}},
+                "goals_against": {"average": {"total": conceded}},
+            } for side in ("home", "away")
+        }}
+
+    def test_api_goal_probabilities_account_for_opponent_defence(self):
+        for market in ("Over 2.5", "Home Team Over 1.5", "GG / BTTS Yes"):
+            with self.subTest(market=market):
+                descriptor = describe_market(market)
+                strong_defence = _api_team_statistics_goal_adjustment(self._api_goal_stats(0.5), descriptor)
+                weak_defence = _api_team_statistics_goal_adjustment(self._api_goal_stats(2.5), descriptor)
+                self.assertGreater(weak_defence[0], strong_defence[0])
+
+    def test_api_goal_distribution_has_complementary_and_ordered_totals(self):
+        api = self._api_goal_stats()
+        previous = 1.0
+        for line in (1.5, 2.5, 3.5, 4.5):
+            over = _api_team_statistics_goal_adjustment(api, describe_market(f"Over {line}"))[0]
+            under = _api_team_statistics_goal_adjustment(api, describe_market(f"Under {line}"))[0]
+            self.assertAlmostEqual(over + under, 1.0)
+            self.assertLess(over, previous)
+            previous = over
+
+    def test_api_goal_stats_skip_missing_defence_and_small_samples(self):
+        for field in ("goals_against", "record"):
+            api = self._api_goal_stats()
+            api["team_statistics"]["away"].pop(field)
+            self.assertIsNone(_api_team_statistics_goal_adjustment(api, describe_market("Over 2.5")))
+        api = self._api_goal_stats()
+        api["team_statistics"]["home"]["record"]["played"]["total"] = 2
+        self.assertIsNone(_api_team_statistics_goal_adjustment(api, describe_market("Over 2.5")))
+
+    def test_api_goal_stats_venue_split_requires_sufficient_games(self):
+        api = self._api_goal_stats()
+        descriptor = describe_market("Over 2.5")
+        baseline = _api_team_statistics_goal_adjustment(api, descriptor)[0]
+        home = api["team_statistics"]["home"]
+        home["record"]["played"]["home"] = 2
+        home["goals_for"]["average"]["home"] = 3.0
+        home["goals_against"]["average"]["home"] = 3.0
+        self.assertEqual(_api_team_statistics_goal_adjustment(api, descriptor)[0], baseline)
+        home["record"]["played"]["home"] = 6
+        self.assertGreater(_api_team_statistics_goal_adjustment(api, descriptor)[0], baseline)
+
+    def test_api_recent_results_use_exact_goal_line(self):
+        api = {"recent_scorelines": {"combined": {
+            "games": 10, "over_1_5_rate": 90, "over_2_5_rate": 40, "over_4_5_rate": 10,
+        }}}
+        self.assertAlmostEqual(_api_recent_scoreline_probability(api, describe_market("Over 1.5"))[0], 0.9)
+        self.assertAlmostEqual(_api_recent_scoreline_probability(api, describe_market("Over 2.5"))[0], 0.4)
+        self.assertIsNone(_api_recent_scoreline_probability(api, describe_market("Over 5.5")))
+
     def _prediction(self):
         goals = GoalModelOutput(
             home_expected_goals=1.8,

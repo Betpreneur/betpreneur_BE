@@ -1,4 +1,10 @@
+import json
+from unittest.mock import patch
+
 from django.test import SimpleTestCase
+
+from betpreneur.modules.picks.services.runner_service import AlgoRunnerService
+from betpreneur.modules.prediction.api import FixtureFeatureSet, FixturePrediction
 
 from betpreneur.modules.picks.services.presentation import (
     _market_reasoning_for_game,
@@ -8,6 +14,44 @@ from betpreneur.modules.picks.services.presentation import (
 
 
 class PublicReasoningTests(SimpleTestCase):
+    def test_scoring_preserves_corner_samples_for_public_response(self):
+        api_features = {
+            "available": True,
+            "available_snapshots": ["fixture_statistics_home", "fixture_statistics_away"],
+            "corner_samples": {
+                "combined": {"games": 20, "avg_for": 5.2, "avg_against": 4.8, "avg_total": 10.0},
+            },
+        }
+        prediction = FixturePrediction(
+            fixture_id="fixture-123",
+            features=FixtureFeatureSet(
+                fixture_id="fixture-123", features={"api_football": api_features},
+            ),
+        )
+        source = {
+            "match_id": "fixture-123", "fixture": "Alpha vs Beta",
+            "home_team": "Alpha", "away_team": "Beta",
+            "corner_profile": {
+                "expected_total": 10.4,
+                "sources": ["api_football_corner_samples"],
+            },
+        }
+        service = AlgoRunnerService()
+        with (
+            patch.object(service, "_prediction_fixture_payload", return_value=source),
+            patch.object(service, "_daily_prediction_real_odds", return_value={}),
+            patch("betpreneur.modules.picks.services.runner_service.predict_fixture", return_value=prediction),
+        ):
+            scored = service._score_fixture_with_prediction_engine({})
+
+        stored = json.loads(json.dumps(scored))
+        self.assertEqual(stored["fixture_context"]["prediction_features"]["api_football"], api_features)
+        public = public_game_detail_payload({"game": stored})["game"]
+        samples = public["corners"]["historical_samples"]
+        self.assertTrue(samples["available"])
+        self.assertEqual(samples["games"], 20)
+        self.assertEqual(samples["avg_total"], 10.0)
+
     def test_public_reasoning_removes_provider_pricing_sentence(self):
         text = (
             "Under 3.5 rates at 68% final confidence after council review with 1.45 odds "

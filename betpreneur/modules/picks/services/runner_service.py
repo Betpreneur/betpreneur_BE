@@ -1893,6 +1893,7 @@ class AlgoRunnerService:
             "data_freshness": ((prediction.features.features or {}).get("data_freshness") or {}) if prediction.features else {},
             "provider_quality": ((prediction.features.features or {}).get("provider_quality") or {}) if prediction.features else {},
             "scoreline_profile": ((prediction.features.features or {}).get("scoreline_profile") or {}) if prediction.features else {},
+            "api_football": ((prediction.features.features or {}).get("api_football") or {}) if prediction.features else {},
         }
         home_recent_form = self._merge_prediction_recent_form(
             source_payload.get("home_recent_form"),
