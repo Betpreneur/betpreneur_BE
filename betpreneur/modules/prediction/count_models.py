@@ -143,6 +143,7 @@ def _team_event_expected(features: FixtureFeatureSet, event: str, config: dict[s
     recent = payload.get("recent_form") or {}
     feedback = ((features.features or {}).get("prediction_feedback") or {}).get(side) or {}
     referee = (features.features or {}).get("referee") or {}
+    api_football = (features.features or {}).get("api_football") or {}
     league_average = float(config["league_team_average"])
     sources: list[str] = []
 
@@ -174,6 +175,12 @@ def _team_event_expected(features: FixtureFeatureSet, event: str, config: dict[s
         sources.append("prediction_feedback")
     else:
         feedback_value = None
+    api_corner_value = None
+    api_corner_matches = 0.0
+    if event == "corners":
+        api_corner_value, api_corner_matches = _api_football_corner_value(api_football, side=side, config=config)
+        if api_corner_value is not None:
+            sources.append("api_football_corner_samples")
     referee_rate = None
     if event == "cards":
         referee_rate = _referee_team_card_rate(referee, config)
@@ -187,11 +194,16 @@ def _team_event_expected(features: FixtureFeatureSet, event: str, config: dict[s
             (opponent_concedes, 0.18),
             (recent_value, 0.12),
             (feedback_value, 0.10),
+            (api_corner_value, 0.20),
             (referee_rate, 0.18),
         ),
         fallback=league_average,
     )
-    matches = _float(rate_profile.get("matches")) or _float(season_profile.get("matches_played")) or 0.0
+    matches = max(
+        _float(rate_profile.get("matches")) or 0.0,
+        _float(season_profile.get("matches_played")) or 0.0,
+        api_corner_matches,
+    )
     expected = _shrink(base, matches=matches, prior=league_average)
     return {"expected": round(_clamp(expected, 0.05, float(config["team_rate_ceiling"])), 4), "sources": tuple(sources)}
 
@@ -228,6 +240,18 @@ def _feedback_value(feedback: dict[str, Any], event: str) -> float | None:
     if not key:
         return None
     return _float(summary.get(key))
+
+
+def _api_football_corner_value(api_football: dict[str, Any], *, side: str, config: dict[str, Any]) -> tuple[float | None, float]:
+    corner_samples = api_football.get("corner_samples") if isinstance(api_football.get("corner_samples"), dict) else {}
+    bucket = corner_samples.get(side) if isinstance(corner_samples.get(side), dict) else {}
+    matches = _float(bucket.get("games")) or 0.0
+    if matches < 3:
+        return None, matches
+    value = _float(bucket.get("avg_for"))
+    if value is None or not _plausible_team_rate(value, config):
+        return None, matches
+    return value, matches
 
 
 def _referee_team_card_rate(referee: dict[str, Any], config: dict[str, Any]) -> float | None:

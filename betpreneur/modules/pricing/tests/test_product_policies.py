@@ -23,6 +23,7 @@ def _market(
     confidence=68,
     family="total_goals",
     quality="strong",
+    warnings=(),
 ):
     return MarketProbability(
         fixture_id=fixture_id,
@@ -31,6 +32,7 @@ def _market(
         calibrated_probability=calibrated,
         confidence_score=confidence,
         data_quality=quality,
+        warnings=warnings,
         explanation_facts=("Projected total goals: 2.9.",),
         diagnostics=PredictionDiagnostics(
             metadata={"market_family": family, "market_support_level": "strong"}
@@ -59,7 +61,7 @@ class ProductPolicyTests(SimpleTestCase):
             available_odds=1.7,
             edge=0.15,
             ev=0.258,
-            diagnostics=PredictionDiagnostics(metadata={"estimated_odds": False}),
+            diagnostics=PredictionDiagnostics(metadata={"estimated_odds": False, "odds_source": "statpal"}),
         )
         score = RecommendationScore(
             fixture_id="fixture-1",
@@ -85,7 +87,7 @@ class ProductPolicyTests(SimpleTestCase):
             available_odds=1.1,
             edge=-0.079,
             ev=-0.087,
-            diagnostics=PredictionDiagnostics(metadata={"estimated_odds": False}),
+            diagnostics=PredictionDiagnostics(metadata={"estimated_odds": False, "odds_source": "statpal"}),
         )
         score = RecommendationScore(
             fixture_id="fixture-1",
@@ -110,7 +112,7 @@ class ProductPolicyTests(SimpleTestCase):
             edge=0.008,
             ev=0.012,
             sample_size_penalty=10,
-            diagnostics=PredictionDiagnostics(metadata={"estimated_odds": False}),
+            diagnostics=PredictionDiagnostics(metadata={"estimated_odds": False, "odds_source": "statpal"}),
         )
         score = RecommendationScore(
             fixture_id="fixture-1",
@@ -135,7 +137,7 @@ class ProductPolicyTests(SimpleTestCase):
             available_odds=1.35,
             edge=0.09,
             ev=0.134,
-            diagnostics=PredictionDiagnostics(metadata={"estimated_odds": False}),
+            diagnostics=PredictionDiagnostics(metadata={"estimated_odds": False, "odds_source": "statpal"}),
         )
         score = RecommendationScore(
             fixture_id="fixture-1",
@@ -147,6 +149,87 @@ class ProductPolicyTests(SimpleTestCase):
 
         self.assertFalse(assessment.publishable)
         self.assertIn("market_publicly_paused", assessment.reasons)
+
+    def test_top_picks_policy_does_not_trust_statpal_summary_odds(self):
+        market = _market("Corners Over 7.5", calibrated=0.70, confidence=70, family="corners_total")
+        value = ValueAssessment(
+            fixture_id="fixture-1",
+            market="Corners Over 7.5",
+            calibrated_probability=0.70,
+            available_odds=7.0,
+            edge=0.55,
+            ev=3.9,
+            diagnostics=PredictionDiagnostics(
+                metadata={"estimated_odds": False, "odds_source": "statpal_summary"}
+            ),
+        )
+        score = RecommendationScore(
+            fixture_id="fixture-1",
+            market="Corners Over 7.5",
+            recommendation_score=82,
+            market_fit_score=75,
+        )
+
+        assessment = assess_top_picks_policy(market, value, score)
+
+        self.assertFalse(assessment.publishable)
+        self.assertIn("real_odds_required", assessment.reasons)
+
+    def test_top_picks_policy_blocks_api_football_disagreement(self):
+        market = _market(
+            "Over 2.5",
+            calibrated=0.73,
+            confidence=73,
+            warnings=("api_football_recent_scorelines_disagree",),
+        )
+        value = ValueAssessment(
+            fixture_id="fixture-1",
+            market="Over 2.5",
+            calibrated_probability=0.73,
+            available_odds=1.72,
+            edge=0.15,
+            ev=0.255,
+            diagnostics=PredictionDiagnostics(metadata={"estimated_odds": False, "odds_source": "statpal"}),
+        )
+        score = RecommendationScore(
+            fixture_id="fixture-1",
+            market="Over 2.5",
+            recommendation_score=82,
+        )
+
+        assessment = assess_top_picks_policy(market, value, score)
+
+        self.assertFalse(assessment.publishable)
+        self.assertIn("api_football_recent_scorelines_disagree", assessment.reasons)
+
+    def test_top_picks_policy_blocks_corners_without_api_football_corner_samples(self):
+        market = _market(
+            "Corners Over 7.5",
+            calibrated=0.72,
+            confidence=72,
+            family="corners_total",
+            warnings=("api_football_corner_samples_missing",),
+        )
+        value = ValueAssessment(
+            fixture_id="fixture-1",
+            market="Corners Over 7.5",
+            calibrated_probability=0.72,
+            available_odds=1.7,
+            edge=0.13,
+            ev=0.224,
+            diagnostics=PredictionDiagnostics(metadata={"estimated_odds": False, "odds_source": "statpal"}),
+        )
+        score = RecommendationScore(
+            fixture_id="fixture-1",
+            market="Corners Over 7.5",
+            recommendation_score=84,
+            market_fit_score=75,
+        )
+
+        assessment = assess_top_picks_policy(market, value, score)
+
+        self.assertFalse(assessment.publishable)
+        self.assertIn("api_football_corner_samples_missing", assessment.reasons)
 
     def test_top_picks_policy_does_not_make_weak_market_a_banker(self):
         market = _market("Over 1.5", calibrated=0.84, confidence=84, quality="limited")
@@ -168,7 +251,7 @@ class ProductPolicyTests(SimpleTestCase):
             available_odds=1.35,
             edge=0.09,
             ev=0.134,
-            diagnostics=PredictionDiagnostics(metadata={"estimated_odds": False}),
+            diagnostics=PredictionDiagnostics(metadata={"estimated_odds": False, "odds_source": "statpal"}),
         )
         score = RecommendationScore(
             fixture_id="fixture-1",
@@ -197,7 +280,7 @@ class ProductPolicyTests(SimpleTestCase):
             edge=0.089,
             ev=0.1655,
             sample_size_penalty=4,
-            diagnostics=PredictionDiagnostics(metadata={"estimated_odds": False}),
+            diagnostics=PredictionDiagnostics(metadata={"estimated_odds": False, "odds_source": "statpal"}),
         )
         score = RecommendationScore(
             fixture_id="fixture-1",

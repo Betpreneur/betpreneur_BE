@@ -40,6 +40,24 @@ WILD_CARD_MIN_VALUE_SCORE = 10.0
 WILD_CARD_STAKE_WARNING = "Higher-variance pick: use reduced stake sizing."
 SLIP_SUPPORTED_SCORE = 70.0
 SLIP_ALTERNATIVE_MIN_DELTA = 3.0
+TRUSTED_REAL_ODDS_SOURCES = frozenset({"sportybet", "bookmaker", "market", "real", "api_football", "statpal"})
+TOP_PICK_HARD_WARNING_FLAGS = frozenset(
+    {
+        "api_football_prediction_opinion_disagrees",
+        "api_football_recent_scorelines_disagree",
+        "api_football_team_statistics_disagree",
+        "api_football_corner_samples_missing",
+        "german_under_goals_market_blocked",
+    }
+)
+SLIP_REVIEW_HARD_WARNING_FLAGS = frozenset(
+    {
+        "api_football_prediction_opinion_disagrees",
+        "api_football_recent_scorelines_disagree",
+        "api_football_corner_samples_missing",
+        "german_under_goals_market_blocked",
+    }
+)
 
 
 def assess_all_games_policy(market_probability: MarketProbability) -> AllGamesPolicyAssessment:
@@ -64,14 +82,14 @@ def assess_top_picks_policy(
     """Top Picks decides exposure using balanced score plus real-price value."""
     reasons = []
     score = recommendation_score.recommendation_score
-    has_real_odds = bool(
-        value_assessment.available_odds
-        and not value_assessment.diagnostics.metadata.get("estimated_odds")
-    )
+    has_real_odds = _has_trusted_real_odds(value_assessment)
+    hard_warnings = _hard_warning_flags(market_probability, recommendation_score)
     if score is None or score < TOP_PICK_MIN_SCORE:
         reasons.append("below_exposure_score")
     if market_publicly_paused(market_probability.market):
         reasons.append("market_publicly_paused")
+    if hard_warnings:
+        reasons.extend(hard_warnings)
     if not has_real_odds:
         reasons.append("real_odds_required")
     if value_assessment.edge is None or value_assessment.edge < TOP_PICK_MIN_EDGE:
@@ -118,7 +136,13 @@ def assess_slip_review_policy(
     """Slip Review evaluates the user thesis and nearby alternatives."""
     user_score = user_pick.confidence_score
     paused = market_publicly_paused(user_pick.market)
-    supported = not paused and user_score is not None and user_score >= min_supported_score
+    hard_warnings = _slip_hard_warning_flags(user_pick)
+    supported = (
+        not paused
+        and not hard_warnings
+        and user_score is not None
+        and user_score >= min_supported_score
+    )
     alternative = (
         None
         if supported
@@ -129,6 +153,8 @@ def assess_slip_review_policy(
         reasons.append("user_pick_unmodelled")
     elif paused:
         reasons.append("market_publicly_paused")
+    elif hard_warnings:
+        reasons.extend(hard_warnings)
     elif supported:
         reasons.append("user_pick_supported")
     else:
@@ -229,10 +255,7 @@ def _technical_tier(
         recommendation_score.correlation_penalty, value_assessment.correlation_penalty
     )
     volatility = value_assessment.market_volatility_penalty
-    has_real_odds = bool(
-        value_assessment.available_odds
-        and not value_assessment.diagnostics.metadata.get("estimated_odds")
-    )
+    has_real_odds = _has_trusted_real_odds(value_assessment)
     weak_market = _has_weak_market_flag(market_probability, recommendation_score)
     stable_profile = (
         not weak_market
@@ -348,6 +371,28 @@ def _has_weak_market_flag(
             "corner_under_pressure_risk",
             "corner_over_margin_risk",
         })
+    )
+
+
+def _hard_warning_flags(
+    market_probability: MarketProbability,
+    recommendation_score: RecommendationScore,
+) -> tuple[str, ...]:
+    warnings = {str(flag) for flag in (*market_probability.warnings, *recommendation_score.warnings)}
+    return tuple(sorted(warnings & TOP_PICK_HARD_WARNING_FLAGS))
+
+
+def _slip_hard_warning_flags(market_probability: MarketProbability) -> tuple[str, ...]:
+    warnings = {str(flag) for flag in market_probability.warnings}
+    return tuple(sorted(warnings & SLIP_REVIEW_HARD_WARNING_FLAGS))
+
+
+def _has_trusted_real_odds(value_assessment: ValueAssessment) -> bool:
+    source = str(value_assessment.diagnostics.metadata.get("odds_source") or "").strip().lower()
+    return bool(
+        value_assessment.available_odds
+        and not value_assessment.diagnostics.metadata.get("estimated_odds")
+        and source in TRUSTED_REAL_ODDS_SOURCES
     )
 
 

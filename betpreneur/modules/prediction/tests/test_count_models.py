@@ -11,7 +11,15 @@ from betpreneur.modules.prediction.api import (
 
 
 class CountModelTests(SimpleTestCase):
-    def _features(self, *, home_corners=6.2, away_corners=4.4, home_cards=1.7, away_cards=2.3):
+    def _features(
+        self,
+        *,
+        home_corners=6.2,
+        away_corners=4.4,
+        home_cards=1.7,
+        away_cards=2.3,
+        api_football=None,
+    ):
         return FixtureFeatureSet(
             fixture_id="fixture-counts",
             fixture_name="Home FC vs Away FC",
@@ -78,6 +86,7 @@ class CountModelTests(SimpleTestCase):
                         }
                     },
                 },
+                "api_football": api_football or {},
             },
             diagnostics=PredictionDiagnostics(data_quality="medium"),
         )
@@ -135,6 +144,24 @@ class CountModelTests(SimpleTestCase):
             high.line_probabilities["corners"]["over_8_5"],
             low.line_probabilities["corners"]["over_8_5"],
         )
+
+    def test_api_football_corner_samples_raise_corner_projection(self):
+        without_api = count_distributions(self._features(home_corners=4.0, away_corners=4.0))
+        with_api = count_distributions(
+            self._features(
+                home_corners=4.0,
+                away_corners=4.0,
+                api_football={
+                    "corner_samples": {
+                        "home": {"games": 5, "avg_for": 7.2},
+                        "away": {"games": 5, "avg_for": 6.1},
+                    }
+                },
+            )
+        )
+
+        self.assertGreater(with_api.expected_total_corners, without_api.expected_total_corners)
+        self.assertIn("api_football_corner_samples", with_api.diagnostics.metadata["sources"]["corners"])
 
     def test_unrealistic_count_rates_are_ignored(self):
         output = count_distributions(self._features(home_corners=15.35, away_corners=13.05))

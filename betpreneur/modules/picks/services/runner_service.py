@@ -14,12 +14,14 @@ import json
 import logging
 import math
 import os
+import re
 from collections import defaultdict
-from datetime import timedelta
+from datetime import UTC, timedelta
 from difflib import SequenceMatcher
 
 from django.conf import settings
 from django.db import close_old_connections
+from django.utils.dateparse import parse_datetime
 from django.db.models import Count, Q
 from django.utils import timezone
 
@@ -62,6 +64,11 @@ from betpreneur.platform.config import temporary_env
 from betpreneur.platform.db.json import json_safe
 
 log = logging.getLogger(__name__)
+
+MARKET_LINE_ODDS_RE = re.compile(
+    r"^(?P<label>.*?)(?P<side>Over|Under)\s+(?P<line>\d+(?:\.\d+)?)$",
+    re.IGNORECASE,
+)
 
 
 class AlgoRunnerService:
@@ -290,15 +297,82 @@ class AlgoRunnerService:
                     + token_side_score(away_query, row.home_team_normalized or row.home_team)
                 ) / 2
                 orientation = "reversed" if reversed_match > direct else "direct"
-                score = max(direct, reversed_match) * 100
+                name_score = max(direct, reversed_match) * 100
             else:
                 orientation = "unknown"
-                score = SequenceMatcher(None, normalized_query, row.fixture_normalized or normalize_fixture_text(row.fixture)).ratio() * 100
+                name_score = SequenceMatcher(
+                    None,
+                    normalized_query,
+                    row.fixture_normalized or normalize_fixture_text(row.fixture),
+                ).ratio() * 100
+            score, diagnostics = self._api_enrichment_contextual_score(fixture, row, name_score)
+            if diagnostics.get("rejected"):
+                continue
             if score >= 82 and (best is None or score > best[0]):
-                best = (round(score, 2), orientation, row)
+                best = (round(score, 2), orientation, row, diagnostics)
         return best
 
-    def _merge_api_football_enrichment(self, fixture, api_row, *, score=0, orientation="unknown"):
+    def _api_enrichment_contextual_score(self, fixture, row, name_score):
+        diagnostics = {"name_score": round(name_score, 2)}
+        score = float(name_score or 0)
+
+        kickoff_delta = self._api_enrichment_kickoff_delta_minutes(fixture, row)
+        if kickoff_delta is not None:
+            diagnostics["kickoff_delta_minutes"] = kickoff_delta
+            if kickoff_delta > 180:
+                diagnostics["rejected"] = "kickoff_mismatch"
+                return score, diagnostics
+            if kickoff_delta <= 30:
+                score += 6
+            elif kickoff_delta <= 90:
+                score += 3
+            elif kickoff_delta > 120:
+                score -= 8
+
+        country_match = self._api_enrichment_text_match(fixture.get("country"), row.country)
+        if country_match is not None:
+            diagnostics["country_match"] = country_match
+            score += 4 if country_match else -10
+
+        league_match = self._api_enrichment_text_match(
+            fixture.get("league") or fixture.get("competition"),
+            row.league,
+        )
+        if league_match is not None:
+            diagnostics["league_match"] = league_match
+            score += 3 if league_match else -6
+
+        diagnostics["score"] = round(score, 2)
+        return score, diagnostics
+
+    def _api_enrichment_kickoff_delta_minutes(self, fixture, row):
+        fixture_time = self._api_enrichment_datetime(fixture.get("kickoff_utc") or fixture.get("kickoff"))
+        row_time = self._api_enrichment_datetime(row.kickoff_utc or row.kickoff)
+        if not fixture_time or not row_time:
+            return None
+        return round(abs((fixture_time - row_time).total_seconds()) / 60, 2)
+
+    def _api_enrichment_datetime(self, value):
+        if not value:
+            return None
+        if hasattr(value, "date") and hasattr(value, "tzinfo"):
+            parsed = value
+        else:
+            parsed = parse_datetime(str(value))
+        if not parsed:
+            return None
+        if timezone.is_naive(parsed):
+            parsed = timezone.make_aware(parsed, UTC)
+        return parsed
+
+    def _api_enrichment_text_match(self, left, right):
+        left_norm = normalize_fixture_text(left or "")
+        right_norm = normalize_fixture_text(right or "")
+        if not left_norm or not right_norm:
+            return None
+        return token_side_score(left_norm, right_norm) >= 0.74
+
+    def _merge_api_football_enrichment(self, fixture, api_row, *, score=0, orientation="unknown", diagnostics=None):
         item = dict(fixture or {})
         if not api_row:
             item.setdefault("provider_merge", {})["api_football"] = {"matched": False}
@@ -337,6 +411,7 @@ class AlgoRunnerService:
             "away_team_id": str(api_away_id or ""),
             "score": score,
             "orientation": orientation,
+            "diagnostics": diagnostics or {},
             "used_for": ["metadata", "odds", "team_form", "prediction_context"],
         }
         provider_merge["primary"] = "statpal"
@@ -351,8 +426,16 @@ class AlgoRunnerService:
         for fixture in fixtures or []:
             match = self._api_enrichment_match(fixture, api_rows)
             if match:
-                score, orientation, row = match
-                enriched.append(self._merge_api_football_enrichment(fixture, row, score=score, orientation=orientation))
+                score, orientation, row, diagnostics = match
+                enriched.append(
+                    self._merge_api_football_enrichment(
+                        fixture,
+                        row,
+                        score=score,
+                        orientation=orientation,
+                        diagnostics=diagnostics,
+                    )
+                )
                 matched_api_match_ids.add(str(row.match_id or ""))
                 matched += 1
             else:
@@ -397,8 +480,14 @@ class AlgoRunnerService:
                 api_rows = self._api_enrichment_rows(target_date)
             match = self._api_enrichment_match(item, api_rows)
             if match:
-                score, orientation, row = match
-                item = self._merge_api_football_enrichment(item, row, score=score, orientation=orientation)
+                score, orientation, row, diagnostics = match
+                item = self._merge_api_football_enrichment(
+                    item,
+                    row,
+                    score=score,
+                    orientation=orientation,
+                    diagnostics=diagnostics,
+                )
             else:
                 item = self._merge_api_football_enrichment(item, None)
             return item
@@ -575,6 +664,9 @@ class AlgoRunnerService:
         enriched = dict(fixture)
         enriched["statpal_refresh"] = refresh
         enriched["statpal_context"] = context
+        api_football_context = self._api_football_phase1_context(enriched)
+        if api_football_context:
+            enriched["api_football_context"] = api_football_context
         enriched["team_news"] = self._team_news_for_prediction_fixture(enriched, context)
         return enriched
 
@@ -607,6 +699,115 @@ class AlgoRunnerService:
             fallback["flags"] = sorted(dict.fromkeys(fallback.get("flags") or []))
             return fallback
         return team_news
+
+    def _api_football_phase1_context(self, fixture):
+        if not self._runner_env_bool("ALGO_API_FOOTBALL_CONTEXT_ENABLED", False):
+            return {}
+
+        from betpreneur.modules.catalog.api import legacy_runner as algo_runner
+
+        aps_id = self._text(fixture.get("aps_id") or fixture.get("api_football_fixture_id"))
+        league_id = self._text(fixture.get("api_football_league_id") or fixture.get("code"))
+        season = self._text(fixture.get("season"))
+        home_team_id = self._text(fixture.get("api_football_home_team_id") or fixture.get("hid"))
+        away_team_id = self._text(fixture.get("api_football_away_team_id") or fixture.get("aid"))
+        if not any((aps_id, league_id and season and home_team_id, league_id and season and away_team_id)):
+            return {"available": False, "snapshots": {}, "errors": ["api_football_identity_missing"]}
+
+        snapshots = {}
+        errors = []
+
+        def call(name, path, params, *, timeout=15):
+            try:
+                with temporary_env(self._runner_env()):
+                    payload = algo_runner.aps_get(path, params, timeout=timeout)
+                snapshots[name] = {
+                    "available": bool(payload),
+                    "source_endpoint": path,
+                    "parameters": params,
+                    "payload": payload,
+                }
+                return payload
+            except Exception as exc:
+                errors.append({"snapshot": name, "error": str(exc)[:300]})
+                snapshots[name] = {
+                    "available": False,
+                    "source_endpoint": path,
+                    "parameters": params,
+                    "error": str(exc)[:300],
+                }
+                return []
+
+        if aps_id:
+            with temporary_env(self._runner_env()):
+                prediction = algo_runner.fetch_prediction_data(aps_id)
+            snapshots["prediction"] = {
+                "available": bool(prediction),
+                "source_endpoint": "/predictions",
+                "parameters": {"fixture": aps_id},
+                "payload": prediction or {},
+            }
+
+        if league_id and season:
+            if home_team_id:
+                payload = call(
+                    "team_statistics_home",
+                    "/teams/statistics",
+                    {"league": league_id, "season": season, "team": home_team_id},
+                )
+                if payload:
+                    snapshots["team_statistics_home"]["payload"] = payload[0] if isinstance(payload, list) else payload
+            if away_team_id:
+                payload = call(
+                    "team_statistics_away",
+                    "/teams/statistics",
+                    {"league": league_id, "season": season, "team": away_team_id},
+                )
+                if payload:
+                    snapshots["team_statistics_away"]["payload"] = payload[0] if isinstance(payload, list) else payload
+
+        recent_limit = max(0, self._runner_env_int("ALGO_API_FOOTBALL_CONTEXT_RECENT_FIXTURES", 5))
+        include_stats = self._runner_env_bool("ALGO_API_FOOTBALL_CONTEXT_FIXTURE_STATS_ENABLED", False)
+        if recent_limit:
+            for side, team_id in (("home", home_team_id), ("away", away_team_id)):
+                if not team_id:
+                    continue
+                recent = call(
+                    f"recent_fixtures_{side}",
+                    "/fixtures",
+                    {"team": team_id, "last": recent_limit, "status": "FT-AET-PEN"},
+                )
+                fixtures = recent if isinstance(recent, list) else []
+                snapshots[f"recent_fixtures_{side}"]["payload"] = fixtures[:recent_limit]
+                if include_stats:
+                    stats_samples = []
+                    for row in fixtures[:recent_limit]:
+                        fixture_id = self._text(((row.get("fixture") or {}).get("id") if isinstance(row, dict) else ""))
+                        if not fixture_id:
+                            continue
+                        stats = algo_runner.fetch_fixture_statistics(fixture_id)
+                        stats_samples.append(
+                            {
+                                "fixture_id": fixture_id,
+                                "fixture": f"{((row.get('teams') or {}).get('home') or {}).get('name', '')} vs {((row.get('teams') or {}).get('away') or {}).get('name', '')}",
+                                "date": ((row.get("fixture") or {}).get("date") if isinstance(row, dict) else ""),
+                                "corner_kicks_for": algo_runner._team_corners_from_stats(stats, int(team_id)) if str(team_id).isdigit() else None,
+                                "payload": stats,
+                            }
+                        )
+                    snapshots[f"fixture_statistics_{side}"] = {
+                        "available": bool(stats_samples),
+                        "source_endpoint": "/fixtures/statistics",
+                        "parameters": {"source": f"recent_fixtures_{side}", "limit": recent_limit},
+                        "payload": stats_samples,
+                    }
+
+        return {
+            "available": any(item.get("available") for item in snapshots.values()),
+            "provider": "api_football",
+            "snapshots": json_safe(snapshots),
+            "errors": errors,
+        }
 
     def _persist_selected_picks(self, algo_run: AlgoRun, result):
         selected_picks = result.get("selected_picks") or []
@@ -885,17 +1086,21 @@ class AlgoRunnerService:
         if odd <= 1:
             return
         odds.setdefault("_samples", {}).setdefault(key, []).append(odd)
+        odds.setdefault("_sample_sources", {}).setdefault(key, set()).add(str(source or ""))
         current = odds.get(key)
         if current is None or odd > float(current or 0):
             odds[key] = odd
 
     def _finalize_prediction_odds_meta(self, odds, *, source):
         samples = odds.pop("_samples", {})
+        sample_sources = odds.pop("_sample_sources", {})
         meta = {}
         for key, values in samples.items():
             values = [float(value) for value in values if value]
             if not values:
                 continue
+            sources = {item for item in sample_sources.get(key, set()) if item}
+            resolved_source = next(iter(sources)) if len(sources) == 1 else source
             average = sum(values) / len(values)
             best = max(values)
             worst = min(values)
@@ -906,8 +1111,55 @@ class AlgoRunnerService:
                 "average": round(average, 3),
                 "spread_pct": round(((best - worst) / average) * 100, 1) if average else 0.0,
                 "best_vs_average_pct": round(((best - average) / average) * 100, 1) if average else 0.0,
-                "source": source,
+                "source": resolved_source,
             }
+        if meta:
+            odds["_meta"] = meta
+        return odds
+
+    def _sanitize_prediction_odds_ladders(self, odds):
+        if not isinstance(odds, dict):
+            return odds
+        meta = odds.get("_meta") or {}
+        ladders = defaultdict(list)
+        for key, value in odds.items():
+            if str(key).startswith("_"):
+                continue
+            match = MARKET_LINE_ODDS_RE.match(str(key).strip())
+            if not match:
+                continue
+            try:
+                odd = float(value)
+                line = float(match.group("line"))
+            except (TypeError, ValueError):
+                continue
+            label = normalize_fixture_text(match.group("label") or "match goals")
+            side = normalize_fixture_text(match.group("side"))
+            ladders[(label, side)].append((line, odd, key))
+
+        for (_label, side), entries in ladders.items():
+            if len(entries) < 3:
+                continue
+            entries.sort(key=lambda item: item[0])
+            odds_values = [odd for _line, odd, _key in entries]
+            if side == "over":
+                inconsistent = any(
+                    odds_values[index] + 0.05 < odds_values[index - 1]
+                    for index in range(1, len(odds_values))
+                )
+            else:
+                inconsistent = any(
+                    odds_values[index] > odds_values[index - 1] + 0.05
+                    for index in range(1, len(odds_values))
+                )
+            if not inconsistent:
+                continue
+            for _line, _odd, key in entries:
+                key_meta = dict(meta.get(key) or {})
+                key_meta["source"] = f"{key_meta.get('source') or 'statpal'}_inconsistent"
+                key_meta["odds_ladder_warning"] = "line_odds_order_inconsistent"
+                meta[key] = key_meta
+
         if meta:
             odds["_meta"] = meta
         return odds
@@ -924,11 +1176,11 @@ class AlgoRunnerService:
         prematch = statpal_context.get("prematch_odds") or {}
         return prematch if isinstance(prematch, dict) else {}
 
-    def _remember_statpal_summary_odds(self, odds, prematch):
+    def _remember_statpal_summary_odds(self, odds, prematch, *, source="statpal_summary"):
         odds_map = prematch.get("odds_map") if isinstance(prematch, dict) else {}
         if isinstance(odds_map, dict):
             for odds_key, value in odds_map.items():
-                self._remember_prediction_odd(odds, str(odds_key), value, source="statpal")
+                self._remember_prediction_odd(odds, str(odds_key), value, source=source)
 
         mapping = {
             "home_odds": "hw",
@@ -949,7 +1201,7 @@ class AlgoRunnerService:
             "double_chance_x2_odds": "x2",
         }
         for source_key, odds_key in mapping.items():
-            self._remember_prediction_odd(odds, odds_key, prematch.get(source_key), source="statpal")
+            self._remember_prediction_odd(odds, odds_key, prematch.get(source_key), source=source)
 
         alias_mapping = {
             "home": "hw",
@@ -968,7 +1220,7 @@ class AlgoRunnerService:
             "x2": "x2",
         }
         for source_key, odds_key in alias_mapping.items():
-            self._remember_prediction_odd(odds, odds_key, prematch.get(source_key), source="statpal")
+            self._remember_prediction_odd(odds, odds_key, prematch.get(source_key), source=source)
 
     def _remember_statpal_market_odds(self, odds, payload):
         if not isinstance(payload, dict):
@@ -1108,9 +1360,13 @@ class AlgoRunnerService:
     def _statpal_prediction_odds(self, fixture):
         prematch = self._statpal_prematch_odds(fixture)
         odds = {}
-        self._remember_statpal_summary_odds(odds, prematch)
+        has_market_payload = bool(isinstance(prematch.get("markets"), list) and prematch.get("markets"))
+        if not has_market_payload:
+            self._remember_statpal_summary_odds(odds, prematch)
         self._remember_statpal_market_odds(odds, prematch)
-        return self._finalize_prediction_odds_meta(odds, source="statpal")
+        return self._sanitize_prediction_odds_ladders(
+            self._finalize_prediction_odds_meta(odds, source="statpal")
+        )
 
     def _daily_prediction_real_odds(self, fixture):
         real_odds = {}
@@ -1626,6 +1882,8 @@ class AlgoRunnerService:
         fixture_context = dict(source_payload.get("fixture_context") or {})
         if source_payload.get("statpal_context"):
             fixture_context["statpal"] = source_payload.get("statpal_context") or {}
+        if source_payload.get("api_football_context"):
+            fixture_context["api_football"] = source_payload.get("api_football_context") or {}
         fixture_context["prediction_features"] = {
             "league_key": prediction.features.league_key if prediction.features else "",
             "season": prediction.features.season if prediction.features else "",

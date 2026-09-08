@@ -208,6 +208,62 @@ class MarketProbabilityEngineTests(SimpleTestCase):
         )
         self.assertIn("Recent scoreline Over 2.5 rate: 80.0%.", probability.supporting_facts)
 
+    def test_api_football_goal_context_adjusts_total_goals_probability(self):
+        prediction = self._prediction()
+        features = FixtureFeatureSet(
+            fixture_id=prediction.features.fixture_id,
+            fixture_name=prediction.features.fixture_name,
+            league_key=prediction.features.league_key,
+            season=prediction.features.season,
+            home_team=prediction.features.home_team,
+            away_team=prediction.features.away_team,
+            features={
+                **prediction.features.features,
+                "api_football": {
+                    "available": True,
+                    "prediction_opinion": {
+                        "available": True,
+                        "under_over": "+2.5",
+                        "percent": {"home": 45.0, "draw": 25.0, "away": 30.0},
+                    },
+                    "team_statistics": {
+                        "home": {
+                            "available": True,
+                            "goals_for": {"average": {"total": 2.0}},
+                        },
+                        "away": {
+                            "available": True,
+                            "goals_for": {"average": {"total": 1.7}},
+                        },
+                    },
+                    "recent_scorelines": {
+                        "combined": {
+                            "games": 10,
+                            "over_2_5_rate": 80.0,
+                            "over_3_5_rate": 50.0,
+                            "btts_rate": 70.0,
+                        }
+                    },
+                },
+            },
+            diagnostics=prediction.features.diagnostics,
+        )
+        enriched = FixturePrediction(
+            fixture_id=prediction.fixture_id,
+            fixture_name=prediction.fixture_name,
+            features=features,
+            goals=prediction.goals,
+            counts=prediction.counts,
+            result=prediction.result,
+            diagnostics=prediction.diagnostics,
+        )
+
+        probability = evaluate_market_probability(enriched, "Over 2.5")
+
+        self.assertGreater(probability.raw_probability, 0.48)
+        self.assertIn("API-Football prediction opinion agrees with Over 2.5.", probability.supporting_facts)
+        self.assertIn("API-Football recent scorelines support Over 2.5 at 80% across 10 games.", probability.supporting_facts)
+
     def test_result_market_uses_elo(self):
         probability = evaluate_market_probability(self._prediction(), "Home Win")
 

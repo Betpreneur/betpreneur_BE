@@ -94,6 +94,7 @@ def build_fixture_features(fixture=None, *, fixture_id: str = "") -> FixtureFeat
     snapshots = _snapshot_payloads(fixture_obj=fixture_obj, fixture_id=resolved_id)
     referee = _referee_context(fixture_payload, snapshots)
     league_features = _league_features(intelligence, goal_model=goal_model)
+    api_football_features = _api_football_features(fixture_payload)
     scoreline_profile = _scoreline_profile_payload(
         home=home_features,
         away=away_features,
@@ -139,6 +140,7 @@ def build_fixture_features(fixture=None, *, fixture_id: str = "") -> FixtureFeat
             "data_freshness": freshness,
             "provider_quality": _provider_quality(intelligence, freshness),
             "referee": referee,
+            "api_football": api_football_features,
             "scoreline_profile": scoreline_profile,
             "prediction_feedback": _prediction_feedback_payload(
                 home_team=str(fixture_payload.get("home_team") or ""),
@@ -343,6 +345,310 @@ def _scoreline_profile_payload(*, home: dict[str, Any], away: dict[str, Any], sn
     }
 
 
+def _api_football_features(fixture_payload: dict[str, Any]) -> dict[str, Any]:
+    context = fixture_payload.get("api_football_context")
+    if not isinstance(context, dict):
+        fixture_context = fixture_payload.get("fixture_context") if isinstance(fixture_payload.get("fixture_context"), dict) else {}
+        context = (fixture_context.get("api_football") or {})
+    snapshots = context.get("snapshots") if isinstance(context, dict) else {}
+    if not isinstance(snapshots, dict) or not snapshots:
+        return {"available": False, "snapshots": {}}
+
+    home_team_id = str(fixture_payload.get("api_football_home_team_id") or fixture_payload.get("hid") or "").strip()
+    away_team_id = str(fixture_payload.get("api_football_away_team_id") or fixture_payload.get("aid") or "").strip()
+    prediction = _api_snapshot_payload(snapshots, "prediction")
+    home_stats = _api_snapshot_payload(snapshots, "team_statistics_home")
+    away_stats = _api_snapshot_payload(snapshots, "team_statistics_away")
+    home_recent = _api_recent_scorelines(
+        _api_snapshot_payload(snapshots, "recent_fixtures_home"),
+        team_id=home_team_id,
+        source="api_football_home_recent",
+    )
+    away_recent = _api_recent_scorelines(
+        _api_snapshot_payload(snapshots, "recent_fixtures_away"),
+        team_id=away_team_id,
+        source="api_football_away_recent",
+    )
+    h2h_rows = _api_prediction_h2h_scorelines(prediction)
+    corner_samples = {
+        "home": _api_corner_samples(_api_snapshot_payload(snapshots, "fixture_statistics_home"), team_id=home_team_id),
+        "away": _api_corner_samples(_api_snapshot_payload(snapshots, "fixture_statistics_away"), team_id=away_team_id),
+    }
+
+    available_snapshots = sorted(
+        key for key, value in snapshots.items() if isinstance(value, dict) and value.get("available")
+    )
+    return {
+        "available": bool(available_snapshots),
+        "available_snapshots": available_snapshots,
+        "prediction_opinion": _api_prediction_opinion(prediction),
+        "team_statistics": {
+            "home": _api_team_statistics_summary(home_stats),
+            "away": _api_team_statistics_summary(away_stats),
+        },
+        "recent_scorelines": {
+            "home": _scoreline_profile(home_recent),
+            "away": _scoreline_profile(away_recent),
+            "combined": _scoreline_profile([*home_recent, *away_recent]),
+        },
+        "head_to_head": _scoreline_profile(h2h_rows),
+        "corner_samples": {
+            "home": _corner_sample_summary(corner_samples["home"]),
+            "away": _corner_sample_summary(corner_samples["away"]),
+            "combined": _corner_sample_summary([*corner_samples["home"], *corner_samples["away"]]),
+        },
+    }
+
+
+def _api_snapshot_payload(snapshots: dict[str, Any], key: str):
+    item = snapshots.get(key) if isinstance(snapshots, dict) else {}
+    payload = item.get("payload") if isinstance(item, dict) else item
+    if isinstance(payload, list) and len(payload) == 1 and key.startswith("team_statistics"):
+        return payload[0]
+    return payload or {}
+
+
+def _api_prediction_opinion(payload: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        return {"available": False}
+    predictions = payload.get("predictions") if isinstance(payload.get("predictions"), dict) else {}
+    percent = predictions.get("percent") if isinstance(predictions.get("percent"), dict) else {}
+    winner = predictions.get("winner") if isinstance(predictions.get("winner"), dict) else {}
+    comparison = payload.get("comparison") if isinstance(payload.get("comparison"), dict) else {}
+    return {
+        "available": bool(predictions),
+        "winner": {
+            "id": winner.get("id"),
+            "name": winner.get("name") or "",
+            "comment": winner.get("comment") or "",
+        },
+        "win_or_draw": predictions.get("win_or_draw"),
+        "under_over": predictions.get("under_over") or "",
+        "team_goals": predictions.get("goals") if isinstance(predictions.get("goals"), dict) else {},
+        "advice": predictions.get("advice") or "",
+        "percent": {
+            "home": _percent_or_none(percent.get("home")),
+            "draw": _percent_or_none(percent.get("draw")),
+            "away": _percent_or_none(percent.get("away")),
+        },
+        "comparison": {
+            key: {
+                "home": _percent_or_none((value or {}).get("home")) if isinstance(value, dict) else None,
+                "away": _percent_or_none((value or {}).get("away")) if isinstance(value, dict) else None,
+            }
+            for key, value in comparison.items()
+            if isinstance(value, dict)
+        },
+    }
+
+
+def _api_team_statistics_summary(payload: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(payload, dict) or not payload:
+        return {"available": False}
+    fixtures = payload.get("fixtures") if isinstance(payload.get("fixtures"), dict) else {}
+    goals = payload.get("goals") if isinstance(payload.get("goals"), dict) else {}
+    played = fixtures.get("played") if isinstance(fixtures.get("played"), dict) else {}
+    wins = fixtures.get("wins") if isinstance(fixtures.get("wins"), dict) else {}
+    draws = fixtures.get("draws") if isinstance(fixtures.get("draws"), dict) else {}
+    losses = fixtures.get("loses") if isinstance(fixtures.get("loses"), dict) else {}
+    goals_for = goals.get("for") if isinstance(goals.get("for"), dict) else {}
+    goals_against = goals.get("against") if isinstance(goals.get("against"), dict) else {}
+    total_played = _int_or_none(played.get("total")) or 0
+    return {
+        "available": True,
+        "team": payload.get("team") if isinstance(payload.get("team"), dict) else {},
+        "league": payload.get("league") if isinstance(payload.get("league"), dict) else {},
+        "form": payload.get("form") or "",
+        "record": {
+            "played": _side_totals(played),
+            "wins": _side_totals(wins),
+            "draws": _side_totals(draws),
+            "losses": _side_totals(losses),
+        },
+        "goals_for": _goal_totals(goals_for),
+        "goals_against": _goal_totals(goals_against),
+        "goal_line_counts": {
+            "for": _goal_line_counts(goals_for.get("under_over") if isinstance(goals_for.get("under_over"), dict) else {}),
+            "against": _goal_line_counts(goals_against.get("under_over") if isinstance(goals_against.get("under_over"), dict) else {}),
+        },
+        "clean_sheet_rate": _rate(_int_or_none((payload.get("clean_sheet") or {}).get("total")) or 0, total_played),
+        "failed_to_score_rate": _rate(_int_or_none((payload.get("failed_to_score") or {}).get("total")) or 0, total_played),
+        "lineups": [
+            {"formation": item.get("formation") or "", "played": _int_or_none(item.get("played")) or 0}
+            for item in (payload.get("lineups") if isinstance(payload.get("lineups"), list) else [])[:5]
+            if isinstance(item, dict)
+        ],
+        "cards": payload.get("cards") if isinstance(payload.get("cards"), dict) else {},
+    }
+
+
+def _side_totals(payload: dict[str, Any]) -> dict[str, int | None]:
+    return {
+        "home": _int_or_none(payload.get("home")),
+        "away": _int_or_none(payload.get("away")),
+        "total": _int_or_none(payload.get("total")),
+    }
+
+
+def _goal_totals(payload: dict[str, Any]) -> dict[str, Any]:
+    total = payload.get("total") if isinstance(payload.get("total"), dict) else {}
+    average = payload.get("average") if isinstance(payload.get("average"), dict) else {}
+    return {
+        "total": _side_totals(total),
+        "average": {
+            "home": _float_or_none(average.get("home")),
+            "away": _float_or_none(average.get("away")),
+            "total": _float_or_none(average.get("total")),
+        },
+    }
+
+
+def _goal_line_counts(payload: dict[str, Any]) -> dict[str, dict[str, int | None]]:
+    return {
+        str(line): {
+            "over": _int_or_none((value or {}).get("over")) if isinstance(value, dict) else None,
+            "under": _int_or_none((value or {}).get("under")) if isinstance(value, dict) else None,
+        }
+        for line, value in payload.items()
+    }
+
+
+def _api_recent_scorelines(payload: Any, *, team_id: str, source: str) -> list[dict[str, Any]]:
+    rows = payload if isinstance(payload, list) else []
+    parsed = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        fixture = row.get("fixture") if isinstance(row.get("fixture"), dict) else {}
+        teams = row.get("teams") if isinstance(row.get("teams"), dict) else {}
+        goals = row.get("goals") if isinstance(row.get("goals"), dict) else {}
+        home = teams.get("home") if isinstance(teams.get("home"), dict) else {}
+        away = teams.get("away") if isinstance(teams.get("away"), dict) else {}
+        home_goals = _int_or_none(goals.get("home"))
+        away_goals = _int_or_none(goals.get("away"))
+        if home_goals is None or away_goals is None:
+            continue
+        is_home = str(home.get("id") or "") == str(team_id)
+        is_away = str(away.get("id") or "") == str(team_id)
+        if not is_home and not is_away:
+            continue
+        goals_for = home_goals if is_home else away_goals
+        goals_against = away_goals if is_home else home_goals
+        opponent = away if is_home else home
+        team = home if is_home else away
+        parsed.append({
+            "match_id": fixture.get("id") or "",
+            "match_date": _iso(fixture.get("date")),
+            "fixture": f"{home.get('name') or ''} vs {away.get('name') or ''}".strip(),
+            "opponent": opponent.get("name") or "",
+            "source": source,
+            "team_name": team.get("name") or "",
+            "opponent_name": opponent.get("name") or "",
+            "result": "W" if goals_for > goals_against else "D" if goals_for == goals_against else "L",
+            "goals_for": goals_for,
+            "goals_against": goals_against,
+            "scoreline": f"{goals_for}-{goals_against}",
+            "total_goals": goals_for + goals_against,
+        })
+    return parsed
+
+
+def _api_prediction_h2h_scorelines(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    if not isinstance(payload, dict):
+        return []
+    rows = payload.get("h2h") if isinstance(payload.get("h2h"), list) else []
+    parsed = []
+    for row in rows[:10]:
+        if not isinstance(row, dict):
+            continue
+        goals = row.get("goals") if isinstance(row.get("goals"), dict) else {}
+        teams = row.get("teams") if isinstance(row.get("teams"), dict) else {}
+        home = teams.get("home") if isinstance(teams.get("home"), dict) else {}
+        away = teams.get("away") if isinstance(teams.get("away"), dict) else {}
+        home_goals = _int_or_none(goals.get("home"))
+        away_goals = _int_or_none(goals.get("away"))
+        if home_goals is None or away_goals is None:
+            continue
+        fixture = row.get("fixture") if isinstance(row.get("fixture"), dict) else {}
+        parsed.append({
+            "match_id": fixture.get("id") or "",
+            "match_date": _iso(fixture.get("date")),
+            "fixture": f"{home.get('name') or ''} vs {away.get('name') or ''}".strip(),
+            "opponent": away.get("name") or "",
+            "source": "api_football_prediction_h2h",
+            "team_name": home.get("name") or "",
+            "opponent_name": away.get("name") or "",
+            "result": "W" if home_goals > away_goals else "D" if home_goals == away_goals else "L",
+            "goals_for": home_goals,
+            "goals_against": away_goals,
+            "scoreline": f"{home_goals}-{away_goals}",
+            "total_goals": home_goals + away_goals,
+        })
+    return parsed
+
+
+def _api_corner_samples(payload: Any, *, team_id: str) -> list[dict[str, Any]]:
+    rows = payload if isinstance(payload, list) else []
+    samples = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        own = _float_or_none(row.get("corner_kicks_for"))
+        stats = row.get("payload") if isinstance(row.get("payload"), list) else []
+        total = 0.0
+        for stat_row in stats:
+            statistics = stat_row.get("statistics") if isinstance(stat_row, dict) else []
+            total += _api_stat_value(statistics, "Corner Kicks") or 0.0
+        if own is None:
+            own = _api_team_stat_value(stats, team_id=team_id, stat_type="Corner Kicks")
+        against = max(total - own, 0.0) if own is not None and total else None
+        if own is None:
+            continue
+        samples.append({
+            "fixture_id": row.get("fixture_id") or "",
+            "fixture": row.get("fixture") or "",
+            "date": _iso(row.get("date")),
+            "corners_for": own,
+            "corners_against": against,
+            "total_corners": total or None,
+        })
+    return samples
+
+
+def _api_team_stat_value(stats: list[Any], *, team_id: str, stat_type: str) -> float | None:
+    for row in stats or []:
+        if not isinstance(row, dict):
+            continue
+        team = row.get("team") if isinstance(row.get("team"), dict) else {}
+        if str(team.get("id") or "") != str(team_id):
+            continue
+        return _api_stat_value(row.get("statistics") if isinstance(row.get("statistics"), list) else [], stat_type)
+    return None
+
+
+def _api_stat_value(statistics: list[Any], stat_type: str) -> float | None:
+    for item in statistics or []:
+        if not isinstance(item, dict):
+            continue
+        if str(item.get("type") or "").strip().lower() != stat_type.strip().lower():
+            continue
+        return _float_or_none(item.get("value"))
+    return None
+
+
+def _corner_sample_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    clean = [row for row in rows if isinstance(row, dict)]
+    if not clean:
+        return {"games": 0, "samples": [], "avg_for": None, "avg_against": None, "avg_total": None}
+    return {
+        "games": len(clean),
+        "samples": clean[:10],
+        "avg_for": _average(row.get("corners_for") for row in clean),
+        "avg_against": _average(row.get("corners_against") for row in clean),
+        "avg_total": _average(row.get("total_corners") for row in clean),
+    }
+
+
 def _recent_fixture_rows(
     recent_form: dict[str, Any],
     *,
@@ -484,6 +790,14 @@ def _int_or_none(value) -> int | None:
         return int(float(value))
     except (TypeError, ValueError):
         return None
+
+
+def _percent_or_none(value) -> float | None:
+    if value in (None, ""):
+        return None
+    if isinstance(value, str):
+        value = value.strip().rstrip("%")
+    return _float_or_none(value)
 
 
 def _fixture_name(fixture: dict[str, Any]) -> str:

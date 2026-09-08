@@ -101,3 +101,82 @@ class PublicReasoningTests(SimpleTestCase):
             game["analysis"]["key_points"],
         )
         self.assertEqual(game["recent_form"]["home"]["scorelines"][0]["scoreline"], "2-2")
+
+    def test_public_game_detail_exposes_clean_phase5_analysis_shape(self):
+        payload = public_game_detail_payload(
+            {
+                "date": "2026-09-08",
+                "published": True,
+                "run_id": 388,
+                "posted_at": "2026-09-07T23:05:00Z",
+                "game": {
+                    "match_id": "statpal:2026090826111",
+                    "fixture": "Lille vs Betis",
+                    "home_team": "Lille",
+                    "away_team": "Betis",
+                    "top_market": {
+                        "market": "Corners Over 7.5",
+                        "meaning": "Match to finish with more than 7.5 total corners",
+                        "confidence": 70,
+                        "odds": 1.9,
+                        "odds_source": "statpal",
+                        "analysis_summary": "Corners Over 7.5 has 70% calibrated model confidence.",
+                        "positive_evidence": [
+                            "Projected corners: 10.24.",
+                            "Home team averages 5.79 corners.",
+                            "Away team averages 4.45 corners.",
+                            "API-Football recent scorelines support Over 2.5 at 70% across 10 games.",
+                            "Stored league profile: 58.0% hit rate for Corners Over 7.5 across 120 matches.",
+                            "Model fair odds: 1.25.",
+                        ],
+                        "risk_evidence": ["Projected lineup data is not available yet."],
+                        "insights": {"data_quality": "medium"},
+                    },
+                    "fixture_context": {
+                        "statpal": {"available": True},
+                        "api_football": {"available": True},
+                        "prediction_features": {
+                            "api_football": {
+                                "available": True,
+                                "available_snapshots": [
+                                    "prediction",
+                                    "team_statistics_home",
+                                    "team_statistics_away",
+                                    "recent_fixtures_home",
+                                    "recent_fixtures_away",
+                                    "fixture_statistics_home",
+                                    "fixture_statistics_away",
+                                ],
+                                "corner_samples": {
+                                    "combined": {
+                                        "games": 10,
+                                        "avg_for": 5.4,
+                                        "avg_against": 4.7,
+                                        "avg_total": 10.1,
+                                    }
+                                },
+                            }
+                        },
+                    },
+                    "corner_profile": {
+                        "data_quality": "medium",
+                        "expected_total": 10.24,
+                        "sources": ["api_football_corner_samples", "team_rate_profile"],
+                        "warnings": [],
+                        "home": {"avg_for": 5.79, "expected_for": 5.79},
+                        "away": {"avg_for": 4.45, "expected_for": 4.45},
+                    },
+                },
+            }
+        )
+
+        game = payload["game"]
+        self.assertNotIn("fixture_context", game)
+        self.assertIn("projection", game["analysis"]["evidence"])
+        self.assertIn("provider_context", game["analysis"]["evidence"])
+        self.assertEqual(game["analysis"]["data_sources"][0]["name"], "StatPal")
+        self.assertEqual(game["analysis"]["data_sources"][1]["name"], "API-Football")
+        self.assertIn("historical corner statistics", game["analysis"]["data_sources"][1]["used_for"])
+        self.assertEqual(game["recommended_market"]["key_points"][0], "Projected corners: 10.24.")
+        self.assertTrue(game["corners"]["historical_samples"]["available"])
+        self.assertEqual(game["corners"]["historical_samples"]["games"], 10)

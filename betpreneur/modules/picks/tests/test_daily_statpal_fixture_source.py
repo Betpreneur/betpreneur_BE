@@ -10,6 +10,53 @@ from betpreneur.modules.picks.services.runner_service import AlgoRunnerService
 
 
 class DailyStatPalFixtureSourceTests(SimpleTestCase):
+    @override_settings(
+        GRIND_ALGO={
+            "APS_KEY": "test-key",
+            "ALGO_API_FOOTBALL_CONTEXT_ENABLED": "true",
+            "ALGO_API_FOOTBALL_CONTEXT_RECENT_FIXTURES": "2",
+        }
+    )
+    def test_api_football_phase1_context_collects_provider_snapshots(self):
+        service = AlgoRunnerService()
+        fixture = {
+            "aps_id": "198772",
+            "api_football_fixture_id": "198772",
+            "api_football_league_id": "39",
+            "api_football_home_team_id": "33",
+            "api_football_away_team_id": "45",
+            "season": "2026",
+        }
+
+        def fake_aps_get(path, params=None, timeout=20):
+            if path == "/teams/statistics":
+                return {
+                    "team": {"id": int(params["team"])},
+                    "fixtures": {"played": {"total": 10}},
+                    "goals": {"for": {"average": {"total": "1.8"}}},
+                }
+            if path == "/fixtures":
+                return [
+                    {"fixture": {"id": 1, "date": "2026-08-30T12:00:00+00:00"}, "teams": {"home": {"name": "A"}, "away": {"name": "B"}}},
+                    {"fixture": {"id": 2, "date": "2026-08-24T12:00:00+00:00"}, "teams": {"home": {"name": "C"}, "away": {"name": "D"}}},
+                    {"fixture": {"id": 3, "date": "2026-08-18T12:00:00+00:00"}, "teams": {"home": {"name": "E"}, "away": {"name": "F"}}},
+                ]
+            return []
+
+        with (
+            patch.object(algo_runner, "fetch_prediction_data", return_value={"predictions": {"under_over": "+2.5"}}),
+            patch.object(algo_runner, "aps_get", side_effect=fake_aps_get),
+        ):
+            context = service._api_football_phase1_context(fixture)
+
+        self.assertTrue(context["available"])
+        snapshots = context["snapshots"]
+        self.assertEqual(snapshots["prediction"]["payload"]["predictions"]["under_over"], "+2.5")
+        self.assertEqual(snapshots["team_statistics_home"]["payload"]["team"]["id"], 33)
+        self.assertEqual(snapshots["team_statistics_away"]["payload"]["team"]["id"], 45)
+        self.assertEqual(len(snapshots["recent_fixtures_home"]["payload"]), 2)
+        self.assertEqual(len(snapshots["recent_fixtures_away"]["payload"]), 2)
+
     def test_statpal_only_fixture_scores_without_api_football_fixture_calls(self):
         fixture = {
             "fixture": "Sirius vs IF Brommapojkarna",
@@ -517,6 +564,67 @@ class DailyStatPalFixtureSourceTests(SimpleTestCase):
 
         self.assertIn("3037", league_ids)
         self.assertIn("3240", league_ids)
+
+    def test_api_football_enrichment_match_uses_kickoff_league_and_country_context(self):
+        service = AlgoRunnerService()
+        fixture = {
+            "fixture": "Everton vs Manchester Utd",
+            "hname": "Everton",
+            "aname": "Manchester Utd",
+            "league": "Premier League",
+            "country": "England",
+            "kickoff_utc": "2026-09-06T13:00:00+00:00",
+        }
+        row = FixtureCache(
+            fixture="Everton vs Manchester United",
+            home_team="Everton",
+            away_team="Manchester United",
+            home_team_normalized="everton",
+            away_team_normalized="manchester united",
+            fixture_normalized="everton vs manchester united",
+            league="Premier League",
+            country="England",
+            kickoff_utc=datetime(2026, 9, 6, 13, 15, tzinfo=UTC),
+            match_id="api-1",
+            source="api_football",
+        )
+
+        match = service._api_enrichment_match(fixture, [row])
+
+        self.assertIsNotNone(match)
+        score, orientation, matched_row, diagnostics = match
+        self.assertEqual(orientation, "direct")
+        self.assertEqual(matched_row.match_id, "api-1")
+        self.assertEqual(diagnostics["kickoff_delta_minutes"], 15)
+        self.assertTrue(diagnostics["league_match"])
+        self.assertTrue(diagnostics["country_match"])
+        self.assertGreater(score, diagnostics["name_score"])
+
+    def test_api_football_enrichment_match_rejects_far_kickoff_even_with_similar_names(self):
+        service = AlgoRunnerService()
+        fixture = {
+            "fixture": "Alpha FC vs Beta FC",
+            "hname": "Alpha FC",
+            "aname": "Beta FC",
+            "league": "Premier League",
+            "country": "England",
+            "kickoff_utc": "2026-09-06T13:00:00+00:00",
+        }
+        row = FixtureCache(
+            fixture="Alpha FC vs Beta FC",
+            home_team="Alpha FC",
+            away_team="Beta FC",
+            home_team_normalized="alpha fc",
+            away_team_normalized="beta fc",
+            fixture_normalized="alpha fc vs beta fc",
+            league="Premier League",
+            country="England",
+            kickoff_utc=datetime(2026, 9, 6, 19, 0, tzinfo=UTC),
+            match_id="api-late",
+            source="api_football",
+        )
+
+        self.assertIsNone(service._api_enrichment_match(fixture, [row]))
 
 
 class DailyStatPalFixtureSourceDbTests(TestCase):

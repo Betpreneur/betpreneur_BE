@@ -799,7 +799,7 @@ def public_game_detail_payload(payload):
             "away": _public_recent_form(game.get("away_recent_form")),
         },
         "lineups": _public_lineup_detail(game),
-        "corners": _public_corner_detail(game.get("corner_profile") or {}),
+        "corners": _public_corner_detail(game.get("corner_profile") or {}, game),
         "official_pick_count": game.get("official_pick_count", 0),
         "backed_count": game.get("backed_count", 0),
         "backed_by_me": game.get("backed_by_me", False),
@@ -838,6 +838,8 @@ def _public_fixture_detail(game):
 def _public_analysis_detail(game, market):
     insights = (market or {}).get("insights") or {}
     bettor_view = (market or {}).get("bettor_view") or {}
+    fixture_context = (game or {}).get("fixture_context") if isinstance((game or {}).get("fixture_context"), dict) else {}
+    prediction_features = fixture_context.get("prediction_features") if isinstance(fixture_context, dict) else {}
     public_analysis = insights.get("public_analysis") or insights.get("deepseek_analysis") or {}
     reasoning = public_analysis or (market or {}).get("reasoning") or bettor_view.get("reasoning") or ""
     if isinstance(reasoning, dict):
@@ -846,6 +848,8 @@ def _public_analysis_detail(game, market):
     verdict = public_verdict or (market or {}).get("model_verdict") or bettor_view.get("conclusion") or insights.get("conclusion") or ""
     summary = (market or {}).get("analysis_summary") or bettor_view.get("summary") or insights.get("summary") or ""
     explanation = _public_reasoning_text(reasoning or " ".join([summary, verdict]))
+    key_points = _public_evidence((market or {}).get("positive_evidence") or [], limit=8)
+    risks = _public_risk_evidence((market or {}).get("risk_evidence") or [], limit=4)
     return {
         "status": (market or {}).get("data_status") or insights.get("data_status") or "modelled",
         "data_quality": insights.get("data_quality") or game.get("insights", {}).get("data_quality") or "",
@@ -856,8 +860,10 @@ def _public_analysis_detail(game, market):
         "verdict": _public_market_verdict(market or {}),
         "headline": summary or verdict,
         "explanation": explanation,
-        "key_points": _public_evidence((market or {}).get("positive_evidence") or [], limit=8),
-        "risks": _public_risk_evidence((market or {}).get("risk_evidence") or [], limit=3),
+        "evidence": _public_structured_evidence(key_points),
+        "key_points": key_points,
+        "risks": risks,
+        "data_sources": _public_data_sources(market or {}, fixture_context, prediction_features),
     }
 
 
@@ -880,6 +886,8 @@ def _public_market_detail(market):
         "fair_odds": fair_odds,
         "verdict": _public_market_verdict(market),
         "summary": market.get("analysis_summary") or bettor_view.get("summary") or "",
+        "key_points": _public_evidence((market or {}).get("positive_evidence") or [], limit=5),
+        "risks": _public_risk_evidence((market or {}).get("risk_evidence") or [], limit=3),
     }
 
 
@@ -942,6 +950,73 @@ def _public_evidence(items, limit=6):
     return [*other_items[:4], *scoreline_items, *other_items[4:]][:limit]
 
 
+def _public_structured_evidence(items):
+    groups = {
+        "projection": [],
+        "recent_scorelines": [],
+        "provider_context": [],
+        "pricing": [],
+        "other": [],
+    }
+    for item in items or []:
+        text = str(item or "").strip()
+        if not text:
+            continue
+        lowered = text.lower()
+        if "scoreline" in lowered:
+            groups["recent_scorelines"].append(text)
+        elif "api-football" in lowered or "statpal" in lowered or "stored league profile" in lowered:
+            groups["provider_context"].append(text)
+        elif "odds" in lowered or "edge" in lowered or "ev" in lowered or "pricing" in lowered:
+            groups["pricing"].append(text)
+        elif "projected" in lowered or "average" in lowered or "line " in lowered:
+            groups["projection"].append(text)
+        else:
+            groups["other"].append(text)
+    return {key: value for key, value in groups.items() if value}
+
+
+def _public_data_sources(market, fixture_context, prediction_features):
+    sources = []
+    if isinstance(fixture_context.get("statpal"), dict) and fixture_context["statpal"].get("available"):
+        sources.append({"name": "StatPal", "used_for": ["fixtures", "odds", "team context"]})
+    api = fixture_context.get("api_football") if isinstance(fixture_context.get("api_football"), dict) else {}
+    api_features = (
+        prediction_features.get("api_football")
+        if isinstance(prediction_features, dict) and isinstance(prediction_features.get("api_football"), dict)
+        else {}
+    )
+    if api.get("available") or api_features.get("available"):
+        available = api_features.get("available_snapshots") or sorted(
+            key for key, value in (api.get("snapshots") or {}).items() if isinstance(value, dict) and value.get("available")
+        )
+        sources.append(
+            {
+                "name": "API-Football",
+                "used_for": _api_football_public_uses(available),
+                "snapshots": available,
+            }
+        )
+    odds_source = str((market.get("odds_meta") or {}).get("source") or market.get("odds_source") or "").strip()
+    if odds_source:
+        sources.append({"name": "Odds", "used_for": ["market price"], "source": odds_source})
+    return sources
+
+
+def _api_football_public_uses(snapshots):
+    snapshots = set(snapshots or [])
+    uses = []
+    if "prediction" in snapshots:
+        uses.append("provider prediction opinion")
+    if "team_statistics_home" in snapshots or "team_statistics_away" in snapshots:
+        uses.append("team season statistics")
+    if "recent_fixtures_home" in snapshots or "recent_fixtures_away" in snapshots:
+        uses.append("recent scorelines")
+    if "fixture_statistics_home" in snapshots or "fixture_statistics_away" in snapshots:
+        uses.append("historical corner statistics")
+    return uses or ["provider context"]
+
+
 def _public_recent_scorelines(fixtures, limit=5):
     if not isinstance(fixtures, list):
         return []
@@ -968,15 +1043,35 @@ def _public_recent_scorelines(fixtures, limit=5):
     return scorelines
 
 
-def _public_corner_detail(corner_profile):
+def _public_corner_detail(corner_profile, game=None):
     if not isinstance(corner_profile, dict) or not corner_profile:
         return {"status": "unavailable"}
+    fixture_context = (game or {}).get("fixture_context") if isinstance((game or {}).get("fixture_context"), dict) else {}
+    prediction_features = fixture_context.get("prediction_features") if isinstance(fixture_context, dict) else {}
+    api_features = prediction_features.get("api_football") if isinstance(prediction_features, dict) else {}
+    corner_samples = (api_features or {}).get("corner_samples") if isinstance(api_features, dict) else {}
     return {
         "status": "available",
         "data_quality": corner_profile.get("data_quality", ""),
         "expected_total": corner_profile.get("expected_total"),
+        "sources": corner_profile.get("sources") or [],
+        "warnings": corner_profile.get("warnings") or [],
+        "historical_samples": _public_corner_sample_summary(corner_samples or {}),
         "home": _public_corner_side(corner_profile.get("home") or {}),
         "away": _public_corner_side(corner_profile.get("away") or {}),
+    }
+
+
+def _public_corner_sample_summary(samples):
+    if not isinstance(samples, dict):
+        return {"available": False}
+    combined = samples.get("combined") if isinstance(samples.get("combined"), dict) else {}
+    return {
+        "available": bool((combined.get("games") or 0) > 0),
+        "games": combined.get("games", 0),
+        "avg_for": combined.get("avg_for"),
+        "avg_against": combined.get("avg_against"),
+        "avg_total": combined.get("avg_total"),
     }
 
 

@@ -219,7 +219,45 @@ class DailyPredictionEngineTests(TestCase):
         self.assertEqual(odds["Home Team Corners Over 5.5"], 1.73)
         self.assertEqual(odds["Cards Over 3.5"], 2.1)
         self.assertEqual(odds["Home Team Over 1.5"], 1.44)
-        self.assertEqual(odds["_meta"]["Cards Over 3.5"]["source"], "statpal")
+        self.assertEqual(odds["_meta"]["Cards Over 3.5"]["source"], "statpal_summary")
+
+    def test_daily_prediction_real_odds_prefers_raw_statpal_markets_over_summary_map(self):
+        service = AlgoRunnerService()
+        odds = service._statpal_prediction_odds(
+            {
+                "statpal_context": {
+                    "snapshots": {
+                        "prematch_odds": {
+                            "payload": {
+                                "markets": [
+                                    {
+                                        "name": "Corners Over Under",
+                                        "bookmakers": [
+                                            {
+                                                "totals": {
+                                                    "line": 7.5,
+                                                    "odds": [
+                                                        {"name": "Over", "value": 1.91},
+                                                    ],
+                                                }
+                                            }
+                                        ],
+                                    }
+                                ]
+                            },
+                            "summary": {
+                                "odds_map": {
+                                    "Corners Over 7.5": 7.0,
+                                },
+                            },
+                        }
+                    }
+                }
+            }
+        )
+
+        self.assertEqual(odds["Corners Over 7.5"], 1.91)
+        self.assertEqual(odds["_meta"]["Corners Over 7.5"]["source"], "statpal")
 
     def test_daily_prediction_markets_use_expanded_discovery_pool(self):
         service = AlgoRunnerService()

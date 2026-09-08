@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from functools import cache
+from typing import Any
 
 from betpreneur.modules.markets.api import MarketDescriptor, describe_market
 
@@ -270,10 +271,16 @@ def _goal_probability(
             unit="goals",
         )
     )
+    probability, api_facts, api_warnings = _apply_api_football_goal_context(
+        probability,
+        prediction,
+        descriptor,
+    )
+    warnings.extend(api_warnings)
     return (
         _round_probability(probability),
         "poisson_goals",
-        _goal_facts(prediction, goals, descriptor),
+        [*_goal_facts(prediction, goals, descriptor), *api_facts],
         warnings,
         _quality(goals),
     )
@@ -298,6 +305,9 @@ def _count_probability(
     facts = _count_facts(prediction, counts, event, descriptor)
     warnings = list(counts.diagnostics.warnings)
     if event == "corners":
+        sources = ((counts.diagnostics.metadata or {}).get("sources") or {}).get("corners") or ()
+        if "api_football_corner_samples" not in sources:
+            warnings.append("api_football_corner_samples_missing")
         warnings.extend(
             _line_boundary_warnings(
                 descriptor,
@@ -596,6 +606,156 @@ def _recent_scoreline_facts(prediction: FixturePrediction, descriptor: MarketDes
     return facts
 
 
+def _apply_api_football_goal_context(
+    probability: float | None,
+    prediction: FixturePrediction,
+    descriptor: MarketDescriptor,
+) -> tuple[float | None, list[str], list[str]]:
+    if probability is None or descriptor.family not in {"total_goals", "team_total_goals", "btts"}:
+        return probability, [], []
+    feature_payload = getattr(getattr(prediction, "features", None), "features", None) or {}
+    api = feature_payload.get("api_football") if isinstance(feature_payload.get("api_football"), dict) else {}
+    if not api.get("available"):
+        return probability, [], []
+
+    facts: list[str] = []
+    warnings: list[str] = []
+    adjusted = float(probability)
+
+    recent_adjustment = _api_recent_scoreline_probability(api, descriptor)
+    if recent_adjustment is not None:
+        recent_probability, games, label = recent_adjustment
+        adjusted = (adjusted * 0.78) + (recent_probability * 0.22)
+        facts.append(f"API-Football recent scorelines support {label} at {_percent(recent_probability)}% across {games} games.")
+        if abs(recent_probability - probability) >= 0.18:
+            warnings.append("api_football_recent_scorelines_disagree")
+
+    opinion_adjustment = _api_prediction_opinion_adjustment(api, descriptor)
+    if opinion_adjustment is not None:
+        direction, label = opinion_adjustment
+        if direction == "agree":
+            adjusted += 0.025
+            facts.append(f"API-Football prediction opinion agrees with {label}.")
+        elif direction == "disagree":
+            adjusted -= 0.05
+            warnings.append("api_football_prediction_opinion_disagrees")
+            facts.append(f"API-Football prediction opinion does not support {label}.")
+
+    team_stats_adjustment = _api_team_statistics_goal_adjustment(api, descriptor)
+    if team_stats_adjustment is not None:
+        team_probability, label = team_stats_adjustment
+        adjusted = (adjusted * 0.88) + (team_probability * 0.12)
+        facts.append(f"API-Football team statistics support {label} at {_percent(team_probability)}%.")
+        if abs(team_probability - probability) >= 0.22:
+            warnings.append("api_football_team_statistics_disagree")
+
+    return _clamp(adjusted, 0.01, 0.99), facts, list(dict.fromkeys(warnings))
+
+
+def _api_recent_scoreline_probability(api: dict[str, Any], descriptor: MarketDescriptor) -> tuple[float, int, str] | None:
+    profile = ((api.get("recent_scorelines") or {}).get("combined") or {})
+    games = int(_float(profile.get("games")) or 0)
+    if games < 6:
+        return None
+    if descriptor.family == "btts":
+        rate = _float(profile.get("btts_rate"))
+        if rate is None:
+            return None
+        probability = rate / 100.0
+        if descriptor.side == "no":
+            probability = 1.0 - probability
+        return _clamp(probability, 0.01, 0.99), games, descriptor.canonical or "BTTS"
+    if descriptor.family != "total_goals":
+        return None
+    line = _float(descriptor.line)
+    side = str(descriptor.side or "").lower()
+    if line is None or side not in {"over", "under"}:
+        return None
+    key = "over_2_5_rate" if line <= 2.5 else "over_3_5_rate" if line <= 3.5 else "over_4_5_rate"
+    rate = _float(profile.get(key))
+    if rate is None:
+        return None
+    probability = rate / 100.0
+    if side == "under":
+        probability = 1.0 - probability
+    return _clamp(probability, 0.01, 0.99), games, descriptor.canonical or f"{side.title()} {line:g}"
+
+
+def _api_prediction_opinion_adjustment(api: dict[str, Any], descriptor: MarketDescriptor) -> tuple[str, str] | None:
+    opinion = api.get("prediction_opinion") if isinstance(api.get("prediction_opinion"), dict) else {}
+    if not opinion.get("available"):
+        return None
+    label = descriptor.canonical or descriptor.raw or ""
+    if descriptor.family == "total_goals":
+        opinion_line = _api_under_over_line(opinion.get("under_over"))
+        line = _float(descriptor.line)
+        side = str(descriptor.side or "").lower()
+        if opinion_line is None or line is None or side not in {"over", "under"}:
+            return None
+        opinion_side, opinion_value = opinion_line
+        if abs(opinion_value - line) > 1.0:
+            return None
+        return ("agree" if opinion_side == side else "disagree"), label
+    if descriptor.family == "team_total_goals":
+        team_goals = opinion.get("team_goals") if isinstance(opinion.get("team_goals"), dict) else {}
+        raw = team_goals.get(descriptor.team or "")
+        opinion_line = _api_under_over_line(raw)
+        line = _float(descriptor.line)
+        side = str(descriptor.side or "").lower()
+        if opinion_line is None or line is None or side not in {"over", "under"}:
+            return None
+        opinion_side, opinion_value = opinion_line
+        if abs(opinion_value - line) > 1.0:
+            return None
+        return ("agree" if opinion_side == side else "disagree"), label
+    return None
+
+
+def _api_under_over_line(value) -> tuple[str, float] | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    side = "over" if text.startswith("+") else "under" if text.startswith("-") else ""
+    if not side:
+        return None
+    line = _float(text[1:])
+    if line is None:
+        return None
+    return side, line
+
+
+def _api_team_statistics_goal_adjustment(api: dict[str, Any], descriptor: MarketDescriptor) -> tuple[float, str] | None:
+    if descriptor.family not in {"total_goals", "team_total_goals"}:
+        return None
+    team_stats = api.get("team_statistics") if isinstance(api.get("team_statistics"), dict) else {}
+    home = team_stats.get("home") if isinstance(team_stats.get("home"), dict) else {}
+    away = team_stats.get("away") if isinstance(team_stats.get("away"), dict) else {}
+    if not home.get("available") or not away.get("available"):
+        return None
+    side = str(descriptor.side or "").lower()
+    line = _float(descriptor.line)
+    if line is None or side not in {"over", "under"}:
+        return None
+    if descriptor.family == "team_total_goals":
+        bucket = home if descriptor.team == "home" else away if descriptor.team == "away" else {}
+        avg = _float((((bucket.get("goals_for") or {}).get("average") or {}).get("total")))
+        if avg is None:
+            return None
+        estimate = _clamp((avg - (line - 0.5)) / 1.8, 0.05, 0.95)
+        if side == "under":
+            estimate = 1.0 - estimate
+        return estimate, descriptor.canonical or "team goals"
+    home_for = _float((((home.get("goals_for") or {}).get("average") or {}).get("total")))
+    away_for = _float((((away.get("goals_for") or {}).get("average") or {}).get("total")))
+    if home_for is None or away_for is None:
+        return None
+    total_avg = home_for + away_for
+    estimate = _clamp((total_avg - (line - 0.5)) / 2.6, 0.05, 0.95)
+    if side == "under":
+        estimate = 1.0 - estimate
+    return estimate, descriptor.canonical or "total goals"
+
+
 def _scoreline_evidence_bullets(scoreline_profile: dict[str, Any]) -> list[str]:
     buckets = (
         ("home_recent", "Home recent scorelines", 3),
@@ -885,6 +1045,10 @@ def _int(value) -> int | None:
 
 def _percent(value: float) -> int:
     return int(round(value * 100))
+
+
+def _clamp(value: float, low: float, high: float) -> float:
+    return min(high, max(low, float(value)))
 
 
 def _round_probability(value: float | None) -> float | None:

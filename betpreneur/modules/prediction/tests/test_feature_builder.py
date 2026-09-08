@@ -263,6 +263,120 @@ class FixtureFeatureBuilderTests(TestCase):
         self.assertEqual(features["scoreline_profile"]["head_to_head"]["scorelines"][0]["scoreline"], "3-2")
         self.assertGreaterEqual(features["scoreline_profile"]["combined"]["over_2_5_rate"], 80)
 
+    def test_build_fixture_features_normalizes_api_football_snapshots(self):
+        feature_set = build_fixture_features(
+            {
+                "match_id": "api-1",
+                "fixture": "Arsenal vs Chelsea",
+                "home_team": "Arsenal",
+                "away_team": "Chelsea",
+                "match_date": "2026-08-29",
+                "api_football_league_id": "39",
+                "api_football_home_team_id": "42",
+                "api_football_away_team_id": "49",
+                "season": "2026",
+                "api_football_context": {
+                    "available": True,
+                    "snapshots": {
+                        "prediction": {
+                            "available": True,
+                            "payload": {
+                                "predictions": {
+                                    "winner": {"id": 42, "name": "Arsenal", "comment": "Win or draw"},
+                                    "win_or_draw": True,
+                                    "under_over": "+2.5",
+                                    "goals": {"home": "+1.5", "away": "-1.5"},
+                                    "advice": "Home or draw and over 2.5 goals",
+                                    "percent": {"home": "45%", "draw": "30%", "away": "25%"},
+                                },
+                                "comparison": {"att": {"home": "55%", "away": "45%"}},
+                                "h2h": [
+                                    {
+                                        "fixture": {"id": 10, "date": "2026-02-01T15:00:00+00:00"},
+                                        "teams": {
+                                            "home": {"id": 42, "name": "Arsenal"},
+                                            "away": {"id": 49, "name": "Chelsea"},
+                                        },
+                                        "goals": {"home": 3, "away": 2},
+                                    }
+                                ],
+                            },
+                        },
+                        "team_statistics_home": {
+                            "available": True,
+                            "payload": {
+                                "team": {"id": 42, "name": "Arsenal"},
+                                "fixtures": {
+                                    "played": {"home": 5, "away": 5, "total": 10},
+                                    "wins": {"home": 4, "away": 2, "total": 6},
+                                    "draws": {"home": 1, "away": 1, "total": 2},
+                                    "loses": {"home": 0, "away": 2, "total": 2},
+                                },
+                                "goals": {
+                                    "for": {
+                                        "average": {"home": "2.0", "away": "1.4", "total": "1.7"},
+                                        "under_over": {"2.5": {"over": 4, "under": 6}},
+                                    },
+                                    "against": {
+                                        "average": {"home": "0.8", "away": "1.2", "total": "1.0"},
+                                        "under_over": {"1.5": {"over": 3, "under": 7}},
+                                    },
+                                },
+                                "clean_sheet": {"total": 4},
+                                "failed_to_score": {"total": 1},
+                                "lineups": [{"formation": "4-3-3", "played": 8}],
+                            },
+                        },
+                        "recent_fixtures_home": {
+                            "available": True,
+                            "payload": [
+                                {
+                                    "fixture": {"id": 99, "date": "2026-08-20T12:00:00+00:00"},
+                                    "teams": {
+                                        "home": {"id": 42, "name": "Arsenal"},
+                                        "away": {"id": 8, "name": "Team A"},
+                                    },
+                                    "goals": {"home": 4, "away": 1},
+                                }
+                            ],
+                        },
+                        "fixture_statistics_home": {
+                            "available": True,
+                            "payload": [
+                                {
+                                    "fixture_id": "99",
+                                    "fixture": "Arsenal vs Team A",
+                                    "date": "2026-08-20T12:00:00+00:00",
+                                    "corner_kicks_for": 7,
+                                    "payload": [
+                                        {
+                                            "team": {"id": 42},
+                                            "statistics": [{"type": "Corner Kicks", "value": 7}],
+                                        },
+                                        {
+                                            "team": {"id": 8},
+                                            "statistics": [{"type": "Corner Kicks", "value": 4}],
+                                        },
+                                    ],
+                                }
+                            ],
+                        },
+                    },
+                },
+            }
+        )
+
+        api_features = feature_set.features["api_football"]
+        self.assertTrue(api_features["available"])
+        self.assertEqual(api_features["prediction_opinion"]["percent"]["home"], 45.0)
+        self.assertEqual(api_features["prediction_opinion"]["comparison"]["att"]["home"], 55.0)
+        self.assertEqual(api_features["team_statistics"]["home"]["goals_for"]["average"]["home"], 2.0)
+        self.assertEqual(api_features["team_statistics"]["home"]["clean_sheet_rate"], 40.0)
+        self.assertEqual(api_features["recent_scorelines"]["home"]["scorelines"][0]["scoreline"], "4-1")
+        self.assertEqual(api_features["head_to_head"]["scorelines"][0]["scoreline"], "3-2")
+        self.assertEqual(api_features["corner_samples"]["home"]["avg_for"], 7.0)
+        self.assertEqual(api_features["corner_samples"]["home"]["avg_total"], 11.0)
+
     def test_build_fixture_features_supports_dict_input(self):
         feature_set = build_fixture_features(
             {
