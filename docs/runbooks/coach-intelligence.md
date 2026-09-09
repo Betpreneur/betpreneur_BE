@@ -17,7 +17,7 @@ StatPal queue and is included in the nightly Team Intelligence workflow.
 
 ## Initial import
 
-Import every active league in the Team Intelligence registry:
+Import every active competition in the daily All Games registry:
 
 ```bash
 python manage.py sync_coach_intelligence
@@ -32,6 +32,8 @@ python manage.py sync_coach_intelligence --include-coach-details
 ```
 
 The same import can be queued from **Catalog > Coach profiles > Sync tracked leagues**.
+The importer uses league standings first and falls back to league fixtures for cups or
+other competitions without a standings table.
 
 ## Research workflow
 

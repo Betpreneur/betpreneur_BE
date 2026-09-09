@@ -5,7 +5,7 @@ from typing import Any
 from django.db import transaction
 from django.utils import timezone
 
-from betpreneur.modules.catalog.domain.league_registry import team_intelligence_leagues
+from betpreneur.modules.catalog.domain.daily_league_registry import daily_tracked_leagues
 from betpreneur.modules.catalog.domain.text import normalize_fixture_text
 from betpreneur.modules.catalog.models import CoachProfile, TeamCoachAssignment
 from betpreneur.modules.catalog.services.provider_client import (
@@ -19,6 +19,7 @@ from betpreneur.modules.catalog.services.resolution import (
     provider_mapping_service,
 )
 from betpreneur.modules.catalog.services.statpal_normalize import (
+    normalize_daily_matches,
     normalize_league_standings,
     normalize_team,
 )
@@ -47,7 +48,7 @@ class CoachIntelligenceSyncService:
         selected_keys = set(league_keys or [])
         leagues = [
             league
-            for league in team_intelligence_leagues(active_only=True)
+            for league in daily_tracked_leagues(active_only=True)
             if not selected_keys or league.key in selected_keys
         ]
         results = [
@@ -73,7 +74,7 @@ class CoachIntelligenceSyncService:
         }
 
     def sync_league(self, league, *, max_teams=None, include_coach_details=False) -> dict[str, Any]:
-        league_id = str(league.statpal_league_id or "").strip()
+        league_id = str(league.statpal_id or "").strip()
         result = {
             "league_key": league.key,
             "league_name": league.name,
@@ -87,21 +88,35 @@ class CoachIntelligenceSyncService:
             "missing_managers": 0,
             "error_count": 0,
             "errors": [],
+            "discovery_source": "standings",
         }
         if not league_id:
             result.update(status="skipped", error_count=1)
             result["errors"].append({"error": "missing_statpal_league_id"})
             return result
 
+        discovery_errors = []
+        standings = []
         try:
             payload = self.client.soccer_league_standings(
                 league_id,
-                params={"season": league.current_season},
             )
             standings = self._current_standings(normalize_league_standings(payload))
         except Exception as exc:
-            result.update(status="failed", error_count=1)
-            result["errors"].append({"error": str(exc)[:300]})
+            discovery_errors.append({"source": "standings", "error": str(exc)[:300]})
+
+        if not standings:
+            result["discovery_source"] = "league_matches"
+            try:
+                matches_payload = self.client.soccer_league_matches(league_id)
+                fixtures = normalize_daily_matches(matches_payload, target_date=timezone.localdate())
+                standings = self._teams_from_fixtures(fixtures, league_id=league_id)
+            except Exception as exc:
+                discovery_errors.append({"source": "league_matches", "error": str(exc)[:300]})
+
+        if not standings:
+            result.update(status="failed", error_count=max(1, len(discovery_errors)))
+            result["errors"].extend(discovery_errors or [{"error": "no_team_rows"}])
             return result
 
         if max_teams is not None:
@@ -112,7 +127,15 @@ class CoachIntelligenceSyncService:
             team_id = str(standing.get("team_id") or "").strip()
             team_name = str(standing.get("team_name") or "").strip()
             try:
-                team_payload = normalize_team(self.client.soccer_team(team_id)) if team_id else {}
+                try:
+                    team_payload = normalize_team(self.client.soccer_team(team_id)) if team_id else {}
+                except Exception:
+                    team_payload = {
+                        "provider_team_id": team_id,
+                        "name": team_name,
+                        "country": standing.get("country") or league.country,
+                        "coach": standing.get("coach") or {},
+                    }
                 outcome = self.sync_team(
                     league=league,
                     standing=standing,
@@ -143,14 +166,16 @@ class CoachIntelligenceSyncService:
             country=league.country or standing.get("country") or team_payload.get("country") or "",
             league_key=league.key,
             league_name=league.name,
-            provider_league_id=league.statpal_league_id,
-            season=league.current_season,
+            provider_league_id=league.statpal_id,
+            season=str(standing.get("season") or ""),
             confidence=95 if team_id else 70,
             resolution_method="coach_intelligence_sync",
             payload={"standing": standing, "team": self._compact_team_payload(team_payload)},
         )
 
         coach_data = team_payload.get("coach") if isinstance(team_payload.get("coach"), dict) else {}
+        if not coach_data:
+            coach_data = standing.get("coach") if isinstance(standing.get("coach"), dict) else {}
         coach_id = str(coach_data.get("id") or "").strip()
         coach_name = str(coach_data.get("name") or "").strip()
         if not coach_id and not coach_name:
@@ -195,6 +220,34 @@ class CoachIntelligenceSyncService:
             if key:
                 deduplicated[key] = row
         return list(deduplicated.values())
+
+    @staticmethod
+    def _teams_from_fixtures(fixtures, *, league_id):
+        current = [fixture for fixture in fixtures if fixture.get("stage_is_current")]
+        candidates = current or fixtures
+        teams = {}
+        for fixture in candidates:
+            if str(fixture.get("provider_competition_id") or "") != str(league_id):
+                continue
+            coaches = fixture.get("coaches") if isinstance(fixture.get("coaches"), dict) else {}
+            for side, id_key, name_key in (
+                ("home", "hid", "hname"),
+                ("away", "aid", "aname"),
+            ):
+                team_id = str(fixture.get(id_key) or "").strip()
+                team_name = str(fixture.get(name_key) or "").strip()
+                key = team_id or normalize_fixture_text(team_name)
+                if not key:
+                    continue
+                teams[key] = {
+                    "team_id": team_id,
+                    "team_name": team_name,
+                    "country": fixture.get("country") or "",
+                    "season": fixture.get("season") or "",
+                    "stage_is_current": fixture.get("stage_is_current", False),
+                    "coach": coaches.get(side) if isinstance(coaches.get(side), dict) else {},
+                }
+        return list(teams.values())
 
     @staticmethod
     def _compact_team_payload(team_payload):

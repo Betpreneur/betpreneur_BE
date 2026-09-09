@@ -42,6 +42,45 @@ class FakeStatPalCoachClient:
         return {"coach": {"id": coach_id, "name": self.coach_name}}
 
 
+class FakeCupCoachClient(FakeStatPalCoachClient):
+    def soccer_league_standings(self, league_id, params=None):
+        return {"standings": {"country": "England", "tournament": []}}
+
+    def soccer_league_matches(self, league_id, params=None):
+        return {
+            "matches": {
+                "country": "England",
+                "tournament": {
+                    "id": str(league_id),
+                    "league": "FA Cup",
+                    "season": "2026/2027",
+                    "stage_id": "current",
+                    "is_current": "True",
+                    "week": {
+                        "number": "1",
+                        "match": {
+                            "main_id": "cup-match-1",
+                            "date": "10.09.2026",
+                            "home": {"id": "cup-home", "name": "Cup Home"},
+                            "away": {"id": "cup-away", "name": "Cup Away"},
+                        },
+                    },
+                },
+            }
+        }
+
+    def soccer_team(self, team_id, params=None):
+        names = {"cup-home": "Cup Home", "cup-away": "Cup Away"}
+        return {
+            "team": {
+                "id": team_id,
+                "name": names[team_id],
+                "country": "England",
+                "coach": {"id": f"coach-{team_id}", "name": f"Manager {names[team_id]}"},
+            }
+        }
+
+
 class CoachIntelligenceSyncTests(TestCase):
     def setUp(self):
         self.client = FakeStatPalCoachClient()
@@ -53,6 +92,7 @@ class CoachIntelligenceSyncTests(TestCase):
     def test_initial_sync_creates_coach_and_current_assignment(self):
         result = self.sync()
 
+        self.assertEqual(result["leagues_considered"], 1)
         self.assertEqual(result["teams_synced"], 1)
         self.assertEqual(result["coaches_created"], 1)
         self.assertEqual(result["assignments_created"], 1)
@@ -89,6 +129,15 @@ class CoachIntelligenceSyncTests(TestCase):
         self.assertTrue(current.currently_active)
         self.assertEqual(current.change_reason, "provider_manager_change")
         self.assertFalse(previous.coach.active)
+
+    def test_cup_uses_league_matches_when_standings_are_unavailable(self):
+        service = CoachIntelligenceSyncService(client=FakeCupCoachClient())
+
+        result = service.sync(league_keys=["england-fa-cup"])
+
+        self.assertEqual(result["teams_synced"], 2)
+        self.assertEqual(result["assignments_created"], 2)
+        self.assertEqual(result["results"][0]["discovery_source"], "league_matches")
 
     def test_tactical_ratings_are_limited_to_zero_through_one_hundred(self):
         coach = CoachProfile.objects.create(
