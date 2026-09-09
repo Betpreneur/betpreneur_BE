@@ -6,7 +6,7 @@ from django.test import TestCase
 
 from betpreneur.modules.catalog.api import FixtureCache, ProviderFixtureMap
 from betpreneur.modules.markets.api import can_settle_market
-from betpreneur.modules.picks.api import AlgoRun, MarketPrediction, Pick
+from betpreneur.modules.picks.api import AlgoFixture, AlgoRun, MarketPrediction, Pick
 from betpreneur.modules.settlement.services.settle import SettlementService
 from betpreneur.modules.slips.api import SlipReview, SlipSelection, slip_recap_payload
 
@@ -20,6 +20,108 @@ def _finished_fixture(match_id, home_goals, away_goals, *, home="Dundee", away="
         "teams": {"home": {"name": home}, "away": {"name": away}},
         "actual_stats": actual_stats or {},
     }
+
+
+class FinalStatisticsTests(TestCase):
+    def _fixture(self):
+        fixture = _finished_fixture(123, 1, 1)
+        fixture["teams"]["home"]["id"] = 10
+        fixture["teams"]["away"]["id"] = 20
+        return fixture
+
+    def _stats(self):
+        return [
+            {"team": {"id": team_id}, "statistics": [
+                {"type": "Corner Kicks", "value": corners},
+                {"type": "Yellow Cards", "value": 0},
+                {"type": "Red Cards", "value": 0},
+                {"type": "Shots on Goal", "value": 3},
+            ]}
+            for team_id, corners in ((20, 5), (10, 0))
+        ]
+
+    def test_statistics_use_team_ids_and_preserve_zero_and_unknown(self):
+        service = SettlementService()
+        fixture = self._fixture()
+        fixture["statistics"] = self._stats()
+        fixture["statistics"][0]["statistics"][1]["value"] = None
+        with mock.patch.object(service, "_api_football_get") as get:
+            actuals = service._api_final_statistics(fixture)
+        get.assert_not_called()
+        self.assertEqual(actuals["home"]["corners"], 0)
+        self.assertEqual(actuals["away"]["corners"], 5)
+        self.assertTrue(service._missing_market_statistics("Cards Over 2.5", actuals))
+        self.assertFalse(service._missing_market_statistics("Corners Over 7.5", actuals))
+
+    def test_failed_statistics_request_stays_missing(self):
+        service = SettlementService()
+        with mock.patch.object(service, "_api_football_get", side_effect=RuntimeError("quota")):
+            actuals = service._api_final_statistics(self._fixture())
+        self.assertTrue(service._missing_market_statistics("Corners Over 7.5", actuals))
+
+    def test_published_pick_waits_for_statistics(self):
+        run = AlgoRun.objects.create(target_date=SETTLE_DATE)
+        pick = Pick.objects.create(run=run, match_date=SETTLE_DATE, match_id="123",
+            fixture="Dundee vs Aberdeen", tier=Pick.Tier.BANKER,
+            market="Corners Over 7.5", confidence=70, odds="1.8", ev="0.05", stake="1000")
+        service = SettlementService()
+        fixture = self._fixture()
+        with (
+            mock.patch.object(service, "_finished_fixture_map", return_value={"123": fixture}),
+            mock.patch.object(service, "_record_team_match_feedback"),
+        ):
+            report = service.update_results(target_date=SETTLE_DATE)
+            pick.refresh_from_db()
+            self.assertEqual(pick.status, Pick.Status.PENDING)
+            self.assertIsNone(pick.settled_at)
+            self.assertEqual(report["awaiting_statistics"]["picks"], 1)
+            fixture["actual_stats"] = {"home": {"corners": 5}, "away": {"corners": 5}}
+            service.update_results(target_date=SETTLE_DATE)
+        pick.refresh_from_db()
+        self.assertEqual(pick.status, Pick.Status.WIN)
+
+    def test_extra_time_statistics_are_not_used_for_regulation_markets(self):
+        fixture = self._fixture()
+        fixture["fixture"]["status"]["short"] = "AET"
+        fixture["statistics"] = self._stats()
+        self.assertEqual(SettlementService()._api_final_statistics(fixture), {"home": {}, "away": {}})
+
+    def test_saved_provider_link_fetches_once_across_runs_and_retries_missing_stats(self):
+        match_id = "statpal:456"
+        markets = ("Corners Over 7.5", "Home Team Corners Under 2.5", "Cards Under 2.5", "Shots On Target Over 6.5", "DNB Home")
+        for _ in range(2):
+            run = AlgoRun.objects.create(target_date=SETTLE_DATE)
+            AlgoFixture.objects.create(run=run, match_date=SETTLE_DATE, match_id=match_id,
+                fixture="Dundee vs Aberdeen", source_payload={"api_football_fixture_id": "123"})
+            for market in markets:
+                MarketPrediction.objects.create(run=run, match_date=SETTLE_DATE, match_id=match_id,
+                    fixture="Dundee vs Aberdeen", market=market, confidence=70, raw_confidence=70,
+                    odds="1.8", ev="0.05")
+        service = SettlementService()
+        calls = []
+        stats = []
+        def get(path, params):
+            calls.append((path, params))
+            return [self._fixture()] if path == "/fixtures" else stats
+        with (
+            mock.patch.object(service, "_api_football_get", side_effect=get),
+            mock.patch.object(service, "_record_team_match_feedback"),
+        ):
+            service.update_results(target_date=SETTLE_DATE)
+            self.assertEqual(MarketPrediction.objects.filter(status="pending").count(), 8)
+            self.assertEqual(MarketPrediction.objects.filter(status="void").count(), 2)
+            self.assertEqual(MarketPrediction.objects.filter(result="Awaiting final match statistics.").count(), 8)
+            stats = self._stats()
+            calls.clear()
+            service.update_results(target_date=SETTLE_DATE)
+            self.assertEqual(calls.count(("/fixtures/statistics", {"fixture": 123})), 1)
+            self.assertEqual(MarketPrediction.objects.filter(status="pending").count(), 0)
+            self.assertEqual(MarketPrediction.objects.filter(status="win").count(), 4)
+            self.assertEqual(MarketPrediction.objects.filter(status="loss").count(), 4)
+            calls.clear()
+            report = service.update_results(target_date=SETTLE_DATE)
+            self.assertEqual(report["internal_predictions_updated_count"], 0)
+            self.assertEqual(calls, [])
 
 
 class CanSettleMarketTests(TestCase):
@@ -100,6 +202,22 @@ class SettleSlipSelectionsTests(TestCase):
         selection.refresh_from_db()
         self.assertEqual(selection.outcome, SlipSelection.Outcome.LOSS)
         self.assertEqual(report["losses"], 1)
+
+    def test_corner_leg_waits_then_uses_normalized_statistics(self):
+        selection = self._selection(submitted_market="Corners Over 7.5", settlement_market="Corners Over 7.5")
+        service = SettlementService()
+        fixture = _finished_fixture(1556634, 2, 1)
+        with mock.patch.object(service, "_finished_fixture_map", return_value={"1556634": fixture}):
+            report = service.settle_slip_selections(target_date=SETTLE_DATE)
+            selection.refresh_from_db()
+            self.assertEqual(report["awaiting_result"], 1)
+            self.assertIsNone(selection.settled_at)
+            self.assertEqual(report["void"], 0)
+            fixture["actual_stats"] = {"home": {"corners": 4}, "away": {"corners": 5}}
+            report = service.settle_slip_selections(target_date=SETTLE_DATE)
+        selection.refresh_from_db()
+        self.assertEqual(selection.outcome, SlipSelection.Outcome.WIN)
+        self.assertEqual(selection.result, "9 corners")
 
     def test_flagged_risky_losses_are_counted(self):
         self._selection(flagged_risky=True)

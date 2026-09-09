@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import gc
 import logging
+import math
 from datetime import timedelta
 from decimal import Decimal
 
@@ -29,7 +30,7 @@ from betpreneur.modules.catalog.api import (
     runner_env,
 )
 from betpreneur.modules.markets.api import can_settle_market
-from betpreneur.modules.picks.api import MarketPrediction, Pick
+from betpreneur.modules.picks.api import AlgoFixture, MarketPrediction, Pick
 from betpreneur.modules.prediction.api import record_team_match_feedback
 from betpreneur.modules.slips.api import SlipSelection
 
@@ -66,7 +67,49 @@ class SettlementService:
         )
         response.raise_for_status()
         payload = response.json()
+        if payload.get("errors"):
+            raise RuntimeError("API-Football returned an API error")
         return payload.get("response", [])
+
+    def _api_final_statistics(self, fixture):
+        actuals = {"home": {}, "away": {}}
+        metadata = fixture.get("fixture") or {}
+        # Full-match totals after extra time cannot settle regulation-time markets.
+        if (metadata.get("status") or {}).get("short") != "FT":
+            return actuals
+        rows = fixture.get("statistics")
+        if not rows:
+            try:
+                rows = self._api_football_get("/fixtures/statistics", {"fixture": metadata["id"]})
+            except Exception as exc:
+                log.warning("Final statistics unavailable fixture=%s error=%s", metadata.get("id"), exc)
+                return actuals
+        names = {"Corner Kicks": "corners", "Yellow Cards": "yellow_cards",
+                 "Red Cards": "red_cards", "Shots on Goal": "shots_on_target"}
+        teams = fixture.get("teams") or {}
+        for row in rows if isinstance(rows, list) else []:
+            if not isinstance(row, dict):
+                continue
+            team_id = (row.get("team") or {}).get("id")
+            side = next((side for side in ("home", "away")
+                         if team_id is not None and str(team_id) == str((teams.get(side) or {}).get("id"))), None)
+            if side is None:
+                continue
+            for item in row.get("statistics") or []:
+                key = names.get(item.get("type")) if isinstance(item, dict) else None
+                value = item.get("value") if key else None
+                if value in (None, ""):
+                    continue
+                try:
+                    value = float(value)
+                except (TypeError, ValueError):
+                    continue
+                if math.isfinite(value) and value >= 0:
+                    actuals[side][key] = value
+        return actuals
+
+    def _missing_market_statistics(self, market, actual_stats):
+        return bool(self._parse_stat_line_market(market)) and self._market_stat_value(market, actual_stats) is None
 
     def _first_scorer(self, fixture_id):
         events = self._api_football_get("/fixtures/events", {"fixture": fixture_id})
@@ -316,6 +359,16 @@ class SettlementService:
             for key in wanted_keys
             if key.startswith("statpal:") and key.replace("statpal:", "", 1)
         }
+        saved_links = {}
+        links = AlgoFixture.objects.filter(match_date=target_date)
+        if wanted_keys:
+            links = links.filter(match_id__in=wanted_keys)
+        for match_id, api_id, orientation in links.values_list(
+            "match_id", "source_payload__api_football_fixture_id",
+            "source_payload__provider_merge__api_football__orientation",
+        ).iterator(chunk_size=100):
+            if api_id and orientation != "reversed":
+                saved_links.setdefault(str(api_id), set()).add(str(match_id))
 
         def add_fixture(keys, fixture):
             normalized_keys = {str(key or "").strip() for key in keys if str(key or "").strip()}
@@ -324,6 +377,15 @@ class SettlementService:
             for key in keys:
                 key = str(key or "").strip()
                 if key:
+                    existing = fixture_map.get(key)
+                    if existing is not None:
+                        actuals = existing.setdefault("actual_stats", {})
+                        for side in ("home", "away"):
+                            supplement = (fixture.get("actual_stats") or {}).get(side) or {}
+                            side_actuals = actuals.setdefault(side, {})
+                            for stat, value in supplement.items():
+                                if side_actuals.get(stat) is None and value is not None:
+                                    side_actuals[stat] = value
                     fixture_map.setdefault(key, fixture)
 
         try:
@@ -339,18 +401,19 @@ class SettlementService:
             fixture_id = (fixture.get("fixture") or {}).get("id")
             if ((fixture.get("fixture") or {}).get("status") or {}).get("short") not in {"FT", "AET", "PEN"}:
                 continue
-            keys = [fixture_id]
+            keys = [fixture_id, *saved_links.get(str(fixture_id), ())]
             if wanted_keys and str(fixture_id or "") not in wanted_keys:
                 mapped_keys = set(
                     ProviderFixtureMap.objects.filter(api_fixture_id=str(fixture_id), active=True)
                     .values_list("provider_event_id", flat=True)
                 )
-                if not mapped_keys.intersection(wanted_keys | wanted_provider_ids):
+                if not mapped_keys.intersection(wanted_keys | wanted_provider_ids) and not saved_links.get(str(fixture_id)):
                     continue
             for mapping in ProviderFixtureMap.objects.filter(api_fixture_id=str(fixture_id), active=True):
                 keys.extend([mapping.api_fixture_id, mapping.provider_event_id, f"{mapping.provider}:{mapping.provider_event_id}"])
                 if mapping.provider == "statpal":
                     keys.append(f"statpal:{mapping.provider_event_id}")
+            fixture["actual_stats"] = self._api_final_statistics(fixture)
             add_fixture(keys, fixture)
 
         cached_query = FixtureCache.objects.filter(match_date=target_date, source="statpal")
@@ -617,6 +680,7 @@ class SettlementService:
         fixture_map = self._finished_fixture_map(target_date, pending_match_ids)
         updated = 0
         predictions_updated = 0
+        awaiting_statistics = {"picks": 0, "internal_predictions": 0}
         total_pnl = 0
         settled_sample = []
         settled_predictions_sample = []
@@ -665,6 +729,11 @@ class SettlementService:
             home_team = (teams.get("home") or {}).get("name")
             away_team = (teams.get("away") or {}).get("name")
             actual_stats = fixture.get("actual_stats") if isinstance(fixture.get("actual_stats"), dict) else {}
+            if self._missing_market_statistics(pick.market, actual_stats):
+                awaiting_statistics["picks"] += 1
+                pick.result = "Awaiting final match statistics."
+                pick.save(update_fields=["result"])
+                continue
             first_scorer = None
             if "First to Score" in pick.market:
                 if pick.match_id not in first_scorer_cache:
@@ -733,6 +802,11 @@ class SettlementService:
                 home_team = (teams.get("home") or {}).get("name")
                 away_team = (teams.get("away") or {}).get("name")
                 actual_stats = fixture.get("actual_stats") if isinstance(fixture.get("actual_stats"), dict) else {}
+                if self._missing_market_statistics(prediction.market, actual_stats):
+                    awaiting_statistics["internal_predictions"] += 1
+                    prediction.result = "Awaiting final match statistics."
+                    prediction_updates.append(prediction)
+                    continue
                 first_scorer = None
                 if "First to Score" in prediction.market:
                     if prediction.match_id not in first_scorer_cache:
@@ -795,6 +869,7 @@ class SettlementService:
             "database_updated_count": updated,
             "internal_predictions_updated_count": predictions_updated,
             "internal_prediction_status_counts": prediction_status_counts,
+            "awaiting_statistics": awaiting_statistics,
             "total_pnl": total_pnl,
             "settled_picks": settled_sample,
             "settled_internal_predictions": settled_predictions_sample,
@@ -874,7 +949,7 @@ class SettlementService:
     def _cards_total(actuals):
         yellow = actuals.get("yellow_cards")
         red = actuals.get("red_cards")
-        if yellow is None and red is None:
+        if yellow is None or red is None:
             return None
         return float(yellow or 0) + float(red or 0)
 
@@ -1045,13 +1120,19 @@ class SettlementService:
                 continue
 
             home_team, away_team = self._fixture_team_names(fixture)
+            actual_stats = fixture.get("actual_stats") or {}
+            if self._missing_market_statistics(selection.market, actual_stats):
+                selection.result = "Awaiting final match statistics."
+                selection.save(update_fields=["result"])
+                awaiting += 1
+                continue
             first_scorer = None
             if "First to Score" in selection.market:
                 if selection.match_id not in first_scorer_cache:
                     first_scorer_cache[selection.match_id] = self._first_scorer(selection.match_id)
                 first_scorer = first_scorer_cache[selection.match_id]
 
-            won = self._check_market(selection, home_goals, away_goals, home_team, away_team, first_scorer)
+            won = self._check_market(selection, home_goals, away_goals, home_team, away_team, first_scorer, actual_stats)
             if won is None:
                 selection.outcome = SlipSelection.Outcome.VOID
                 counts["void"] += 1
@@ -1065,11 +1146,7 @@ class SettlementService:
                     flagged_risky_losses += 1
 
             selection.score = f"{home_goals}-{away_goals}"
-            if selection.market.startswith("Corners "):
-                corner_total = self._fixture_corner_total(selection.match_id)
-                selection.result = f"{corner_total} corners" if corner_total is not None else selection.score
-            else:
-                selection.result = selection.score
+            selection.result = self._market_result_text(selection.market, selection.match_id, selection.score, actual_stats)
             selection.settled_at = timezone.now()
             settled_rows.append(selection)
 
