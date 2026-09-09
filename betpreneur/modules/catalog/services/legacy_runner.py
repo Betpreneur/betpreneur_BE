@@ -1851,7 +1851,8 @@ def _parse_line(label, prefix):
     if not label.startswith(prefix):
         return None
     try:
-        return float(label.replace(prefix, "", 1).strip())
+        line = float(label.replace(prefix, "", 1).strip())
+        return line if 0 <= line < float("inf") else None
     except (TypeError, ValueError):
         return None
 
@@ -1883,6 +1884,15 @@ def get_api_football_odds(fixture_id):
         return _odds_cache[fixture_id]
 
     odds = {}
+    identities = {}
+    supported_names = {
+        "match winner", "fulltime result", "1x2", "goals over/under", "goal line",
+        "both teams score", "both teams to score", "double chance",
+    }
+    for subject in ("corners", "cards", "shots on target", "booking points"):
+        for scope in ("", "home team ", "away team ", "home ", "away "):
+            for suffix in (" over/under", " over under", " totals", " total"):
+                supported_names.add(f"{scope}{subject}{suffix}")
     try:
         response = aps_get("/odds", {"fixture": fixture_id}, timeout=15)
         time.sleep(0.25)
@@ -1894,13 +1904,21 @@ def get_api_football_odds(fixture_id):
         for bookmaker in item.get("bookmakers", []) or []:
             for bet in bookmaker.get("bets", []) or []:
                 bet_id = bet.get("id")
-                bet_name = normalize(bet.get("name", ""))
+                bet_name = " ".join(normalize(bet.get("name", "")).split())
+                # Unknown periods, handicaps, player markets and composite bets
+                # must not fall through to a full-match market by numeric ID.
+                if bet_name not in supported_names:
+                    continue
                 for value in bet.get("values", []) or []:
-                    label = normalize(value.get("value", ""))
+                    label = " ".join(normalize(value.get("value", "")).split())
                     odd = value.get("odd")
+                    number = _decimal_odd(odd)
+                    if number is None or not 1 < number < float("inf"):
+                        continue
+                    before = {key: price for key, price in odds.items() if not key.startswith("_")}
                     market_prefix = _aps_total_market_prefix(bet_name)
 
-                    if bet_id == 45 or ("corner" in bet_name and ("over under" in bet_name or "over/under" in bet_name)):
+                    if "corner" in bet_name and ("over under" in bet_name or "over/under" in bet_name):
                         over_line = _parse_line(label, "over ")
                         under_line = _parse_line(label, "under ")
                         if over_line is not None:
@@ -1914,45 +1932,51 @@ def get_api_football_odds(fixture_id):
                             _remember_odd(odds, f"{market_prefix} Over {over_line:g}", odd)
                         elif under_line is not None:
                             _remember_odd(odds, f"{market_prefix} Under {under_line:g}", odd)
-                    elif bet_id == 1 or bet_name in ("match winner", "fulltime result", "1x2"):
+                    elif bet_name in ("match winner", "fulltime result", "1x2"):
                         if label in ("home", "1"):
                             _remember_odd(odds, "hw", odd)
                         elif label in ("away", "2"):
                             _remember_odd(odds, "aw", odd)
                         elif label in ("draw", "x"):
                             _remember_odd(odds, "d", odd)
-                    elif bet_id == 5 or (
-                        ("goals over/under" in bet_name or bet_name == "goal line")
-                        and "first half" not in bet_name
-                        and "1st half" not in bet_name
-                        and "second half" not in bet_name
-                        and "2nd half" not in bet_name
-                    ):
-                        if "over 1.5" in label:
+                    elif bet_name in ("goals over/under", "goal line"):
+                        if label == "over 1.5":
                             _remember_odd(odds, "o15", odd)
-                        elif "under 1.5" in label:
+                        elif label == "under 1.5":
                             _remember_odd(odds, "u15", odd)
-                        elif "over 2.5" in label:
+                        elif label == "over 2.5":
                             _remember_odd(odds, "o25", odd)
-                        elif "under 2.5" in label:
+                        elif label == "under 2.5":
                             _remember_odd(odds, "u25", odd)
-                        elif "over 3.5" in label:
+                        elif label == "over 3.5":
                             _remember_odd(odds, "o35", odd)
-                        elif "under 3.5" in label:
+                        elif label == "under 3.5":
                             _remember_odd(odds, "u35", odd)
-                        elif "over 4.5" in label:
+                        elif label == "over 4.5":
                             _remember_odd(odds, "o45", odd)
-                        elif "under 4.5" in label:
+                        elif label == "under 4.5":
                             _remember_odd(odds, "u45", odd)
-                    elif bet_id == 8 or bet_name in ("both teams score", "both teams to score"):
+                    elif bet_name in ("both teams score", "both teams to score"):
                         if label == "yes":
                             _remember_odd(odds, "btts_yes", odd)
                         elif label == "no":
                             _remember_odd(odds, "btts_no", odd)
-                    elif bet_id == 12 or bet_name == "double chance":
+                    elif bet_name == "double chance":
                         if label in ("home/away", "12"):
                             _remember_odd(odds, "12", odd)
+                    for key, price in odds.items():
+                        if key.startswith("_") or before.get(key) == price:
+                            continue
+                        identities[key] = {
+                            "source": "api_football", "fixture_id": str(fixture_id),
+                            "provider_market_id": bet_id, "provider_market_name": bet.get("name"),
+                            "selection": value.get("value"), "period": "full_match",
+                            "scope": "home" if market_prefix.startswith("Home ") else "away" if market_prefix.startswith("Away ") else "match",
+                            "bookmaker_id": bookmaker.get("id"), "bookmaker_name": bookmaker.get("name"),
+                        }
     odds = _finalize_odds_meta(odds)
+    for key, identity in identities.items():
+        odds["_meta"][key].update(identity)
     _odds_cache[fixture_id] = odds
     return odds
 

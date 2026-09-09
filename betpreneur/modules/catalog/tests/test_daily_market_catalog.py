@@ -250,3 +250,44 @@ class DailyMarketCatalogTests(SimpleTestCase):
         self.assertEqual(odds["Cards Over 3.5"], 1.72)
         self.assertEqual(odds["Shots On Target Over 7.5"], 1.83)
         self.assertEqual(odds["o45"], 3.4)
+
+    def test_api_odds_do_not_mix_period_scope_or_selection(self):
+        algo_runner._odds_cache.clear()
+        def bet(name, price, selection="Over 7.5", bet_id=45):
+            return {"id": bet_id, "name": name, "values": [{"value": selection, "odd": price}]}
+        response = [{"bookmakers": [{"id": 1, "name": "Book A", "bets": [
+            bet("Corners Over Under", "1.45"),
+            bet("Corners Over Under First Half", "7.50"),
+            bet("Corners Over Under (2nd Half)", "9.00"),
+            bet("Home Team Corners Over/Under", "6.00"),
+            bet("Away Team Corners Over/Under", "8.00"),
+            bet("Alternative Player Corners Over/Under", "12.00"),
+            bet("Corners Handicap", "13.00"),
+            bet("Goals Over/Under", "2.00", "Over 1.5", 5),
+            bet("Goals Over/Under", "30.00", "Over 1.5 / Yes", 5),
+            bet("Goals Over/Under First Half", "9.00", "Over 1.5", 5),
+            bet("Corners Over Under", "nan"),
+            bet("Corners Over Under", "inf"),
+            bet("Corners Over Under", "99", "Over nan"),
+        ]}, {"id": 2, "name": "Book B", "bets": [bet("Corners Over Under", "1.50")]}]}]
+        with patch.object(algo_runner, "aps_get", return_value=response), patch.object(algo_runner.time, "sleep"):
+            odds = algo_runner.get_api_football_odds("identity-test")
+        self.assertEqual(odds["Corners Over 7.5"], 1.5)
+        self.assertEqual(odds["Home Team Corners Over 7.5"], 6.0)
+        self.assertEqual(odds["Away Team Corners Over 7.5"], 8.0)
+        self.assertEqual(odds["o15"], 2.0)
+        self.assertNotIn("Corners Over nan", odds)
+        meta = odds["_meta"]["Corners Over 7.5"]
+        self.assertEqual(meta["bookmaker_id"], 2)
+        self.assertEqual(meta["provider_market_name"], "Corners Over Under")
+        self.assertEqual(meta["period"], "full_match")
+        self.assertEqual(meta["scope"], "match")
+        self.assertEqual(meta["bookmaker_count"], 2)
+
+    def test_api_odds_omit_full_match_price_when_only_half_market_exists(self):
+        algo_runner._odds_cache.clear()
+        response = [{"bookmakers": [{"bets": [{"id": 45, "name": "Corners Over/Under - First Half",
+            "values": [{"value": "Over 7.5", "odd": "7.5"}]}]}]}]
+        with patch.object(algo_runner, "aps_get", return_value=response), patch.object(algo_runner.time, "sleep"):
+            odds = algo_runner.get_api_football_odds("half-only")
+        self.assertNotIn("Corners Over 7.5", odds)
