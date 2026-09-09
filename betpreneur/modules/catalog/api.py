@@ -30,6 +30,8 @@ from .domain.sportybet_normalize import resolve
 from .domain.text import normalize_fixture_text, normalize_referee_name
 from .interface.views import api_response_payload
 from .models import (
+    CoachProfile,
+    CoachTacticalProfile,
     DataCoverage,
     FixtureCache,
     LeagueMarketProfile,
@@ -39,12 +41,17 @@ from .models import (
     SlipReviewMarketCache,
     StatPalFixtureSnapshot,
     TeamAliasMap,
+    TeamCoachAssignment,
     TeamMarketProfile,
     TeamProfile,
     TeamRecentFormProfile,
     TeamSeasonProfile,
 )
 from .services import legacy_runner
+from .services.coach_intelligence import (
+    CoachIntelligenceSyncService,
+    coach_intelligence_sync_service,
+)
 from .services.coverage_tracker import DataCoverageScope, DataCoverageTracker
 from .services.daily_build import StatPalDailyBuildService
 from .services.historical_hydrator import HistoricalHydrationScope, HistoricalTeamHydrator
@@ -71,6 +78,9 @@ from .services.team_intelligence_backfill import (
 
 __all__ = [
     "DEFAULT_RECENT_FORM_WINDOWS",
+    "CoachIntelligenceSyncService",
+    "CoachProfile",
+    "CoachTacticalProfile",
     "DailyTrackedLeague",
     "DataCoverage",
     "DataCoverageScope",
@@ -95,6 +105,7 @@ __all__ = [
     "StatPalDailyBuildService",
     "StatPalFixtureSnapshot",
     "TeamAliasMap",
+    "TeamCoachAssignment",
     "TeamIntelligenceBackfillService",
     "TeamIntelligenceService",
     "TeamMarketProfile",
@@ -103,6 +114,7 @@ __all__ = [
     "TeamSeasonProfile",
     "api_response_payload",
     "aps_get",
+    "coach_intelligence_sync_service",
     "daily_api_football_tracked_leagues",
     "daily_tracked_league_ids",
     "daily_tracked_leagues",

@@ -40,6 +40,11 @@ def refresh_team_intelligence_nightly(
             queue=settings.ALGO_STATPAL_QUEUE,
         ),
         _signature(
+            "betpreneur.modules.catalog.tasks.sync_coach_intelligence",
+            kwargs={"league_keys": league_keys},
+            queue=settings.ALGO_STATPAL_QUEUE,
+        ),
+        _signature(
             "betpreneur.modules.catalog.tasks.build_team_recent_form",
             kwargs={
                 "league_keys": league_keys,
@@ -74,6 +79,7 @@ def refresh_team_intelligence_nightly(
         "steps": [
             "sync_fixture_horizon",
             "hydrate_team_intelligence_history",
+            "sync_coach_intelligence",
             "build_team_recent_form",
             "build_team_market_profiles",
             "refresh_team_data_coverage",

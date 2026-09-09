@@ -6,12 +6,16 @@ import json
 
 from celery import current_app
 from django.contrib import admin, messages
+from django.core.exceptions import PermissionDenied
+from django.http import HttpResponseNotAllowed, HttpResponseRedirect
 from django.urls import path, reverse
 from django.utils import timezone
 from django.utils.html import format_html, format_html_join
 
 from betpreneur.modules.catalog.models import (
     BookmakerLeagueMap,
+    CoachProfile,
+    CoachTacticalProfile,
     DataCoverage,
     FixtureCache,
     LeagueMarketProfile,
@@ -22,6 +26,7 @@ from betpreneur.modules.catalog.models import (
     StatPalFixtureCoverage,
     StatPalFixtureSnapshot,
     TeamAliasMap,
+    TeamCoachAssignment,
     TeamMarketProfile,
     TeamProfile,
     TeamRecentFormProfile,
@@ -35,6 +40,35 @@ from betpreneur.modules.catalog.tasks import build_statpal_daily_cache
 
 BUILD_CACHE_TASK = "betpreneur.modules.picks.tasks.build_slip_review_market_cache"
 CLEANUP_CACHE_TASK = "betpreneur.modules.picks.tasks.cleanup_slip_review_market_cache"
+SYNC_COACHES_TASK = "betpreneur.modules.catalog.tasks.sync_coach_intelligence"
+
+
+class CoachCoverageFilter(admin.SimpleListFilter):
+    title = "manager coverage"
+    parameter_name = "manager_coverage"
+
+    def lookups(self, request, model_admin):
+        return (
+            ("missing", "Manager missing"),
+            ("unresearched", "Manager unresearched"),
+            ("in_progress", "Research in progress"),
+            ("approved", "Approved"),
+        )
+
+    def queryset(self, request, queryset):
+        if self.value() == "missing":
+            return queryset.exclude(coach_assignments__currently_active=True)
+        statuses = {
+            "unresearched": [CoachProfile.ResearchStatus.UNRESEARCHED],
+            "in_progress": [CoachProfile.ResearchStatus.DRAFT, CoachProfile.ResearchStatus.REVIEWED],
+            "approved": [CoachProfile.ResearchStatus.APPROVED],
+        }.get(self.value())
+        if statuses:
+            return queryset.filter(
+                coach_assignments__currently_active=True,
+                coach_assignments__coach__research_status__in=statuses,
+            ).distinct()
+        return queryset
 
 
 @admin.register(FixtureCache)
@@ -68,14 +102,35 @@ class TeamProfileAdmin(admin.ModelAdmin):
         "canonical_name",
         "country",
         "primary_league_name",
+        "current_manager",
+        "coach_research_status",
         "intelligence_coverage_status",
         "intelligence_last_refresh",
         "active",
         "updated_at",
     )
-    list_filter = ("active", "country", "primary_league_key")
+    list_filter = (CoachCoverageFilter, "active", "country", "primary_league_key")
     search_fields = ("canonical_name", "canonical_normalized", "country", "primary_league_name", "provider_ids", "aliases")
     readonly_fields = ("created_at", "updated_at", "intelligence_coverage_status", "intelligence_last_refresh")
+
+    def get_queryset(self, request):
+        return super().get_queryset(request).prefetch_related("coach_assignments__coach")
+
+    @admin.display(description="Current manager")
+    def current_manager(self, obj):
+        assignment = next(
+            (item for item in obj.coach_assignments.all() if item.currently_active),
+            None,
+        )
+        return assignment.coach.canonical_name if assignment else "Missing"
+
+    @admin.display(description="Coach research")
+    def coach_research_status(self, obj):
+        assignment = next(
+            (item for item in obj.coach_assignments.all() if item.currently_active),
+            None,
+        )
+        return assignment.coach.research_status if assignment else "missing"
 
     @admin.display(description="Coverage")
     def intelligence_coverage_status(self, obj):
@@ -105,6 +160,229 @@ class TeamProfileAdmin(admin.ModelAdmin):
         if season_profile:
             return season_profile.computed_at or season_profile.fetched_at or season_profile.updated_at
         return obj.updated_at
+
+
+class CoachTacticalProfileInline(admin.StackedInline):
+    model = CoachTacticalProfile
+    extra = 1
+    show_change_link = True
+    fields = (
+        ("status", "version", "team", "confidence"),
+        ("effective_from", "effective_to"),
+        ("preferred_formation", "alternative_formations"),
+        "philosophy_summary",
+        ("attacking_style", "build_up_style", "defensive_style"),
+        ("possession_tendency", "build_up_patience", "passing_directness"),
+        ("attacking_tempo", "attacking_width", "crossing_tendency"),
+        ("counterattack_tendency", "attacking_risk", "pressing_intensity"),
+        ("defensive_block_height", "defensive_line_height", "defensive_compactness"),
+        ("transition_defence", "defensive_aggression", "set_piece_emphasis"),
+        ("rotation_tendency", "tactical_flexibility", "youth_usage"),
+        "source_urls",
+        "research_notes",
+    )
+
+
+@admin.register(CoachProfile)
+class CoachProfileAdmin(admin.ModelAdmin):
+    change_list_template = "admin/catalog/coachprofile/change_list.html"
+    list_display = (
+        "canonical_name",
+        "current_teams",
+        "provider_coach_id",
+        "research_status",
+        "research_confidence",
+        "approved_tactical_profiles",
+        "last_seen_at",
+        "active",
+    )
+    list_filter = ("research_status", "research_confidence", "active", "provider")
+    search_fields = (
+        "canonical_name", "canonical_normalized", "provider_name", "provider_coach_id",
+        "aliases", "team_assignments__team__canonical_name",
+    )
+    readonly_fields = (
+        "canonical_normalized", "provider", "provider_coach_id", "provider_name",
+        "provider_payload_pretty", "first_seen_at", "last_seen_at", "created_at", "updated_at",
+    )
+    fieldsets = (
+        ("Identity", {"fields": (
+            "canonical_name", "canonical_normalized", "nationality", "date_of_birth", "aliases", "active",
+        )}),
+        ("Research", {"fields": (
+            "research_status", "research_confidence", "research_sources", "research_notes",
+            "reviewed_by", "reviewed_at",
+        )}),
+        ("StatPal", {"classes": ("collapse",), "fields": (
+            "provider", "provider_coach_id", "provider_name", "provider_payload_pretty",
+            "first_seen_at", "last_seen_at",
+        )}),
+        ("Audit", {"classes": ("collapse",), "fields": ("metadata", "created_at", "updated_at")}),
+    )
+    inlines = (CoachTacticalProfileInline,)
+    actions = ("mark_reviewed", "mark_approved", "mark_stale")
+
+    def get_queryset(self, request):
+        return super().get_queryset(request).prefetch_related("team_assignments__team", "tactical_profiles")
+
+    def get_urls(self):
+        return [
+            path(
+                "sync-tracked-leagues/",
+                self.admin_site.admin_view(self.sync_tracked_leagues),
+                name="catalog_coachprofile_sync_tracked_leagues",
+            )
+        ] + super().get_urls()
+
+    def sync_tracked_leagues(self, request):
+        if not self.has_change_permission(request):
+            raise PermissionDenied
+        if request.method != "POST":
+            return HttpResponseNotAllowed(["POST"])
+        task = current_app.send_task(SYNC_COACHES_TASK)
+        self.message_user(
+            request,
+            f"Coach synchronization queued for all tracked StatPal leagues. Task: {task.id}",
+            level=messages.SUCCESS,
+        )
+        return HttpResponseRedirect(reverse("admin:catalog_coachprofile_changelist"))
+
+    @admin.display(description="Current teams")
+    def current_teams(self, obj):
+        return ", ".join(
+            assignment.team.canonical_name
+            for assignment in obj.team_assignments.all()
+            if assignment.currently_active
+        ) or "-"
+
+    @admin.display(description="Approved profiles")
+    def approved_tactical_profiles(self, obj):
+        return sum(
+            profile.status == CoachTacticalProfile.Status.APPROVED
+            for profile in obj.tactical_profiles.all()
+        )
+
+    @admin.display(description="Provider payload")
+    def provider_payload_pretty(self, obj):
+        return format_html(
+            "<pre style='white-space:pre-wrap'>{}</pre>",
+            json.dumps(obj.provider_payload or {}, indent=2, sort_keys=True)[:50000],
+        )
+
+    def save_model(self, request, obj, form, change):
+        if obj.research_status in {CoachProfile.ResearchStatus.REVIEWED, CoachProfile.ResearchStatus.APPROVED}:
+            obj.reviewed_by = request.user
+            obj.reviewed_at = timezone.now()
+        super().save_model(request, obj, form, change)
+
+    def save_formset(self, request, form, formset, change):
+        instances = formset.save(commit=False)
+        for deleted in formset.deleted_objects:
+            deleted.delete()
+        for instance in instances:
+            if isinstance(instance, CoachTacticalProfile):
+                if not instance.created_by_id:
+                    instance.created_by = request.user
+                if instance.status == CoachTacticalProfile.Status.APPROVED:
+                    instance.reviewed_by = request.user
+                    instance.reviewed_at = timezone.now()
+                    form.instance.research_status = CoachProfile.ResearchStatus.APPROVED
+                    form.instance.research_confidence = instance.confidence
+                    form.instance.reviewed_by = request.user
+                    form.instance.reviewed_at = instance.reviewed_at
+                    form.instance.save(update_fields=[
+                        "research_status", "research_confidence", "reviewed_by", "reviewed_at", "updated_at",
+                    ])
+            instance.save()
+        formset.save_m2m()
+
+    @admin.action(description="Mark selected coach profiles reviewed")
+    def mark_reviewed(self, request, queryset):
+        queryset.update(
+            research_status=CoachProfile.ResearchStatus.REVIEWED,
+            reviewed_by=request.user,
+            reviewed_at=timezone.now(),
+        )
+
+    @admin.action(description="Approve selected coach profiles")
+    def mark_approved(self, request, queryset):
+        queryset.update(
+            research_status=CoachProfile.ResearchStatus.APPROVED,
+            reviewed_by=request.user,
+            reviewed_at=timezone.now(),
+        )
+
+    @admin.action(description="Mark selected coach profiles stale")
+    def mark_stale(self, request, queryset):
+        queryset.update(research_status=CoachProfile.ResearchStatus.STALE)
+
+
+@admin.register(TeamCoachAssignment)
+class TeamCoachAssignmentAdmin(admin.ModelAdmin):
+    list_display = (
+        "team", "league", "coach", "role", "currently_active", "started_on",
+        "date_precision", "last_confirmed_at", "coach_research_status",
+    )
+    list_filter = (
+        "currently_active", "role", "date_precision", "provider",
+        "team__primary_league_key", "coach__research_status",
+    )
+    search_fields = (
+        "team__canonical_name", "coach__canonical_name", "provider_team_id",
+        "provider_coach_id", "provider_team_name", "provider_coach_name",
+    )
+    readonly_fields = (
+        "provider", "provider_team_id", "provider_coach_id", "provider_team_name",
+        "provider_coach_name", "first_detected_at", "last_confirmed_at",
+        "provider_payload_pretty", "created_at", "updated_at",
+    )
+    list_select_related = ("team", "coach")
+    date_hierarchy = "first_detected_at"
+
+    @admin.display(description="League", ordering="team__primary_league_name")
+    def league(self, obj):
+        return obj.team.primary_league_name
+
+    @admin.display(description="Research", ordering="coach__research_status")
+    def coach_research_status(self, obj):
+        return obj.coach.research_status
+
+    @admin.display(description="Provider payload")
+    def provider_payload_pretty(self, obj):
+        return format_html(
+            "<pre style='white-space:pre-wrap'>{}</pre>",
+            json.dumps(obj.provider_payload or {}, indent=2, sort_keys=True)[:50000],
+        )
+
+
+@admin.register(CoachTacticalProfile)
+class CoachTacticalProfileAdmin(admin.ModelAdmin):
+    list_display = (
+        "coach", "team", "version", "status", "confidence", "preferred_formation",
+        "effective_from", "effective_to", "reviewed_at",
+    )
+    list_filter = ("status", "confidence", "preferred_formation", "team__primary_league_key")
+    search_fields = (
+        "coach__canonical_name", "team__canonical_name", "philosophy_summary",
+        "attacking_style", "defensive_style", "build_up_style", "research_notes",
+    )
+    readonly_fields = ("created_at", "updated_at")
+    list_select_related = ("coach", "team")
+
+    def save_model(self, request, obj, form, change):
+        if not obj.created_by_id:
+            obj.created_by = request.user
+        if obj.status == CoachTacticalProfile.Status.APPROVED:
+            obj.reviewed_by = request.user
+            obj.reviewed_at = timezone.now()
+            obj.coach.research_status = CoachProfile.ResearchStatus.APPROVED
+            obj.coach.research_confidence = obj.confidence
+            obj.coach.reviewed_by = request.user
+            obj.coach.reviewed_at = obj.reviewed_at
+            obj.coach.save(update_fields=[
+                "research_status", "research_confidence", "reviewed_by", "reviewed_at", "updated_at",
+            ])
+        super().save_model(request, obj, form, change)
 
 
 @admin.register(TeamSeasonProfile)

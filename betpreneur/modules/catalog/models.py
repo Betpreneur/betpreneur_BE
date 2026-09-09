@@ -3,7 +3,11 @@
 Table names are pinned to their original algo_* values — this refactor moves
 Python packages, never data.
 """
+from django.conf import settings
+from django.core.exceptions import ValidationError
+from django.core.validators import MaxValueValidator, MinValueValidator
 from django.db import models
+from django.db.models import Q
 
 
 class FixtureCache(models.Model):
@@ -78,6 +82,260 @@ class TeamProfile(models.Model):
 
     def __str__(self):
         return self.canonical_name
+
+
+class CoachProfile(models.Model):
+    """Provider identity and research state for a football coach."""
+
+    class ResearchStatus(models.TextChoices):
+        UNRESEARCHED = "unresearched", "Unresearched"
+        DRAFT = "draft", "Draft"
+        REVIEWED = "reviewed", "Reviewed"
+        APPROVED = "approved", "Approved"
+        STALE = "stale", "Stale"
+
+    class Confidence(models.TextChoices):
+        UNKNOWN = "unknown", "Unknown"
+        LOW = "low", "Low"
+        MEDIUM = "medium", "Medium"
+        HIGH = "high", "High"
+
+    canonical_name = models.CharField(max_length=255)
+    canonical_normalized = models.CharField(max_length=255, db_index=True)
+    provider = models.CharField(max_length=30, default="statpal")
+    provider_coach_id = models.CharField(max_length=120, blank=True)
+    provider_name = models.CharField(max_length=255, blank=True)
+    nationality = models.CharField(max_length=100, blank=True)
+    date_of_birth = models.DateField(null=True, blank=True)
+    aliases = models.JSONField(default=list, blank=True)
+    provider_payload = models.JSONField(default=dict, blank=True)
+    metadata = models.JSONField(default=dict, blank=True)
+    research_status = models.CharField(
+        max_length=20,
+        choices=ResearchStatus.choices,
+        default=ResearchStatus.UNRESEARCHED,
+    )
+    research_confidence = models.CharField(
+        max_length=20,
+        choices=Confidence.choices,
+        default=Confidence.UNKNOWN,
+    )
+    research_sources = models.JSONField(default=list, blank=True)
+    research_notes = models.TextField(blank=True)
+    reviewed_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="reviewed_coach_profiles",
+    )
+    reviewed_at = models.DateTimeField(null=True, blank=True)
+    active = models.BooleanField(default=True)
+    first_seen_at = models.DateTimeField(null=True, blank=True)
+    last_seen_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "catalog_coachprofile"
+        ordering = ["canonical_name"]
+        indexes = [
+            models.Index(fields=["provider", "provider_coach_id"]),
+            models.Index(fields=["research_status", "active"]),
+        ]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["provider", "provider_coach_id"],
+                condition=~Q(provider_coach_id=""),
+                name="unique_catalog_provider_coach",
+            )
+        ]
+
+    def __str__(self):
+        return self.canonical_name
+
+
+class TeamCoachAssignment(models.Model):
+    """Effective-dated team/coach relationship discovered from a provider."""
+
+    class Role(models.TextChoices):
+        PERMANENT = "permanent", "Permanent"
+        INTERIM = "interim", "Interim"
+        CARETAKER = "caretaker", "Caretaker"
+        UNKNOWN = "unknown", "Unknown"
+
+    class DatePrecision(models.TextChoices):
+        CONFIRMED = "confirmed", "Confirmed"
+        ESTIMATED = "estimated", "Estimated"
+        DETECTED = "detected", "First detected"
+
+    team = models.ForeignKey(TeamProfile, on_delete=models.CASCADE, related_name="coach_assignments")
+    coach = models.ForeignKey(CoachProfile, on_delete=models.PROTECT, related_name="team_assignments")
+    role = models.CharField(max_length=20, choices=Role.choices, default=Role.UNKNOWN)
+    started_on = models.DateField(null=True, blank=True)
+    ended_on = models.DateField(null=True, blank=True)
+    date_precision = models.CharField(
+        max_length=20,
+        choices=DatePrecision.choices,
+        default=DatePrecision.DETECTED,
+    )
+    currently_active = models.BooleanField(default=True)
+    change_reason = models.CharField(max_length=80, blank=True)
+    provider = models.CharField(max_length=30, default="statpal")
+    provider_team_id = models.CharField(max_length=120, blank=True)
+    provider_coach_id = models.CharField(max_length=120, blank=True)
+    provider_team_name = models.CharField(max_length=255, blank=True)
+    provider_coach_name = models.CharField(max_length=255, blank=True)
+    first_detected_at = models.DateTimeField()
+    last_confirmed_at = models.DateTimeField()
+    provider_payload = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "catalog_teamcoachassignment"
+        ordering = ["-currently_active", "team__canonical_name", "-first_detected_at"]
+        indexes = [
+            models.Index(fields=["currently_active", "last_confirmed_at"]),
+            models.Index(fields=["provider", "provider_team_id"]),
+            models.Index(fields=["provider", "provider_coach_id"]),
+        ]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["team"],
+                condition=Q(currently_active=True),
+                name="unique_current_coach_per_team",
+            )
+        ]
+
+    def __str__(self):
+        return f"{self.team} - {self.coach}"
+
+    def clean(self):
+        errors = {}
+        if self.started_on and self.ended_on and self.ended_on < self.started_on:
+            errors["ended_on"] = "The end date cannot be earlier than the start date."
+        if self.currently_active and self.ended_on:
+            errors["ended_on"] = "A current assignment cannot have an end date."
+        if errors:
+            raise ValidationError(errors)
+
+
+class CoachTacticalProfile(models.Model):
+    """Versioned, human-reviewed tactical intelligence for a coach."""
+
+    class Status(models.TextChoices):
+        DRAFT = "draft", "Draft"
+        APPROVED = "approved", "Approved"
+        ARCHIVED = "archived", "Archived"
+
+    RATING_VALIDATORS = [MinValueValidator(0), MaxValueValidator(100)]
+
+    coach = models.ForeignKey(CoachProfile, on_delete=models.CASCADE, related_name="tactical_profiles")
+    team = models.ForeignKey(
+        TeamProfile,
+        null=True,
+        blank=True,
+        on_delete=models.CASCADE,
+        related_name="coach_tactical_profiles",
+        help_text="Leave blank for the coach's general philosophy; select a team for a club-specific implementation.",
+    )
+    status = models.CharField(max_length=20, choices=Status.choices, default=Status.DRAFT)
+    version = models.PositiveIntegerField(default=1)
+    effective_from = models.DateField(null=True, blank=True)
+    effective_to = models.DateField(null=True, blank=True)
+    preferred_formation = models.CharField(max_length=40, blank=True)
+    alternative_formations = models.JSONField(default=list, blank=True)
+    philosophy_summary = models.TextField(blank=True)
+    attacking_style = models.CharField(max_length=120, blank=True)
+    defensive_style = models.CharField(max_length=120, blank=True)
+    build_up_style = models.CharField(max_length=120, blank=True)
+    leading_approach = models.TextField(blank=True)
+    trailing_approach = models.TextField(blank=True)
+    attacking_notes = models.TextField(blank=True)
+    defensive_notes = models.TextField(blank=True)
+    match_management_notes = models.TextField(blank=True)
+    set_piece_notes = models.TextField(blank=True)
+    possession_tendency = models.PositiveSmallIntegerField(null=True, blank=True, validators=RATING_VALIDATORS)
+    build_up_patience = models.PositiveSmallIntegerField(null=True, blank=True, validators=RATING_VALIDATORS)
+    passing_directness = models.PositiveSmallIntegerField(null=True, blank=True, validators=RATING_VALIDATORS)
+    attacking_tempo = models.PositiveSmallIntegerField(null=True, blank=True, validators=RATING_VALIDATORS)
+    attacking_width = models.PositiveSmallIntegerField(null=True, blank=True, validators=RATING_VALIDATORS)
+    crossing_tendency = models.PositiveSmallIntegerField(null=True, blank=True, validators=RATING_VALIDATORS)
+    counterattack_tendency = models.PositiveSmallIntegerField(null=True, blank=True, validators=RATING_VALIDATORS)
+    attacking_risk = models.PositiveSmallIntegerField(null=True, blank=True, validators=RATING_VALIDATORS)
+    pressing_intensity = models.PositiveSmallIntegerField(null=True, blank=True, validators=RATING_VALIDATORS)
+    defensive_block_height = models.PositiveSmallIntegerField(null=True, blank=True, validators=RATING_VALIDATORS)
+    defensive_line_height = models.PositiveSmallIntegerField(null=True, blank=True, validators=RATING_VALIDATORS)
+    defensive_compactness = models.PositiveSmallIntegerField(null=True, blank=True, validators=RATING_VALIDATORS)
+    transition_defence = models.PositiveSmallIntegerField(null=True, blank=True, validators=RATING_VALIDATORS)
+    defensive_aggression = models.PositiveSmallIntegerField(null=True, blank=True, validators=RATING_VALIDATORS)
+    set_piece_emphasis = models.PositiveSmallIntegerField(null=True, blank=True, validators=RATING_VALIDATORS)
+    rotation_tendency = models.PositiveSmallIntegerField(null=True, blank=True, validators=RATING_VALIDATORS)
+    tactical_flexibility = models.PositiveSmallIntegerField(null=True, blank=True, validators=RATING_VALIDATORS)
+    youth_usage = models.PositiveSmallIntegerField(null=True, blank=True, validators=RATING_VALIDATORS)
+    confidence = models.CharField(
+        max_length=20,
+        choices=CoachProfile.Confidence.choices,
+        default=CoachProfile.Confidence.UNKNOWN,
+    )
+    source_urls = models.JSONField(default=list, blank=True)
+    research_notes = models.TextField(blank=True)
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="created_coach_tactical_profiles",
+    )
+    reviewed_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="reviewed_coach_tactical_profiles",
+    )
+    reviewed_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "catalog_coachtacticalprofile"
+        ordering = ["coach__canonical_name", "-version", "-updated_at"]
+        indexes = [
+            models.Index(fields=["status", "confidence"]),
+            models.Index(fields=["coach", "team", "status"]),
+        ]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["coach", "version"],
+                condition=Q(team__isnull=True),
+                name="unique_general_coach_tactical_version",
+            ),
+            models.UniqueConstraint(
+                fields=["coach", "team", "version"],
+                condition=Q(team__isnull=False),
+                name="unique_team_coach_tactical_version",
+            ),
+        ]
+
+    def __str__(self):
+        scope = self.team.canonical_name if self.team_id else "general"
+        return f"{self.coach} - {scope} v{self.version}"
+
+    def clean(self):
+        errors = {}
+        if self.effective_from and self.effective_to and self.effective_to < self.effective_from:
+            errors["effective_to"] = "The effective end date cannot be earlier than the start date."
+        if self.status == self.Status.APPROVED:
+            if self.confidence == CoachProfile.Confidence.UNKNOWN:
+                errors["confidence"] = "Approved tactical profiles require a confidence level."
+            if not self.source_urls:
+                errors["source_urls"] = "Approved tactical profiles require at least one evidence source."
+            if not self.philosophy_summary.strip():
+                errors["philosophy_summary"] = "Approved tactical profiles require a philosophy summary."
+        if errors:
+            raise ValidationError(errors)
 
 
 class TeamSeasonProfile(models.Model):

@@ -34,6 +34,10 @@ class TeamIntelligenceScheduleTests(SimpleTestCase):
             settings.ALGO_STATPAL_QUEUE,
         )
         self.assertEqual(
+            routes["betpreneur.modules.catalog.tasks.sync_coach_intelligence"]["queue"],
+            settings.ALGO_STATPAL_QUEUE,
+        )
+        self.assertEqual(
             routes["betpreneur.modules.catalog.tasks.build_team_recent_form"]["queue"],
             settings.ALGO_STATPAL_QUEUE,
         )

@@ -1,0 +1,12 @@
+{% extends "admin/change_list.html" %}
+{% load i18n %}
+
+{% block object-tools-items %}
+  <li>
+    <form method="post" action="{% url 'admin:catalog_coachprofile_sync_tracked_leagues' %}">
+      {% csrf_token %}
+      <button class="button" type="submit">Sync tracked leagues</button>
+    </form>
+  </li>
+  {{ block.super }}
+{% endblock %}

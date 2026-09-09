@@ -7,6 +7,32 @@ from datetime import date
 from celery import shared_task
 
 
+@shared_task(
+    bind=True,
+    ignore_result=False,
+    max_retries=2,
+    default_retry_delay=600,
+    soft_time_limit=3600,
+    time_limit=4200,
+)
+def sync_coach_intelligence(self, league_keys=None, max_teams=None, include_coach_details=False):
+    """Discover current managers for every team in the tracked StatPal leagues."""
+    from betpreneur.modules.catalog.services.coach_intelligence import (
+        coach_intelligence_sync_service,
+    )
+
+    try:
+        return coach_intelligence_sync_service.sync(
+            league_keys=league_keys,
+            max_teams=max_teams,
+            include_coach_details=include_coach_details,
+        )
+    except Exception as exc:
+        if self.request.retries < self.max_retries:
+            raise self.retry(exc=exc, countdown=600 * (self.request.retries + 1))
+        raise
+
+
 @shared_task(bind=True, ignore_result=False, soft_time_limit=1500, time_limit=1800)
 def sync_fixture_horizon(self, days=3, league_ids=None):
     """
