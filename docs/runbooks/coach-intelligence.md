@@ -40,10 +40,11 @@ other competitions without a standings table.
 1. Use **Catalog > Team profiles** to find teams whose current manager is missing.
 2. Use **Catalog > Coach profiles** and filter by `Unresearched`.
 3. Add a general or team-specific tactical profile from the coach page.
-4. Enter 0-100 tactical ratings, a confidence level, a philosophy summary, and evidence URLs.
+4. Enter 0-100 tactical ratings, a philosophy summary, and evidence URLs.
 5. Approve the tactical profile when reviewed.
 
-Approved profiles require a confidence level, a philosophy summary, and at least one
-evidence source. Manager changes close the previous assignment and create a new current
+Confidence is calculated automatically from rating coverage, written tactical detail,
+formations, evidence sources, and review status. Approved profiles require a philosophy
+summary and at least one evidence source. Manager changes close the previous assignment and create a new current
 assignment with detected date precision; administrators can replace those dates with
 confirmed appointment/departure dates later.

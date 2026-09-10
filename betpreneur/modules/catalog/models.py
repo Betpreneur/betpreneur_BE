@@ -230,6 +230,38 @@ class CoachTacticalProfile(models.Model):
         ARCHIVED = "archived", "Archived"
 
     RATING_VALIDATORS = [MinValueValidator(0), MaxValueValidator(100)]
+    RATING_FIELDS = (
+        "possession_tendency",
+        "build_up_patience",
+        "passing_directness",
+        "attacking_tempo",
+        "attacking_width",
+        "crossing_tendency",
+        "counterattack_tendency",
+        "attacking_risk",
+        "pressing_intensity",
+        "defensive_block_height",
+        "defensive_line_height",
+        "defensive_compactness",
+        "transition_defence",
+        "defensive_aggression",
+        "set_piece_emphasis",
+        "rotation_tendency",
+        "tactical_flexibility",
+        "youth_usage",
+    )
+    NARRATIVE_TARGETS = {
+        "philosophy_summary": 160,
+        "attacking_style": 40,
+        "defensive_style": 40,
+        "build_up_style": 40,
+        "leading_approach": 80,
+        "trailing_approach": 80,
+        "attacking_notes": 120,
+        "defensive_notes": 120,
+        "match_management_notes": 120,
+        "set_piece_notes": 80,
+    }
 
     coach = models.ForeignKey(CoachProfile, on_delete=models.CASCADE, related_name="tactical_profiles")
     team = models.ForeignKey(
@@ -278,6 +310,12 @@ class CoachTacticalProfile(models.Model):
         max_length=20,
         choices=CoachProfile.Confidence.choices,
         default=CoachProfile.Confidence.UNKNOWN,
+        editable=False,
+    )
+    confidence_score = models.PositiveSmallIntegerField(
+        default=0,
+        editable=False,
+        validators=RATING_VALIDATORS,
     )
     source_urls = models.JSONField(default=list, blank=True)
     research_notes = models.TextField(blank=True)
@@ -324,18 +362,64 @@ class CoachTacticalProfile(models.Model):
         return f"{self.coach} - {scope} v{self.version}"
 
     def clean(self):
+        self.recalculate_confidence()
         errors = {}
         if self.effective_from and self.effective_to and self.effective_to < self.effective_from:
             errors["effective_to"] = "The effective end date cannot be earlier than the start date."
         if self.status == self.Status.APPROVED:
-            if self.confidence == CoachProfile.Confidence.UNKNOWN:
-                errors["confidence"] = "Approved tactical profiles require a confidence level."
             if not self.source_urls:
                 errors["source_urls"] = "Approved tactical profiles require at least one evidence source."
-            if not self.philosophy_summary.strip():
+            if not str(self.philosophy_summary or "").strip():
                 errors["philosophy_summary"] = "Approved tactical profiles require a philosophy summary."
         if errors:
             raise ValidationError(errors)
+
+    def save(self, *args, **kwargs):
+        self.recalculate_confidence()
+        if kwargs.get("update_fields") is not None:
+            kwargs["update_fields"] = set(kwargs["update_fields"]) | {"confidence", "confidence_score"}
+        super().save(*args, **kwargs)
+
+    def recalculate_confidence(self):
+        """Calculate evidence confidence from profile coverage, never tactical intensity."""
+        ratings_completed = sum(getattr(self, field) is not None for field in self.RATING_FIELDS)
+        rating_score = 45 * ratings_completed / len(self.RATING_FIELDS)
+
+        narrative_completion = sum(
+            min(len(str(getattr(self, field) or "").strip()) / target, 1)
+            for field, target in self.NARRATIVE_TARGETS.items()
+        )
+        narrative_score = 25 * narrative_completion / len(self.NARRATIVE_TARGETS)
+
+        formation_score = 5 if str(self.preferred_formation or "").strip() else 0
+        formation_score += min(3, self._json_item_count(self.alternative_formations) * 1.5)
+        scope_score = 2 if self.effective_from else 0
+        source_score = min(15, self._json_item_count(self.source_urls) * 5)
+        review_score = 5 if self.status == self.Status.APPROVED else 0
+
+        self.confidence_score = round(
+            min(
+                100,
+                rating_score + narrative_score + formation_score + scope_score + source_score + review_score,
+            )
+        )
+        if self.confidence_score == 0:
+            self.confidence = CoachProfile.Confidence.UNKNOWN
+        elif self.confidence_score < 40:
+            self.confidence = CoachProfile.Confidence.LOW
+        elif self.confidence_score < 70:
+            self.confidence = CoachProfile.Confidence.MEDIUM
+        else:
+            self.confidence = CoachProfile.Confidence.HIGH
+        return self.confidence_score
+
+    @staticmethod
+    def _json_item_count(value):
+        if isinstance(value, (list, tuple, set)):
+            return sum(bool(str(item).strip()) for item in value)
+        if isinstance(value, dict):
+            return sum(item not in (None, "", [], {}) for item in value.values())
+        return int(bool(str(value or "").strip()))
 
 
 class TeamSeasonProfile(models.Model):

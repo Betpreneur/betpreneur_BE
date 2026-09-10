@@ -1,3 +1,5 @@
+from datetime import date
+
 from django.core.exceptions import ValidationError
 from django.test import TestCase
 
@@ -149,7 +151,7 @@ class CoachIntelligenceSyncTests(TestCase):
         with self.assertRaises(ValidationError):
             profile.full_clean()
 
-    def test_approved_tactical_profile_requires_evidence_and_confidence(self):
+    def test_approved_tactical_profile_requires_evidence(self):
         coach = CoachProfile.objects.create(
             canonical_name="Research Manager",
             canonical_normalized="research manager",
@@ -157,11 +159,41 @@ class CoachIntelligenceSyncTests(TestCase):
         profile = CoachTacticalProfile(
             coach=coach,
             status=CoachTacticalProfile.Status.APPROVED,
+            effective_from=date(2026, 7, 1),
             philosophy_summary="A structured positional approach.",
         )
 
         with self.assertRaises(ValidationError) as raised:
             profile.full_clean()
 
-        self.assertIn("confidence", raised.exception.message_dict)
         self.assertIn("source_urls", raised.exception.message_dict)
+
+    def test_tactical_confidence_is_calculated_from_profile_coverage(self):
+        coach = CoachProfile.objects.create(
+            canonical_name="Detailed Manager",
+            canonical_normalized="detailed manager",
+        )
+        sparse = CoachTacticalProfile.objects.create(
+            coach=coach,
+            version=1,
+            philosophy_summary="A developing tactical profile.",
+        )
+        detailed = CoachTacticalProfile(
+            coach=coach,
+            version=2,
+            status=CoachTacticalProfile.Status.APPROVED,
+            effective_from=date(2026, 7, 1),
+            preferred_formation="4-3-3",
+            alternative_formations=["4-2-3-1", "3-4-3"],
+            source_urls=["https://example.com/one", "https://example.com/two", "https://example.com/three"],
+        )
+        for field in detailed.RATING_FIELDS:
+            setattr(detailed, field, 50)
+        for field, target in detailed.NARRATIVE_TARGETS.items():
+            setattr(detailed, field, "x" * target)
+        detailed.full_clean()
+        detailed.save()
+
+        self.assertLess(sparse.confidence_score, detailed.confidence_score)
+        self.assertEqual(detailed.confidence_score, 100)
+        self.assertEqual(detailed.confidence, CoachProfile.Confidence.HIGH)

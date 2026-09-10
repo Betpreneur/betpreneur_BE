@@ -166,8 +166,9 @@ class CoachTacticalProfileInline(admin.StackedInline):
     model = CoachTacticalProfile
     extra = 1
     show_change_link = True
+    readonly_fields = ("confidence_display",)
     fields = (
-        ("status", "version", "team", "confidence"),
+        ("status", "version", "team", "confidence_display"),
         ("effective_from", "effective_to"),
         ("preferred_formation", "alternative_formations"),
         "philosophy_summary",
@@ -181,6 +182,12 @@ class CoachTacticalProfileInline(admin.StackedInline):
         "source_urls",
         "research_notes",
     )
+
+    @admin.display(description="Confidence")
+    def confidence_display(self, obj):
+        if not obj or not obj.pk:
+            return "Calculated after saving"
+        return f"{obj.confidence_score}% ({obj.get_confidence_display()})"
 
 
 @admin.register(CoachProfile)
@@ -202,7 +209,7 @@ class CoachProfileAdmin(admin.ModelAdmin):
         "aliases", "team_assignments__team__canonical_name",
     )
     readonly_fields = (
-        "canonical_normalized", "provider", "provider_coach_id", "provider_name",
+        "canonical_normalized", "provider", "provider_coach_id", "provider_name", "research_confidence",
         "provider_payload_pretty", "first_seen_at", "last_seen_at", "created_at", "updated_at",
     )
     fieldsets = (
@@ -286,6 +293,8 @@ class CoachProfileAdmin(admin.ModelAdmin):
                 if instance.status == CoachTacticalProfile.Status.APPROVED:
                     instance.reviewed_by = request.user
                     instance.reviewed_at = timezone.now()
+                instance.save()
+                if instance.status == CoachTacticalProfile.Status.APPROVED:
                     form.instance.research_status = CoachProfile.ResearchStatus.APPROVED
                     form.instance.research_confidence = instance.confidence
                     form.instance.reviewed_by = request.user
@@ -293,7 +302,8 @@ class CoachProfileAdmin(admin.ModelAdmin):
                     form.instance.save(update_fields=[
                         "research_status", "research_confidence", "reviewed_by", "reviewed_at", "updated_at",
                     ])
-            instance.save()
+            else:
+                instance.save()
         formset.save_m2m()
 
     @admin.action(description="Mark selected coach profiles reviewed")
@@ -358,7 +368,7 @@ class TeamCoachAssignmentAdmin(admin.ModelAdmin):
 @admin.register(CoachTacticalProfile)
 class CoachTacticalProfileAdmin(admin.ModelAdmin):
     list_display = (
-        "coach", "team", "version", "status", "confidence", "preferred_formation",
+        "coach", "team", "version", "status", "confidence_score", "confidence_label", "preferred_formation",
         "effective_from", "effective_to", "reviewed_at",
     )
     list_filter = ("status", "confidence", "preferred_formation", "team__primary_league_key")
@@ -366,8 +376,16 @@ class CoachTacticalProfileAdmin(admin.ModelAdmin):
         "coach__canonical_name", "team__canonical_name", "philosophy_summary",
         "attacking_style", "defensive_style", "build_up_style", "research_notes",
     )
-    readonly_fields = ("created_at", "updated_at")
+    readonly_fields = ("confidence_display", "created_at", "updated_at")
     list_select_related = ("coach", "team")
+
+    @admin.display(description="Confidence", ordering="confidence")
+    def confidence_label(self, obj):
+        return obj.get_confidence_display()
+
+    @admin.display(description="Calculated confidence")
+    def confidence_display(self, obj):
+        return f"{obj.confidence_score}% ({obj.get_confidence_display()})"
 
     def save_model(self, request, obj, form, change):
         if not obj.created_by_id:
@@ -375,6 +393,8 @@ class CoachTacticalProfileAdmin(admin.ModelAdmin):
         if obj.status == CoachTacticalProfile.Status.APPROVED:
             obj.reviewed_by = request.user
             obj.reviewed_at = timezone.now()
+        obj.recalculate_confidence()
+        if obj.status == CoachTacticalProfile.Status.APPROVED:
             obj.coach.research_status = CoachProfile.ResearchStatus.APPROVED
             obj.coach.research_confidence = obj.confidence
             obj.coach.reviewed_by = request.user
