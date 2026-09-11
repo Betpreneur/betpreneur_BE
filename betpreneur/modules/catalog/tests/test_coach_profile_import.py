@@ -77,6 +77,21 @@ class CoachProfileCsvImporterTests(TestCase):
         self.assertEqual(result["created"], 1)
         self.assertFalse(CoachTacticalProfile.objects.exists())
 
+    def test_import_accepts_year_only_effective_date(self):
+        result = self._import(
+            {
+                "Status": "Draft",
+                "Version": "1",
+                "Team": "Arsenal",
+                "Manager": "Mikel Arteta",
+                "Effective from": "2026",
+            }
+        )
+
+        self.assertEqual(result["created"], 1)
+        profile = CoachTacticalProfile.objects.get(coach=self.coach, team=self.team, version=1)
+        self.assertEqual(profile.effective_from.isoformat(), "2026-01-01")
+
     def test_unmatched_coach_is_reported_and_skipped(self):
         result = self._import(
             {

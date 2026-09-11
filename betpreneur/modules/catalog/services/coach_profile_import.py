@@ -202,6 +202,8 @@ class CoachProfileCsvImporter:
         text = str(value or "").strip()
         if not text:
             return None
+        if re.fullmatch(r"\d{4}", text):
+            return datetime.strptime(text, "%Y").date()
         for date_format in ("%Y-%m-%d", "%b %Y", "%B %Y", "%d %b %Y", "%d %B %Y"):
             try:
                 return datetime.strptime(text, date_format).date()
