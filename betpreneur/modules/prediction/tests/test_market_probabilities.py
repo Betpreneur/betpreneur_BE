@@ -1,10 +1,6 @@
 from django.test import SimpleTestCase
-from betpreneur.modules.markets.api import describe_market
-from betpreneur.modules.prediction.market_probabilities import (
-    _api_recent_scoreline_probability,
-    _api_team_statistics_goal_adjustment,
-)
 
+from betpreneur.modules.markets.api import describe_market
 from betpreneur.modules.prediction.api import (
     CountModelOutput,
     FixtureFeatureSet,
@@ -15,6 +11,10 @@ from betpreneur.modules.prediction.api import (
     TeamStrengthSnapshot,
     evaluate_market,
     evaluate_market_probability,
+)
+from betpreneur.modules.prediction.market_probabilities import (
+    _api_recent_scoreline_probability,
+    _api_team_statistics_goal_adjustment,
 )
 
 
@@ -336,6 +336,89 @@ class MarketProbabilityEngineTests(SimpleTestCase):
         self.assertIn(
             "Elo gap after home advantage: 115, supporting home.",
             probability.supporting_facts,
+        )
+
+    def test_market_explanations_include_coach_tactical_context(self):
+        prediction = self._prediction()
+        features = FixtureFeatureSet(
+            fixture_id=prediction.features.fixture_id,
+            fixture_name=prediction.features.fixture_name,
+            league_key=prediction.features.league_key,
+            season=prediction.features.season,
+            home_team=prediction.features.home_team,
+            away_team=prediction.features.away_team,
+            features={
+                **prediction.features.features,
+                "home": {
+                    "coach": {
+                        "coach_name": "Home Manager",
+                        "tactical_profile": {
+                            "available": True,
+                            "confidence": "high",
+                            "preferred_formation": "4-3-3",
+                            "ratings": {
+                                "attacking_tempo": 78,
+                                "pressing_intensity": 82,
+                                "attacking_width": 74,
+                                "crossing_tendency": 71,
+                                "set_piece_emphasis": 68,
+                            },
+                        },
+                    }
+                },
+                "away": {
+                    "coach": {
+                        "coach_name": "Away Manager",
+                        "tactical_profile": {
+                            "available": True,
+                            "confidence": "medium",
+                            "preferred_formation": "3-4-2-1",
+                            "ratings": {
+                                "attacking_tempo": 44,
+                                "pressing_intensity": 45,
+                                "attacking_width": 40,
+                                "crossing_tendency": 38,
+                                "set_piece_emphasis": 42,
+                            },
+                        },
+                    }
+                },
+                "coach_tactical_matchup": {
+                    "available": True,
+                    "style_deltas": {
+                        "attacking_tempo": 34,
+                        "pressing_intensity": 37,
+                        "attacking_width": 34,
+                        "crossing_tendency": 33,
+                    },
+                },
+            },
+            diagnostics=prediction.features.diagnostics,
+        )
+        prediction = FixturePrediction(
+            fixture_id=prediction.fixture_id,
+            fixture_name=prediction.fixture_name,
+            features=features,
+            goals=prediction.goals,
+            counts=prediction.counts,
+            result=prediction.result,
+            diagnostics=prediction.diagnostics,
+        )
+
+        goals = evaluate_market_probability(prediction, "Over 2.5")
+        corners = evaluate_market_probability(prediction, "Corners Over 7.5")
+
+        self.assertIn(
+            "Home coach Home Manager; preferred formation 4-3-3; high attacking tempo, high pressing intensity; high profile confidence.",
+            goals.supporting_facts,
+        )
+        self.assertIn(
+            "Coach matchup: home side rates higher for pressing intensity by 37 points.",
+            goals.supporting_facts,
+        )
+        self.assertIn(
+            "Home coach Home Manager; preferred formation 4-3-3; high attacking width, high crossing tendency, high attacking tempo; high profile confidence.",
+            corners.supporting_facts,
         )
 
     def test_double_chance_and_dnb_use_elo_result_probabilities(self):

@@ -14,8 +14,10 @@ from django.db.models import Q
 from django.utils import timezone
 
 from betpreneur.modules.catalog.api import (
+    CoachTacticalProfile,
     FixtureCache,
     StatPalFixtureSnapshot,
+    TeamCoachAssignment,
     normalize_referee_name,
     team_intelligence_service,
 )
@@ -81,6 +83,7 @@ def build_fixture_features(fixture=None, *, fixture_id: str = "") -> FixtureFeat
         fallback_name=str(fixture_payload.get("home_team") or ""),
         provider_team_id=home_team_id,
         fixture_id=resolved_id,
+        fixture_date=_as_date(fixture_payload.get("match_date") or fixture_payload.get("kickoff_utc")),
     )
     away_features = _side_features(
         intelligence.get("away"),
@@ -90,6 +93,7 @@ def build_fixture_features(fixture=None, *, fixture_id: str = "") -> FixtureFeat
         fallback_name=str(fixture_payload.get("away_team") or ""),
         provider_team_id=away_team_id,
         fixture_id=resolved_id,
+        fixture_date=_as_date(fixture_payload.get("match_date") or fixture_payload.get("kickoff_utc")),
     )
     snapshots = _snapshot_payloads(fixture_obj=fixture_obj, fixture_id=resolved_id)
     referee = _referee_context(fixture_payload, snapshots)
@@ -107,6 +111,8 @@ def build_fixture_features(fixture=None, *, fixture_id: str = "") -> FixtureFeat
         away=away_features,
         snapshots=snapshots,
         referee=referee,
+        home_coach=home_features["coach"],
+        away_coach=away_features["coach"],
     )
 
     return FixtureFeatureSet(
@@ -142,6 +148,10 @@ def build_fixture_features(fixture=None, *, fixture_id: str = "") -> FixtureFeat
             "referee": referee,
             "api_football": api_football_features,
             "scoreline_profile": scoreline_profile,
+            "coach_tactical_matchup": _coach_tactical_matchup_payload(
+                home_features["coach"],
+                away_features["coach"],
+            ),
             "prediction_feedback": _prediction_feedback_payload(
                 home_team=str(fixture_payload.get("home_team") or ""),
                 away_team=str(fixture_payload.get("away_team") or ""),
@@ -156,6 +166,8 @@ def build_fixture_features(fixture=None, *, fixture_id: str = "") -> FixtureFeat
             away=away_features,
             snapshots=snapshots,
             referee=referee,
+            home_coach=home_features["coach"],
+            away_coach=away_features["coach"],
             fixture_found=fixture_obj is not None or bool(fixture_payload),
         ),
     )
@@ -860,6 +872,7 @@ def _side_features(
     fallback_name: str,
     provider_team_id: str,
     fixture_id: str,
+    fixture_date: date | None,
 ) -> dict[str, Any]:
     season_profile = dict((team_payload or {}).get("season_profile") or {})
     recent_form = _recent_form_by_scope((team_payload or {}).get("recent_form") or ())
@@ -870,6 +883,10 @@ def _side_features(
         fixture_id=fixture_id,
         provider_team_id=provider_team_id,
         fallback_name=fallback_name,
+    )
+    coach = _coach_payload(
+        team_payload,
+        fixture_date=fixture_date,
     )
     strength = _strength_snapshot(
         team_payload,
@@ -889,6 +906,7 @@ def _side_features(
         "rate_profile": rate_profile,
         "lineup": lineup,
         "availability": availability,
+        "coach": coach,
         "coverage": dict((team_payload or {}).get("coverage") or {"status": "missing"}),
     }
 
@@ -900,8 +918,129 @@ def _feature_side_payload(features: dict[str, Any]) -> dict[str, Any]:
         "recent_form": features["recent_form"],
         "market_profiles_by_family": features["market_profiles_by_family"],
         "rate_profile": features["rate_profile"],
+        "coach": features["coach"],
         "coverage": features["coverage"],
     }
+
+
+def _coach_payload(team_payload: dict[str, Any] | None, *, fixture_date: date | None) -> dict[str, Any]:
+    team_id = (team_payload or {}).get("team_id")
+    if not team_id:
+        return {"available": False, "status": "team_missing"}
+
+    assignment = (
+        TeamCoachAssignment.objects.filter(team_id=team_id, currently_active=True)
+        .select_related("coach")
+        .order_by("-last_confirmed_at", "-updated_at")
+        .first()
+    )
+    if assignment is None:
+        return {"available": False, "status": "coach_assignment_missing", "team_id": team_id}
+
+    coach = assignment.coach
+    profile = _active_coach_tactical_profile(
+        coach_id=coach.id,
+        team_id=team_id,
+        fixture_date=fixture_date,
+    )
+    return {
+        "available": True,
+        "status": "available" if profile else "profile_missing",
+        "team_id": team_id,
+        "coach_id": coach.id,
+        "coach_name": coach.canonical_name,
+        "provider": coach.provider,
+        "provider_coach_id": coach.provider_coach_id,
+        "assignment": {
+            "role": assignment.role,
+            "started_on": _iso(assignment.started_on),
+            "date_precision": assignment.date_precision,
+            "last_confirmed_at": _iso(assignment.last_confirmed_at),
+        },
+        "research": {
+            "status": coach.research_status,
+            "confidence": coach.research_confidence,
+            "reviewed_at": _iso(coach.reviewed_at),
+        },
+        "tactical_profile": _coach_tactical_profile_payload(profile),
+    }
+
+
+def _active_coach_tactical_profile(
+    *,
+    coach_id: int,
+    team_id: int,
+    fixture_date: date | None,
+) -> CoachTacticalProfile | None:
+    query = CoachTacticalProfile.objects.filter(
+        coach_id=coach_id,
+        status=CoachTacticalProfile.Status.APPROVED,
+    )
+    if fixture_date is not None:
+        query = query.filter(
+            Q(effective_from__isnull=True) | Q(effective_from__lte=fixture_date),
+            Q(effective_to__isnull=True) | Q(effective_to__gte=fixture_date),
+        )
+    team_profile = query.filter(team_id=team_id).order_by("-version", "-updated_at").first()
+    if team_profile is not None:
+        return team_profile
+    return query.filter(team__isnull=True).order_by("-version", "-updated_at").first()
+
+
+def _coach_tactical_profile_payload(profile: CoachTacticalProfile | None) -> dict[str, Any]:
+    if profile is None:
+        return {"available": False}
+    ratings = {field: getattr(profile, field) for field in CoachTacticalProfile.RATING_FIELDS}
+    return {
+        "available": True,
+        "profile_id": profile.id,
+        "scope": "team" if profile.team_id else "general",
+        "version": profile.version,
+        "confidence": profile.confidence,
+        "confidence_score": profile.confidence_score,
+        "effective_from": _iso(profile.effective_from),
+        "effective_to": _iso(profile.effective_to),
+        "preferred_formation": profile.preferred_formation,
+        "alternative_formations": profile.alternative_formations,
+        "philosophy_summary": profile.philosophy_summary,
+        "attacking_style": profile.attacking_style,
+        "build_up_style": profile.build_up_style,
+        "defensive_style": profile.defensive_style,
+        "leading_approach": profile.leading_approach,
+        "trailing_approach": profile.trailing_approach,
+        "attacking_notes": profile.attacking_notes,
+        "defensive_notes": profile.defensive_notes,
+        "match_management_notes": profile.match_management_notes,
+        "set_piece_notes": profile.set_piece_notes,
+        "ratings": ratings,
+        "source_count": len(profile.source_urls or []),
+        "reviewed_at": _iso(profile.reviewed_at),
+        "updated_at": _iso(profile.updated_at),
+    }
+
+
+def _coach_tactical_matchup_payload(home: dict[str, Any], away: dict[str, Any]) -> dict[str, Any]:
+    home_profile = home.get("tactical_profile") if isinstance(home.get("tactical_profile"), dict) else {}
+    away_profile = away.get("tactical_profile") if isinstance(away.get("tactical_profile"), dict) else {}
+    return {
+        "available": bool(home_profile.get("available") or away_profile.get("available")),
+        "home_coach": home.get("coach_name") or "",
+        "away_coach": away.get("coach_name") or "",
+        "style_deltas": _coach_rating_deltas(home_profile, away_profile),
+    }
+
+
+def _coach_rating_deltas(home_profile: dict[str, Any], away_profile: dict[str, Any]) -> dict[str, int]:
+    home_ratings = home_profile.get("ratings") if isinstance(home_profile.get("ratings"), dict) else {}
+    away_ratings = away_profile.get("ratings") if isinstance(away_profile.get("ratings"), dict) else {}
+    deltas = {}
+    for field in CoachTacticalProfile.RATING_FIELDS:
+        home_value = home_ratings.get(field)
+        away_value = away_ratings.get(field)
+        if home_value is None or away_value is None:
+            continue
+        deltas[field] = int(home_value) - int(away_value)
+    return deltas
 
 
 def _strength_snapshot(
@@ -1251,8 +1390,10 @@ def _freshness_payload(
     away: dict[str, Any],
     snapshots: dict[str, Any],
     referee: dict[str, Any],
+    home_coach: dict[str, Any],
+    away_coach: dict[str, Any],
 ) -> dict[str, Any]:
-    statuses = {
+    core_statuses = {
         "team_intelligence": intelligence.get("status") or "missing",
         "goal_model": goal_model.get("data_quality") or "missing",
         "home_coverage": home.get("coverage", {}).get("status") or "missing",
@@ -1269,9 +1410,14 @@ def _freshness_payload(
         if referee.get("available")
         else "missing",
     }
+    statuses = {
+        **core_statuses,
+        "home_coach_tactical_profile": _coach_quality_status(home_coach),
+        "away_coach_tactical_profile": _coach_quality_status(away_coach),
+    }
     return {
         "statuses": statuses,
-        "worst_status": _worst_quality(statuses.values()),
+        "worst_status": _worst_quality(core_statuses.values()),
         "generated_at": _iso(timezone.now()),
     }
 
@@ -1294,6 +1440,8 @@ def _diagnostics(
     away: dict[str, Any],
     snapshots: dict[str, Any],
     referee: dict[str, Any],
+    home_coach: dict[str, Any],
+    away_coach: dict[str, Any],
     fixture_found: bool,
 ) -> PredictionDiagnostics:
     warnings: list[str] = []
@@ -1310,6 +1458,11 @@ def _diagnostics(
         warnings.append("referee_context_missing")
     elif not referee.get("avg_cards_per_match"):
         warnings.append("referee_card_history_missing")
+    for side, coach in (("home", home_coach), ("away", away_coach)):
+        if not coach.get("available"):
+            warnings.append(f"{side}_coach_missing")
+        elif not (coach.get("tactical_profile") or {}).get("available"):
+            warnings.append(f"{side}_coach_tactical_profile_missing")
 
     data_quality = _worst_quality(
         [
@@ -1331,8 +1484,24 @@ def _diagnostics(
             "team_intelligence_status": intelligence.get("status"),
             "goal_model_quality": goal_model.get("data_quality"),
             "referee": referee,
+            "coach_tactical_matchup": _coach_tactical_matchup_payload(home_coach, away_coach),
         },
     )
+
+
+def _coach_quality_status(coach: dict[str, Any]) -> str:
+    if not coach.get("available"):
+        return "missing"
+    profile = coach.get("tactical_profile") if isinstance(coach.get("tactical_profile"), dict) else {}
+    if not profile.get("available"):
+        return "missing"
+    confidence = str(profile.get("confidence") or "").lower()
+    return {
+        "high": "strong",
+        "medium": "medium",
+        "low": "limited",
+        "unknown": "limited",
+    }.get(confidence, "available")
 
 
 def _worst_quality(values) -> str:

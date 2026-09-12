@@ -4,9 +4,12 @@ from django.test import TestCase
 from django.utils import timezone
 
 from betpreneur.modules.catalog.api import (
+    CoachProfile,
+    CoachTacticalProfile,
     FixtureCache,
     LeagueMarketProfile,
     StatPalFixtureSnapshot,
+    TeamCoachAssignment,
     TeamMarketProfile,
     TeamProfile,
     TeamRecentFormProfile,
@@ -235,6 +238,36 @@ class FixtureFeatureBuilderTests(TestCase):
             )
 
     def test_build_fixture_features_returns_shared_feature_set(self):
+        home_coach = CoachProfile.objects.create(
+            canonical_name="Mikel Arteta",
+            canonical_normalized=normalize_fixture_text("Mikel Arteta"),
+            research_status=CoachProfile.ResearchStatus.APPROVED,
+            research_confidence=CoachProfile.Confidence.HIGH,
+        )
+        TeamCoachAssignment.objects.create(
+            team=self.home,
+            coach=home_coach,
+            currently_active=True,
+            first_detected_at=timezone.now(),
+            last_confirmed_at=timezone.now(),
+        )
+        CoachTacticalProfile.objects.create(
+            coach=home_coach,
+            team=self.home,
+            status=CoachTacticalProfile.Status.APPROVED,
+            effective_from=date(2026, 7, 1),
+            preferred_formation="4-3-3",
+            philosophy_summary="High-possession positional play with aggressive counterpressing.",
+            attacking_style="Positional attacking",
+            build_up_style="Patient build-up",
+            defensive_style="High press",
+            source_urls=["https://example.com/arteta"],
+            attacking_tempo=72,
+            pressing_intensity=84,
+            defensive_line_height=78,
+            tactical_flexibility=70,
+        )
+
         feature_set = build_fixture_features(self.fixture)
 
         self.assertIsInstance(feature_set, FixtureFeatureSet)
@@ -258,6 +291,10 @@ class FixtureFeatureBuilderTests(TestCase):
         self.assertEqual(features["referee"]["sample_matches"], 3)
         self.assertEqual(features["referee"]["avg_cards_per_match"], 5.0)
         self.assertIn("total_goals", features["market_family_history"]["home"])
+        self.assertEqual(features["home"]["coach"]["coach_name"], "Mikel Arteta")
+        self.assertEqual(features["home"]["coach"]["tactical_profile"]["preferred_formation"], "4-3-3")
+        self.assertEqual(features["home"]["coach"]["tactical_profile"]["ratings"]["pressing_intensity"], 84)
+        self.assertTrue(features["coach_tactical_matchup"]["available"])
         self.assertIn("corners_total", features["market_family_history"]["league"])
         self.assertEqual(features["scoreline_profile"]["home_recent"]["scorelines"][0]["scoreline"], "4-2")
         self.assertEqual(features["scoreline_profile"]["head_to_head"]["scorelines"][0]["scoreline"], "3-2")

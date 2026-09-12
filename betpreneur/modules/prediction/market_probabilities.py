@@ -131,7 +131,7 @@ def _result_probability(
     if descriptor.family == "match_result":
         key = {"home": "home_win", "draw": "draw", "away": "away_win"}.get(descriptor.side)
         probability = getattr(result, key, None) if key and result else None
-        facts = _result_facts(result)
+        facts = [*_result_facts(result), *_coach_tactical_facts(prediction, descriptor)]
         return probability, "elo_result", facts, warnings, quality
 
     probability = _elo_result_probability(result, descriptor)
@@ -139,7 +139,7 @@ def _result_probability(
         return (
             _round_probability(probability),
             "elo_result",
-            _result_facts(result),
+            [*_result_facts(result), *_coach_tactical_facts(prediction, descriptor)],
             warnings,
             quality,
         )
@@ -579,6 +579,7 @@ def _goal_facts(
     facts.extend(_recent_scoreline_facts(prediction, descriptor))
     facts.extend(_team_market_profile_facts(prediction, descriptor))
     facts.extend(_league_market_profile_facts(prediction, descriptor))
+    facts.extend(_coach_tactical_facts(prediction, descriptor))
     return facts
 
 
@@ -931,13 +932,129 @@ def _count_facts(
             )
             facts.extend(_team_market_profile_facts(prediction, descriptor))
             facts.extend(_league_market_profile_facts(prediction, descriptor))
+            facts.extend(_coach_tactical_facts(prediction, descriptor))
             return facts
         facts.append(
             f"Line {line:g} is {direction} the model projection of {line_expected:.2f} {label}."
         )
     facts.extend(_team_market_profile_facts(prediction, descriptor))
     facts.extend(_league_market_profile_facts(prediction, descriptor))
+    facts.extend(_coach_tactical_facts(prediction, descriptor))
     return facts
+
+
+def _coach_tactical_facts(
+    prediction: FixturePrediction,
+    descriptor: MarketDescriptor,
+) -> list[str]:
+    payload = prediction.features.features if prediction.features else {}
+    home = ((payload.get("home") or {}).get("coach") or {}) if isinstance(payload.get("home"), dict) else {}
+    away = ((payload.get("away") or {}).get("coach") or {}) if isinstance(payload.get("away"), dict) else {}
+    home_profile = home.get("tactical_profile") if isinstance(home.get("tactical_profile"), dict) else {}
+    away_profile = away.get("tactical_profile") if isinstance(away.get("tactical_profile"), dict) else {}
+    if not home_profile.get("available") and not away_profile.get("available"):
+        return []
+
+    fields = _coach_fields_for_family(descriptor.family)
+    facts = []
+    for side, label, coach, profile in (
+        ("home", "Home", home, home_profile),
+        ("away", "Away", away, away_profile),
+    ):
+        if not profile.get("available"):
+            continue
+        name = str(coach.get("coach_name") or f"{side.title()} coach").strip()
+        confidence = str(profile.get("confidence") or "").strip()
+        formation = str(profile.get("preferred_formation") or "").strip()
+        style = _coach_style_summary(profile, fields)
+        pieces = [f"{label} coach {name}"]
+        if formation:
+            pieces.append(f"preferred formation {formation}")
+        if style:
+            pieces.append(style)
+        if confidence:
+            pieces.append(f"{confidence} profile confidence")
+        facts.append("; ".join(pieces) + ".")
+
+    matchup = payload.get("coach_tactical_matchup") if isinstance(payload.get("coach_tactical_matchup"), dict) else {}
+    deltas = matchup.get("style_deltas") if isinstance(matchup.get("style_deltas"), dict) else {}
+    delta_fact = _coach_matchup_delta_fact(deltas, fields)
+    if delta_fact:
+        facts.append(delta_fact)
+    return facts
+
+
+def _coach_fields_for_family(family: str) -> tuple[str, ...]:
+    if family in {"total_goals", "team_total_goals", "btts", "correct_score"}:
+        return (
+            "attacking_tempo",
+            "attacking_risk",
+            "pressing_intensity",
+            "defensive_line_height",
+            "transition_defence",
+        )
+    if family in {"match_result", "double_chance", "draw_no_bet", "asian_handicap", "handicap"}:
+        return (
+            "tactical_flexibility",
+            "attacking_risk",
+            "pressing_intensity",
+            "defensive_compactness",
+            "transition_defence",
+        )
+    if family in {"corners_total", "team_corners"}:
+        return (
+            "attacking_width",
+            "crossing_tendency",
+            "set_piece_emphasis",
+            "attacking_tempo",
+        )
+    if family in {"cards_total", "team_cards", "booking_points"}:
+        return (
+            "pressing_intensity",
+            "defensive_aggression",
+            "defensive_block_height",
+            "transition_defence",
+        )
+    if family in {"shots_on_target_total", "team_shots_on_target"}:
+        return (
+            "attacking_tempo",
+            "attacking_risk",
+            "passing_directness",
+            "counterattack_tendency",
+        )
+    return ()
+
+
+def _coach_style_summary(profile: dict[str, Any], fields: tuple[str, ...]) -> str:
+    ratings = profile.get("ratings") if isinstance(profile.get("ratings"), dict) else {}
+    if not fields or not ratings:
+        return ""
+    parts = []
+    for field in fields:
+        value = _int(ratings.get(field))
+        if value is None:
+            continue
+        level = "high" if value >= 70 else "low" if value <= 35 else ""
+        if level:
+            parts.append(f"{level} {field.replace('_', ' ')}")
+    return ", ".join(parts[:3])
+
+
+def _coach_matchup_delta_fact(deltas: dict[str, Any], fields: tuple[str, ...]) -> str:
+    if not fields or not deltas:
+        return ""
+    strongest = None
+    for field in fields:
+        delta = _int(deltas.get(field))
+        if delta is None or abs(delta) < 20:
+            continue
+        if strongest is None or abs(delta) > abs(strongest[1]):
+            strongest = (field, delta)
+    if strongest is None:
+        return ""
+    field, delta = strongest
+    leader = "home" if delta > 0 else "away"
+    return f"Coach matchup: {leader} side rates higher for {field.replace('_', ' ')} by {abs(delta)} points."
 
 
 def _team_market_profile_facts(
