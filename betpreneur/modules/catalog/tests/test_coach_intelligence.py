@@ -184,16 +184,85 @@ class CoachIntelligenceSyncTests(TestCase):
             status=CoachTacticalProfile.Status.APPROVED,
             effective_from=date(2026, 7, 1),
             preferred_formation="4-3-3",
-            alternative_formations=["4-2-3-1", "3-4-3"],
+            alternative_formations=["4-2-3-1", "3-4-3", "4-4-2"],
             source_urls=["https://example.com/one", "https://example.com/two", "https://example.com/three"],
+            philosophy_summary="Detailed positional philosophy.",
+            attacking_style="Structured positional attacks",
+            build_up_style="Patient short build-up",
+            defensive_style="High counterpress",
         )
         for field in detailed.RATING_FIELDS:
             setattr(detailed, field, 50)
-        for field, target in detailed.NARRATIVE_TARGETS.items():
-            setattr(detailed, field, "x" * target)
         detailed.full_clean()
         detailed.save()
 
         self.assertLess(sparse.confidence_score, detailed.confidence_score)
         self.assertEqual(detailed.confidence_score, 100)
         self.assertEqual(detailed.confidence, CoachProfile.Confidence.HIGH)
+
+    def test_ratings_without_core_style_fields_do_not_create_high_confidence(self):
+        coach = CoachProfile.objects.create(
+            canonical_name="Ratings Heavy Manager",
+            canonical_normalized="ratings heavy manager",
+        )
+        profile = CoachTacticalProfile(
+            coach=coach,
+            status=CoachTacticalProfile.Status.APPROVED,
+            effective_from=date(2026, 7, 1),
+            preferred_formation="4-3-3",
+            philosophy_summary="Structured and aggressive.",
+            source_urls=["https://example.com/source"],
+        )
+        for field in profile.RATING_FIELDS:
+            setattr(profile, field, 50)
+
+        profile.full_clean()
+
+        self.assertLess(profile.confidence_score, 80)
+        self.assertEqual(profile.confidence, CoachProfile.Confidence.MEDIUM)
+
+    def test_sources_and_research_notes_do_not_increase_confidence(self):
+        coach = CoachProfile.objects.create(
+            canonical_name="Source Heavy Manager",
+            canonical_normalized="source heavy manager",
+        )
+        with_sources = CoachTacticalProfile(
+            coach=coach,
+            source_urls=["https://example.com/one", "https://example.com/two"],
+            research_notes="Very detailed source notes.",
+        )
+        without_sources = CoachTacticalProfile(coach=coach)
+
+        with_sources.recalculate_confidence()
+        without_sources.recalculate_confidence()
+
+        self.assertEqual(with_sources.confidence_score, without_sources.confidence_score)
+
+    def test_ai_review_score_controls_tactical_confidence_when_available(self):
+        coach = CoachProfile.objects.create(
+            canonical_name="AI Reviewed Manager",
+            canonical_normalized="ai reviewed manager",
+        )
+        profile = CoachTacticalProfile(
+            coach=coach,
+            philosophy_summary="Conservative low-block manager.",
+            attacking_style="Direct counters",
+            build_up_style="Fast transitions",
+            defensive_style="Compact low block",
+        )
+
+        profile.apply_ai_confidence_review(
+            {
+                "ai_confidence_score": 37,
+                "text_rating_agreement": 30,
+                "tactical_coherence": 40,
+                "evidence_clarity": 35,
+                "prediction_usefulness": 45,
+                "warnings": ["Ratings conflict with the written low-block style."],
+            },
+            model="deepseek-test",
+        )
+
+        self.assertEqual(profile.confidence_score, 37)
+        self.assertEqual(profile.confidence, CoachProfile.Confidence.LOW)
+        self.assertEqual(profile.ai_confidence_model, "deepseek-test")

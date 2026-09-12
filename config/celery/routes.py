@@ -18,6 +18,7 @@ TASK_ROUTES = {
         "queue": queues.ALGO_STATPAL
     },
     "betpreneur.modules.catalog.tasks.sync_coach_intelligence": {"queue": queues.ALGO_STATPAL},
+    "betpreneur.modules.catalog.tasks.review_coach_tactical_profile": {"queue": queues.ALGO_LLM},
     "betpreneur.modules.catalog.tasks.build_team_recent_form": {"queue": queues.ALGO_STATPAL},
     "betpreneur.modules.catalog.tasks.build_team_market_profiles": {"queue": queues.ALGO_STATPAL},
     "betpreneur.modules.catalog.tasks.refresh_team_data_coverage": {

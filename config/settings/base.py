@@ -106,6 +106,12 @@ STATIC_ROOT = BASE_DIR / "staticfiles"
 STATICFILES_STORAGE = "whitenoise.storage.CompressedManifestStaticFilesStorage"
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
+DEEPSEEK_API_KEY = config("DEEPSEEK_API_KEY", default="")
+DEEPSEEK_BASE_URL = config("DEEPSEEK_BASE_URL", default="https://api.deepseek.com/v1")
+DEEPSEEK_MODEL = config("DEEPSEEK_MODEL", default="deepseek-v4-flash")
+COACH_TACTICAL_AI_REVIEW_ENABLED = config("COACH_TACTICAL_AI_REVIEW_ENABLED", default=True, cast=bool)
+COACH_TACTICAL_AI_REVIEW_TIMEOUT = config("COACH_TACTICAL_AI_REVIEW_TIMEOUT", default=45, cast=int)
+
 CELERY_BROKER_URL = config("CELERY_BROKER_URL", default="redis://localhost:6379/0")
 CELERY_RESULT_BACKEND = config("CELERY_RESULT_BACKEND", default=CELERY_BROKER_URL)
 CELERY_TIMEZONE = TIME_ZONE

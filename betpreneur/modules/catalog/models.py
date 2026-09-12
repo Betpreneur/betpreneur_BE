@@ -262,6 +262,12 @@ class CoachTacticalProfile(models.Model):
         "match_management_notes": 120,
         "set_piece_notes": 80,
     }
+    CONFIDENCE_STYLE_FIELDS = (
+        "philosophy_summary",
+        "attacking_style",
+        "build_up_style",
+        "defensive_style",
+    )
 
     coach = models.ForeignKey(CoachProfile, on_delete=models.CASCADE, related_name="tactical_profiles")
     team = models.ForeignKey(
@@ -317,6 +323,9 @@ class CoachTacticalProfile(models.Model):
         editable=False,
         validators=RATING_VALIDATORS,
     )
+    ai_confidence_review = models.JSONField(default=dict, blank=True)
+    ai_confidence_reviewed_at = models.DateTimeField(null=True, blank=True)
+    ai_confidence_model = models.CharField(max_length=120, blank=True)
     source_urls = models.JSONField(default=list, blank=True)
     research_notes = models.TextField(blank=True)
     created_by = models.ForeignKey(
@@ -381,37 +390,59 @@ class CoachTacticalProfile(models.Model):
         super().save(*args, **kwargs)
 
     def recalculate_confidence(self):
-        """Calculate evidence confidence from profile coverage, never tactical intensity."""
+        """Calculate tactical-profile usability, preferring AI context review when available."""
+        ai_score = self._ai_confidence_score()
+        self.confidence_score = ai_score if ai_score is not None else self._deterministic_confidence_score()
+        self.confidence = self._confidence_label(self.confidence_score)
+        return self.confidence_score
+
+    def apply_ai_confidence_review(self, review: dict, *, model: str = "", reviewed_at=None):
+        self.ai_confidence_review = review or {}
+        self.ai_confidence_model = model or str(self.ai_confidence_review.get("model") or "")
+        self.ai_confidence_reviewed_at = reviewed_at
+        self.recalculate_confidence()
+        return self.confidence_score
+
+    def _ai_confidence_score(self):
+        if not isinstance(self.ai_confidence_review, dict):
+            return None
+        for key in ("ai_confidence_score", "confidence_score"):
+            value = self.ai_confidence_review.get(key)
+            if value in (None, ""):
+                continue
+            try:
+                score = round(float(value))
+            except (TypeError, ValueError):
+                continue
+            return max(0, min(100, score))
+        return None
+
+    def _deterministic_confidence_score(self):
         ratings_completed = sum(getattr(self, field) is not None for field in self.RATING_FIELDS)
-        rating_score = 45 * ratings_completed / len(self.RATING_FIELDS)
+        rating_score = 65 * ratings_completed / len(self.RATING_FIELDS)
 
-        narrative_completion = sum(
-            min(len(str(getattr(self, field) or "").strip()) / target, 1)
-            for field, target in self.NARRATIVE_TARGETS.items()
-        )
-        narrative_score = 25 * narrative_completion / len(self.NARRATIVE_TARGETS)
+        style_completed = sum(bool(str(getattr(self, field) or "").strip()) for field in self.CONFIDENCE_STYLE_FIELDS)
+        style_score = 25 * style_completed / len(self.CONFIDENCE_STYLE_FIELDS)
 
-        formation_score = 5 if str(self.preferred_formation or "").strip() else 0
-        formation_score += min(3, self._json_item_count(self.alternative_formations) * 1.5)
-        scope_score = 2 if self.effective_from else 0
-        source_score = min(15, self._json_item_count(self.source_urls) * 5)
-        review_score = 5 if self.status == self.Status.APPROVED else 0
+        formation_score = 7 if str(self.preferred_formation or "").strip() else 0
+        formation_score += min(3, self._json_item_count(self.alternative_formations))
 
-        self.confidence_score = round(
+        return round(
             min(
                 100,
-                rating_score + narrative_score + formation_score + scope_score + source_score + review_score,
+                rating_score + style_score + formation_score,
             )
         )
-        if self.confidence_score == 0:
-            self.confidence = CoachProfile.Confidence.UNKNOWN
-        elif self.confidence_score < 40:
-            self.confidence = CoachProfile.Confidence.LOW
-        elif self.confidence_score < 70:
-            self.confidence = CoachProfile.Confidence.MEDIUM
-        else:
-            self.confidence = CoachProfile.Confidence.HIGH
-        return self.confidence_score
+
+    @staticmethod
+    def _confidence_label(score):
+        if score == 0:
+            return CoachProfile.Confidence.UNKNOWN
+        if score < 45:
+            return CoachProfile.Confidence.LOW
+        if score < 80:
+            return CoachProfile.Confidence.MEDIUM
+        return CoachProfile.Confidence.HIGH
 
     @staticmethod
     def _json_item_count(value):

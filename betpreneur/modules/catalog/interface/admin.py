@@ -5,8 +5,10 @@
 import json
 
 from celery import current_app
+from django.conf import settings
 from django.contrib import admin, messages
 from django.core.exceptions import PermissionDenied
+from django.db import transaction
 from django.http import HttpResponseNotAllowed, HttpResponseRedirect
 from django.urls import path, reverse
 from django.utils import timezone
@@ -36,7 +38,10 @@ from betpreneur.modules.catalog.services.daily_build import (
     StatPalDailyBuildService,
     statpal_snapshot_usable_fields,
 )
-from betpreneur.modules.catalog.tasks import build_statpal_daily_cache
+from betpreneur.modules.catalog.tasks import (
+    build_statpal_daily_cache,
+    review_coach_tactical_profile,
+)
 
 BUILD_CACHE_TASK = "betpreneur.modules.picks.tasks.build_slip_review_market_cache"
 CLEANUP_CACHE_TASK = "betpreneur.modules.picks.tasks.cleanup_slip_review_market_cache"
@@ -367,6 +372,22 @@ class TeamCoachAssignmentAdmin(admin.ModelAdmin):
 
 @admin.register(CoachTacticalProfile)
 class CoachTacticalProfileAdmin(admin.ModelAdmin):
+    AI_REVIEW_INVALIDATING_FIELDS = {
+        "team",
+        "preferred_formation",
+        "alternative_formations",
+        "philosophy_summary",
+        "attacking_style",
+        "build_up_style",
+        "defensive_style",
+        "leading_approach",
+        "trailing_approach",
+        "attacking_notes",
+        "defensive_notes",
+        "match_management_notes",
+        "set_piece_notes",
+        *CoachTacticalProfile.RATING_FIELDS,
+    }
     list_display = (
         "coach", "team", "version", "status", "confidence_score", "confidence_label", "preferred_formation",
         "effective_from", "effective_to", "reviewed_at",
@@ -376,7 +397,7 @@ class CoachTacticalProfileAdmin(admin.ModelAdmin):
         "coach__canonical_name", "team__canonical_name", "philosophy_summary",
         "attacking_style", "defensive_style", "build_up_style", "research_notes",
     )
-    readonly_fields = ("confidence_display", "created_at", "updated_at")
+    readonly_fields = ("confidence_display", "ai_review_display", "created_at", "updated_at")
     list_select_related = ("coach", "team")
 
     @admin.display(description="Confidence", ordering="confidence")
@@ -387,9 +408,23 @@ class CoachTacticalProfileAdmin(admin.ModelAdmin):
     def confidence_display(self, obj):
         return f"{obj.confidence_score}% ({obj.get_confidence_display()})"
 
+    @admin.display(description="AI tactical review")
+    def ai_review_display(self, obj):
+        review = obj.ai_confidence_review or {}
+        if not review:
+            return "Not reviewed"
+        return format_html(
+            "<pre style='white-space:pre-wrap'>{}</pre>",
+            json.dumps(review, indent=2, sort_keys=True)[:20000],
+        )
+
     def save_model(self, request, obj, form, change):
         if not obj.created_by_id:
             obj.created_by = request.user
+        if set(form.changed_data or ()) & self.AI_REVIEW_INVALIDATING_FIELDS:
+            obj.ai_confidence_review = {}
+            obj.ai_confidence_model = ""
+            obj.ai_confidence_reviewed_at = None
         if obj.status == CoachTacticalProfile.Status.APPROVED:
             obj.reviewed_by = request.user
             obj.reviewed_at = timezone.now()
@@ -403,6 +438,12 @@ class CoachTacticalProfileAdmin(admin.ModelAdmin):
                 "research_status", "research_confidence", "reviewed_by", "reviewed_at", "updated_at",
             ])
         super().save_model(request, obj, form, change)
+        if (
+            obj.status == CoachTacticalProfile.Status.APPROVED
+            and getattr(settings, "COACH_TACTICAL_AI_REVIEW_ENABLED", True)
+        ):
+            transaction.on_commit(lambda: review_coach_tactical_profile.delay(obj.pk))
+            messages.info(request, "DeepSeek tactical confidence review queued for this profile.")
 
 
 @admin.register(TeamSeasonProfile)

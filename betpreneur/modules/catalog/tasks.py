@@ -33,6 +33,30 @@ def sync_coach_intelligence(self, league_keys=None, max_teams=None, include_coac
         raise
 
 
+@shared_task(
+    bind=True,
+    ignore_result=False,
+    max_retries=2,
+    default_retry_delay=120,
+    soft_time_limit=240,
+    time_limit=300,
+)
+def review_coach_tactical_profile(self, profile_id):
+    """Run DeepSeek tactical QA for one coach tactical profile."""
+    from betpreneur.modules.catalog.models import CoachTacticalProfile
+    from betpreneur.modules.catalog.services.coach_tactical_ai import (
+        coach_tactical_ai_reviewer,
+    )
+
+    profile = CoachTacticalProfile.objects.select_related("coach", "team").get(pk=profile_id)
+    try:
+        return coach_tactical_ai_reviewer.save_review(profile)
+    except Exception as exc:
+        if self.request.retries < self.max_retries:
+            raise self.retry(exc=exc, countdown=120 * (self.request.retries + 1))
+        raise
+
+
 @shared_task(bind=True, ignore_result=False, soft_time_limit=1500, time_limit=1800)
 def sync_fixture_horizon(self, days=3, league_ids=None):
     """

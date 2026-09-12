@@ -1013,6 +1013,24 @@ def _coach_tactical_profile_payload(profile: CoachTacticalProfile | None) -> dic
         "match_management_notes": profile.match_management_notes,
         "set_piece_notes": profile.set_piece_notes,
         "ratings": ratings,
+        "ai_review": {
+            "available": bool(profile.ai_confidence_review),
+            "model": profile.ai_confidence_model,
+            "reviewed_at": _iso(profile.ai_confidence_reviewed_at),
+            "summary": (profile.ai_confidence_review or {}).get("summary") or "",
+            "warnings": (profile.ai_confidence_review or {}).get("warnings") or [],
+            "rating_warnings": (profile.ai_confidence_review or {}).get("rating_warnings") or [],
+            "market_relevance": (profile.ai_confidence_review or {}).get("market_relevance") or {},
+            "component_scores": {
+                key: (profile.ai_confidence_review or {}).get(key)
+                for key in (
+                    "text_rating_agreement",
+                    "tactical_coherence",
+                    "evidence_clarity",
+                    "prediction_usefulness",
+                )
+            },
+        },
         "source_count": len(profile.source_urls or []),
         "reviewed_at": _iso(profile.reviewed_at),
         "updated_at": _iso(profile.updated_at),

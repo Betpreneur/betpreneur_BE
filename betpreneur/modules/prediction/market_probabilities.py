@@ -975,6 +975,9 @@ def _coach_tactical_facts(
         if confidence:
             pieces.append(f"{confidence} profile confidence")
         facts.append("; ".join(pieces) + ".")
+        ai_fact = _coach_ai_review_fact(label, profile, descriptor.family)
+        if ai_fact:
+            facts.append(ai_fact)
 
     matchup = payload.get("coach_tactical_matchup") if isinstance(payload.get("coach_tactical_matchup"), dict) else {}
     deltas = matchup.get("style_deltas") if isinstance(matchup.get("style_deltas"), dict) else {}
@@ -982,6 +985,37 @@ def _coach_tactical_facts(
     if delta_fact:
         facts.append(delta_fact)
     return facts
+
+
+def _coach_ai_review_fact(label: str, profile: dict[str, Any], family: str) -> str:
+    review = profile.get("ai_review") if isinstance(profile.get("ai_review"), dict) else {}
+    if not review.get("available"):
+        return ""
+    market_key = _coach_market_relevance_key(family)
+    relevance = ((review.get("market_relevance") or {}).get(market_key) or "").lower()
+    summary = str(review.get("summary") or "").strip()
+    warnings = review.get("rating_warnings") if isinstance(review.get("rating_warnings"), list) else []
+    if warnings:
+        return f"{label} coach AI review warns: {str(warnings[0]).strip()[:180]}."
+    if relevance in {"positive", "negative"}:
+        return f"{label} coach AI review rates this profile {relevance} for {market_key.replace('_', ' ')} markets."
+    if summary:
+        return f"{label} coach AI review: {summary[:180]}."
+    return ""
+
+
+def _coach_market_relevance_key(family: str) -> str:
+    if family in {"total_goals", "team_total_goals", "correct_score"}:
+        return "total_goals"
+    if family == "btts":
+        return "btts"
+    if family in {"corners_total", "team_corners"}:
+        return "corners"
+    if family in {"cards_total", "team_cards", "booking_points"}:
+        return "cards"
+    if family in {"shots_on_target_total", "team_shots_on_target"}:
+        return "shots_on_target"
+    return "result"
 
 
 def _coach_fields_for_family(family: str) -> tuple[str, ...]:
