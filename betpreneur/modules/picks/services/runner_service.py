@@ -21,9 +21,9 @@ from difflib import SequenceMatcher
 
 from django.conf import settings
 from django.db import close_old_connections
-from django.utils.dateparse import parse_datetime
 from django.db.models import Count, Q
 from django.utils import timezone
+from django.utils.dateparse import parse_datetime
 
 from betpreneur.modules.catalog.api import (
     FixtureCache,
@@ -782,7 +782,7 @@ class AlgoRunnerService:
                 if include_stats:
                     stats_samples = []
                     for row in fixtures[:recent_limit]:
-                        fixture_id = self._text(((row.get("fixture") or {}).get("id") if isinstance(row, dict) else ""))
+                        fixture_id = self._text((row.get("fixture") or {}).get("id") if isinstance(row, dict) else "")
                         if not fixture_id:
                             continue
                         stats = algo_runner.fetch_fixture_statistics(fixture_id)
@@ -1771,6 +1771,7 @@ class AlgoRunnerService:
             "season_profile": features.get("season_profile") or {},
             "recent_form": features.get("recent_form") or {},
             "market_profiles_by_family": features.get("market_profiles_by_family") or {},
+            "coach": features.get("coach") or {},
             "coverage": features.get("coverage") or {},
         }
 
@@ -1894,6 +1895,7 @@ class AlgoRunnerService:
             "provider_quality": ((prediction.features.features or {}).get("provider_quality") or {}) if prediction.features else {},
             "scoreline_profile": ((prediction.features.features or {}).get("scoreline_profile") or {}) if prediction.features else {},
             "api_football": ((prediction.features.features or {}).get("api_football") or {}) if prediction.features else {},
+            "coach_tactical_matchup": ((prediction.features.features or {}).get("coach_tactical_matchup") or {}) if prediction.features else {},
         }
         home_recent_form = self._merge_prediction_recent_form(
             source_payload.get("home_recent_form"),
@@ -2905,7 +2907,10 @@ class AlgoRunnerService:
             algo_run = AlgoRun.objects.get(id=algo_run)
 
         from betpreneur.modules.catalog.api import legacy_runner as algo_runner
-        from betpreneur.modules.picks.services.presentation import _game_market_rank, market_prediction_payload
+        from betpreneur.modules.picks.services.presentation import (
+            _game_market_rank,
+            market_prediction_payload,
+        )
 
         selected_by_match = {}
         queryset = (

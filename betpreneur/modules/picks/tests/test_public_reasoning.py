@@ -3,14 +3,13 @@ from unittest.mock import patch
 
 from django.test import SimpleTestCase
 
-from betpreneur.modules.picks.services.runner_service import AlgoRunnerService
-from betpreneur.modules.prediction.api import FixtureFeatureSet, FixturePrediction
-
 from betpreneur.modules.picks.services.presentation import (
     _market_reasoning_for_game,
-    public_game_detail_payload,
     _public_reasoning_text,
+    public_game_detail_payload,
 )
+from betpreneur.modules.picks.services.runner_service import AlgoRunnerService
+from betpreneur.modules.prediction.api import FixtureFeatureSet, FixturePrediction
 
 
 class PublicReasoningTests(SimpleTestCase):
@@ -224,3 +223,78 @@ class PublicReasoningTests(SimpleTestCase):
         self.assertEqual(game["recommended_market"]["key_points"][0], "Projected corners: 10.24.")
         self.assertTrue(game["corners"]["historical_samples"]["available"])
         self.assertEqual(game["corners"]["historical_samples"]["games"], 10)
+
+    def test_public_game_detail_exposes_manager_tactical_context(self):
+        payload = public_game_detail_payload(
+            {
+                "date": "2026-09-12",
+                "published": False,
+                "run_id": 398,
+                "posted_at": "2026-09-12T03:19:51Z",
+                "game": {
+                    "match_id": "1557401",
+                    "fixture": "Crystal Palace vs Ipswich",
+                    "home_team": "Crystal Palace",
+                    "away_team": "Ipswich",
+                    "top_market": {
+                        "market": "Corners Over 8.5",
+                        "confidence": 35,
+                        "analysis_summary": "Corners Over 8.5 has 35% calibrated model confidence.",
+                        "positive_evidence": ["Projected corners: 7.62."],
+                    },
+                    "fixture_context": {
+                        "prediction_features": {
+                            "home": {
+                                "coach": {
+                                    "available": True,
+                                    "status": "available",
+                                    "coach_name": "Oliver Glasner",
+                                    "research": {"confidence": "high"},
+                                    "tactical_profile": {
+                                        "available": True,
+                                        "confidence": "high",
+                                        "confidence_score": 84,
+                                        "scope": "team",
+                                        "preferred_formation": "3-4-2-1",
+                                        "attacking_style": "Fast wing-back attacks",
+                                        "build_up_style": "Vertical progression",
+                                        "defensive_style": "Compact mid-block",
+                                        "ratings": {"attacking_width": 78},
+                                        "ai_review": {
+                                            "available": True,
+                                            "summary": "Coherent profile for wing-back width.",
+                                            "market_relevance": {"corners": "positive"},
+                                        },
+                                    },
+                                }
+                            },
+                            "away": {
+                                "coach": {
+                                    "available": True,
+                                    "status": "available",
+                                    "coach_name": "Kieran McKenna",
+                                    "tactical_profile": {"available": False},
+                                }
+                            },
+                            "coach_tactical_matchup": {
+                                "available": True,
+                                "style_deltas": {"attacking_width": 22},
+                            },
+                        }
+                    },
+                },
+            }
+        )
+
+        game = payload["game"]
+        self.assertNotIn("fixture_context", game)
+        self.assertEqual(game["managers"]["status"], "available")
+        self.assertEqual(game["managers"]["home"]["name"], "Oliver Glasner")
+        self.assertEqual(game["managers"]["home"]["tactical_profile"]["confidence_score"], 84)
+        self.assertEqual(game["managers"]["home"]["tactical_profile"]["ai_review"]["market_relevance"]["corners"], "positive")
+        self.assertIn(
+            "Home manager Oliver Glasner is included in tactical analysis, tactical confidence 84% (formation 3-4-2-1; Fast wing-back attacks).",
+            game["analysis"]["key_points"],
+        )
+        self.assertIn("Home manager profile is rated positive for corners markets.", game["analysis"]["key_points"])
+        self.assertEqual(game["analysis"]["data_sources"][0]["name"], "Coach Tactical Profile")

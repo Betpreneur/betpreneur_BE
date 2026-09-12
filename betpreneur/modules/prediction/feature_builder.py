@@ -18,6 +18,8 @@ from betpreneur.modules.catalog.api import (
     FixtureCache,
     StatPalFixtureSnapshot,
     TeamCoachAssignment,
+    TeamProfile,
+    normalize_fixture_text,
     normalize_referee_name,
     team_intelligence_service,
 )
@@ -886,6 +888,8 @@ def _side_features(
     )
     coach = _coach_payload(
         team_payload,
+        fallback_name=fallback_name,
+        provider_team_id=provider_team_id,
         fixture_date=fixture_date,
     )
     strength = _strength_snapshot(
@@ -923,30 +927,37 @@ def _feature_side_payload(features: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _coach_payload(team_payload: dict[str, Any] | None, *, fixture_date: date | None) -> dict[str, Any]:
-    team_id = (team_payload or {}).get("team_id")
-    if not team_id:
+def _coach_payload(
+    team_payload: dict[str, Any] | None,
+    *,
+    fallback_name: str,
+    provider_team_id: str,
+    fixture_date: date | None,
+) -> dict[str, Any]:
+    team = _coach_team(team_payload, fallback_name=fallback_name, provider_team_id=provider_team_id)
+    if team is None:
         return {"available": False, "status": "team_missing"}
 
     assignment = (
-        TeamCoachAssignment.objects.filter(team_id=team_id, currently_active=True)
+        TeamCoachAssignment.objects.filter(team=team, currently_active=True)
         .select_related("coach")
         .order_by("-last_confirmed_at", "-updated_at")
         .first()
     )
     if assignment is None:
-        return {"available": False, "status": "coach_assignment_missing", "team_id": team_id}
+        return {"available": False, "status": "coach_assignment_missing", "team_id": team.id}
 
     coach = assignment.coach
     profile = _active_coach_tactical_profile(
         coach_id=coach.id,
-        team_id=team_id,
+        team_id=team.id,
         fixture_date=fixture_date,
     )
     return {
         "available": True,
         "status": "available" if profile else "profile_missing",
-        "team_id": team_id,
+        "team_id": team.id,
+        "team_name": team.canonical_name,
         "coach_id": coach.id,
         "coach_name": coach.canonical_name,
         "provider": coach.provider,
@@ -964,6 +975,43 @@ def _coach_payload(team_payload: dict[str, Any] | None, *, fixture_date: date | 
         },
         "tactical_profile": _coach_tactical_profile_payload(profile),
     }
+
+
+def _coach_team(
+    team_payload: dict[str, Any] | None,
+    *,
+    fallback_name: str,
+    provider_team_id: str,
+) -> TeamProfile | None:
+    team_id = (team_payload or {}).get("team_id")
+    if team_id:
+        return TeamProfile.objects.filter(pk=team_id, active=True).first()
+
+    if provider_team_id:
+        team = (
+            TeamProfile.objects.filter(
+                Q(provider_ids__statpal__team_id=provider_team_id)
+                | Q(provider_ids__api_football__team_id=provider_team_id)
+                | Q(provider_ids__statpal_team_id=provider_team_id)
+                | Q(provider_ids__api_football_team_id=provider_team_id),
+                active=True,
+            )
+            .order_by("-updated_at")
+            .first()
+        )
+        if team:
+            return team
+
+    normalized = normalize_fixture_text(fallback_name)
+    if not normalized:
+        return None
+    team = TeamProfile.objects.filter(canonical_normalized=normalized, active=True).order_by("-updated_at").first()
+    if team:
+        return team
+    for candidate in TeamProfile.objects.filter(active=True).only("id", "aliases"):
+        if normalized in {normalize_fixture_text(alias) for alias in candidate.aliases or []}:
+            return candidate
+    return None
 
 
 def _active_coach_tactical_profile(

@@ -799,6 +799,7 @@ def public_game_detail_payload(payload):
             "away": _public_recent_form(game.get("away_recent_form")),
         },
         "lineups": _public_lineup_detail(game),
+        "managers": _public_manager_detail(game),
         "corners": _public_corner_detail(game.get("corner_profile") or {}, game),
         "official_pick_count": game.get("official_pick_count", 0),
         "backed_count": game.get("backed_count", 0),
@@ -849,7 +850,9 @@ def _public_analysis_detail(game, market):
     summary = (market or {}).get("analysis_summary") or bettor_view.get("summary") or insights.get("summary") or ""
     explanation = _public_reasoning_text(reasoning or " ".join([summary, verdict]))
     key_points = _public_evidence((market or {}).get("positive_evidence") or [], limit=8)
+    key_points = [*key_points, *_public_manager_key_points(game, market)]
     risks = _public_risk_evidence((market or {}).get("risk_evidence") or [], limit=4)
+    risks = [*risks, *_public_manager_risks(game)]
     return {
         "status": (market or {}).get("data_status") or insights.get("data_status") or "modelled",
         "data_quality": insights.get("data_quality") or game.get("insights", {}).get("data_quality") or "",
@@ -924,6 +927,132 @@ def _public_lineup_detail(game):
     }
 
 
+def _public_manager_detail(game):
+    fixture_context = (game or {}).get("fixture_context") if isinstance((game or {}).get("fixture_context"), dict) else {}
+    prediction_features = fixture_context.get("prediction_features") if isinstance(fixture_context, dict) else {}
+    if not isinstance(prediction_features, dict):
+        return {"status": "unavailable"}
+    home = ((prediction_features.get("home") or {}).get("coach") or {}) if isinstance(prediction_features.get("home"), dict) else {}
+    away = ((prediction_features.get("away") or {}).get("coach") or {}) if isinstance(prediction_features.get("away"), dict) else {}
+    matchup = prediction_features.get("coach_tactical_matchup") or {}
+    available = bool(home.get("available") or away.get("available"))
+    return {
+        "status": "available" if available else "unavailable",
+        "home": _public_manager_side(home),
+        "away": _public_manager_side(away),
+        "matchup": {
+            "available": bool((matchup or {}).get("available")),
+            "style_deltas": (matchup or {}).get("style_deltas") or {},
+        },
+    }
+
+
+def _public_manager_side(coach):
+    profile = coach.get("tactical_profile") if isinstance(coach.get("tactical_profile"), dict) else {}
+    ai_review = profile.get("ai_review") if isinstance(profile.get("ai_review"), dict) else {}
+    return {
+        "available": bool(coach.get("available")),
+        "status": coach.get("status") or "",
+        "name": coach.get("coach_name") or "",
+        "research": coach.get("research") or {},
+        "tactical_profile": {
+            "available": bool(profile.get("available")),
+            "confidence": profile.get("confidence") or "",
+            "confidence_score": profile.get("confidence_score"),
+            "scope": profile.get("scope") or "",
+            "preferred_formation": profile.get("preferred_formation") or "",
+            "alternative_formations": profile.get("alternative_formations") or [],
+            "attacking_style": profile.get("attacking_style") or "",
+            "build_up_style": profile.get("build_up_style") or "",
+            "defensive_style": profile.get("defensive_style") or "",
+            "ratings": profile.get("ratings") or {},
+            "ai_review": {
+                "available": bool(ai_review.get("available")),
+                "summary": ai_review.get("summary") or "",
+                "warnings": ai_review.get("warnings") or [],
+                "rating_warnings": ai_review.get("rating_warnings") or [],
+                "market_relevance": ai_review.get("market_relevance") or {},
+                "component_scores": ai_review.get("component_scores") or {},
+            },
+        },
+    }
+
+
+def _public_manager_key_points(game, market):
+    managers = _public_manager_detail(game)
+    if managers.get("status") != "available":
+        return []
+    family = _market_family(market or {}) if market else ""
+    market_key = _manager_market_key(family)
+    points = []
+    for side in ("home", "away"):
+        label = "Home" if side == "home" else "Away"
+        manager = managers.get(side) or {}
+        profile = manager.get("tactical_profile") or {}
+        if not manager.get("available") or not profile.get("available"):
+            continue
+        details = []
+        if profile.get("preferred_formation"):
+            details.append(f"formation {profile['preferred_formation']}")
+        style = profile.get("attacking_style") or profile.get("build_up_style") or profile.get("defensive_style")
+        if style:
+            details.append(str(style))
+        confidence = profile.get("confidence_score")
+        confidence_text = f", tactical confidence {confidence}%" if confidence is not None else ""
+        suffix = f" ({'; '.join(details)})" if details else ""
+        points.append(f"{label} manager {manager.get('name') or 'profile'} is included in tactical analysis{confidence_text}{suffix}.")
+        relevance = (((profile.get("ai_review") or {}).get("market_relevance") or {}).get(market_key) or "").lower()
+        if relevance in {"positive", "negative"}:
+            points.append(f"{label} manager profile is rated {relevance} for {market_key.replace('_', ' ')} markets.")
+    matchup = managers.get("matchup") or {}
+    deltas = matchup.get("style_deltas") if isinstance(matchup.get("style_deltas"), dict) else {}
+    if deltas:
+        field, delta = max(deltas.items(), key=lambda item: abs(_number_or_zero(item[1])))
+        delta_value = _number_or_zero(delta)
+        if abs(delta_value) >= 20:
+            leader = "home" if delta_value > 0 else "away"
+            points.append(
+                f"Manager matchup: {leader} side rates higher for {str(field).replace('_', ' ')} by {abs(round(delta_value))} points."
+            )
+    return points[:4]
+
+
+def _public_manager_risks(game):
+    managers = _public_manager_detail(game)
+    if managers.get("status") != "available":
+        return []
+    risks = []
+    for side in ("home", "away"):
+        label = "Home" if side == "home" else "Away"
+        profile = ((managers.get(side) or {}).get("tactical_profile") or {})
+        ai_review = profile.get("ai_review") or {}
+        warnings = ai_review.get("rating_warnings") or ai_review.get("warnings") or []
+        if warnings:
+            risks.append(f"{label} manager profile warning: {str(warnings[0]).strip()}")
+    return risks[:2]
+
+
+def _manager_market_key(family):
+    if family in {"total_goals", "team_total_goals", "correct_score"}:
+        return "total_goals"
+    if family == "btts":
+        return "btts"
+    if family in {"corners_total", "team_corners"}:
+        return "corners"
+    if family in {"cards_total", "team_cards", "booking_points"}:
+        return "cards"
+    if family in {"shots_on_target_total", "team_shots_on_target"}:
+        return "shots_on_target"
+    return "result"
+
+
+def _number_or_zero(value):
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return 0.0
+
+
 def _public_team_news_side(side, lineup_payload=None, injuries_payload=None, side_name="home"):
     lineup_side = ((lineup_payload or {}).get(side_name) or {}) if isinstance(lineup_payload, dict) else {}
     injury_side = ((injuries_payload or {}).get(side_name) or {}) if isinstance(injuries_payload, dict) else {}
@@ -978,6 +1107,19 @@ def _public_structured_evidence(items):
 
 def _public_data_sources(market, fixture_context, prediction_features):
     sources = []
+    coach_available = False
+    if isinstance(prediction_features, dict):
+        coach_available = any(
+            bool(((prediction_features.get(side) or {}).get("coach") or {}).get("available"))
+            for side in ("home", "away")
+            if isinstance(prediction_features.get(side), dict)
+        )
+    if coach_available:
+        sources.append({
+            "name": "Coach Tactical Profile",
+            "used_for": ["manager style", "tactical matchup", "market suitability"],
+            "source": "manual research + AI review",
+        })
     if isinstance(fixture_context.get("statpal"), dict) and fixture_context["statpal"].get("available"):
         sources.append({"name": "StatPal", "used_for": ["fixtures", "odds", "team context"]})
     api = fixture_context.get("api_football") if isinstance(fixture_context.get("api_football"), dict) else {}

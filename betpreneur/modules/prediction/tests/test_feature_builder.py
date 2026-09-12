@@ -21,6 +21,7 @@ from betpreneur.modules.prediction.api import (
     PredictionTeamMatchFeedback,
     build_fixture_features,
 )
+from betpreneur.modules.prediction.feature_builder import _coach_payload
 from betpreneur.modules.scoring.api import FixtureLineup, PlayerAvailability, TeamRateProfile
 
 
@@ -299,6 +300,46 @@ class FixtureFeatureBuilderTests(TestCase):
         self.assertEqual(features["scoreline_profile"]["home_recent"]["scorelines"][0]["scoreline"], "4-2")
         self.assertEqual(features["scoreline_profile"]["head_to_head"]["scorelines"][0]["scoreline"], "3-2")
         self.assertGreaterEqual(features["scoreline_profile"]["combined"]["over_2_5_rate"], 80)
+
+    def test_coach_payload_falls_back_to_team_alias_when_team_intelligence_is_missing(self):
+        team = TeamProfile.objects.create(
+            canonical_name="Ipswich Town",
+            canonical_normalized=normalize_fixture_text("Ipswich Town"),
+            aliases=["Ipswich"],
+        )
+        coach = CoachProfile.objects.create(
+            canonical_name="Kieran McKenna",
+            canonical_normalized=normalize_fixture_text("Kieran McKenna"),
+        )
+        TeamCoachAssignment.objects.create(
+            team=team,
+            coach=coach,
+            currently_active=True,
+            first_detected_at=timezone.now(),
+            last_confirmed_at=timezone.now(),
+        )
+        CoachTacticalProfile.objects.create(
+            coach=coach,
+            team=team,
+            status=CoachTacticalProfile.Status.APPROVED,
+            preferred_formation="4-2-3-1",
+            philosophy_summary="Aggressive build-up with compact defensive recovery.",
+            attacking_style="Direct wide attacks",
+            build_up_style="Vertical build-up",
+            defensive_style="Mid-block press",
+            source_urls=["https://example.com/ipswich"],
+        )
+
+        payload = _coach_payload(
+            None,
+            fallback_name="Ipswich",
+            provider_team_id="",
+            fixture_date=date(2026, 9, 12),
+        )
+
+        self.assertTrue(payload["available"])
+        self.assertEqual(payload["coach_name"], "Kieran McKenna")
+        self.assertEqual(payload["tactical_profile"]["preferred_formation"], "4-2-3-1")
 
     def test_build_fixture_features_normalizes_api_football_snapshots(self):
         feature_set = build_fixture_features(
