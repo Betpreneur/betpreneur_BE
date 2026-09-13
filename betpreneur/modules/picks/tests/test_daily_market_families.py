@@ -10,6 +10,7 @@ from betpreneur.modules.markets.api import (
 )
 from betpreneur.modules.picks.interface.serializers import PickSerializer
 from betpreneur.modules.picks.models import Pick
+from betpreneur.modules.picks.services.presentation import _normalise_fixture_markets
 
 
 class DailyMarketFamilyTests(SimpleTestCase):
@@ -218,3 +219,53 @@ class DailyMarketFamilyTests(SimpleTestCase):
         self.assertEqual(data["bettor_view"]["confidence_label"], "Strong")
         self.assertEqual(data["positive_evidence"][0], "The goal model projects about 2.8 goals.")
         self.assertEqual(data["risk_evidence"][0], "The line is still close enough to require caution.")
+
+    def test_fixture_headline_does_not_over_promote_close_btts_market(self):
+        item = {
+            "markets": [
+                {
+                    "market": "GG / BTTS Yes",
+                    "confidence": 72,
+                    "odds": 1.76,
+                    "ev": 0.01,
+                    "eligible": True,
+                    "analysis_available": True,
+                    "data_status": "modelled",
+                    "insights": {
+                        "market_family": "btts",
+                        "calibrated_probability": 0.72,
+                        "data_quality": "limited",
+                        "council_review": {
+                            "decision": "reject",
+                            "tier": "",
+                            "final_confidence": 72,
+                            "reasons": ["watchlist_only"],
+                        },
+                    },
+                },
+                {
+                    "market": "Corners Over 8.5",
+                    "confidence": 69,
+                    "odds": 1.84,
+                    "ev": 0.01,
+                    "eligible": True,
+                    "analysis_available": True,
+                    "data_status": "modelled",
+                    "insights": {
+                        "market_family": "corners_total",
+                        "calibrated_probability": 0.69,
+                        "data_quality": "limited",
+                        "council_review": {
+                            "decision": "reject",
+                            "tier": "",
+                            "final_confidence": 69,
+                            "reasons": ["watchlist_only"],
+                        },
+                    },
+                },
+            ],
+        }
+
+        markets = _normalise_fixture_markets(item, picks_by_match={})
+
+        self.assertEqual(markets[0]["market"], "Corners Over 8.5")

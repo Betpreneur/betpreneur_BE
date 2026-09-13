@@ -188,6 +188,28 @@ def _game_market_rank(market):
     )
 
 
+def _rebalance_fixture_headline_markets(markets):
+    if not markets or _market_family(markets[0]) != "btts":
+        return markets
+
+    btts_market = markets[0]
+    btts_status = _recommendation_status_rank(btts_market)
+    btts_probability = _model_probability_percent(btts_market)
+    for index, candidate in enumerate(markets[1:], start=1):
+        if _market_family(candidate) == "btts":
+            continue
+        candidate_status = _recommendation_status_rank(candidate)
+        if candidate_status < btts_status:
+            continue
+        probability_gap = btts_probability - _model_probability_percent(candidate)
+        if probability_gap > 8:
+            continue
+        rebalanced = list(markets)
+        rebalanced.insert(0, rebalanced.pop(index))
+        return rebalanced
+    return markets
+
+
 def normalise_council_review(insights, fallback_confidence=None, fallback_tier=""):
     review = ((insights or {}).get("council_review") or {}).copy()
     if not review:
@@ -441,7 +463,7 @@ def _normalise_fixture_markets(item, picks_by_match, request=None, user_backed_m
         payload["model_verdict"] = _prediction_verdict_for_market(payload)
         payload["display_score"] = round(market_display_score(payload)[0], 3)
         markets.append(payload)
-    return sorted(markets, key=_game_market_rank, reverse=True)
+    return _rebalance_fixture_headline_markets(sorted(markets, key=_game_market_rank, reverse=True))
 
 
 def game_summary_from_fixture(
