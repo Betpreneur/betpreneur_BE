@@ -783,6 +783,64 @@ class DailyPredictionEngineTests(TestCase):
         self.assertIsNone(detail["best_market"])
         self.assertEqual(detail["markets"][0]["market"], "Home Team Corners Over 2.5")
 
+    def test_compact_games_headline_matches_detail_btts_rebalance(self):
+        run = AlgoRun.objects.create(
+            target_date=date(2026, 9, 14),
+            status=AlgoRun.Status.SUCCESS,
+            result={"publish_policy": "celery_fanout_pipeline"},
+        )
+        AlgoFixture.objects.create(
+            run=run,
+            match_date=run.target_date,
+            fixture="Alpha FC vs Beta FC",
+            home_team="Alpha FC",
+            away_team="Beta FC",
+            league="Premier League",
+            country="england",
+            kickoff="15:00",
+            match_id="statpal:20260914001",
+            market_count=2,
+        )
+        base_insights = {
+            "data_status": "modelled",
+            "analysis_available": True,
+            "data_quality": "limited",
+            "council_review": {
+                "decision": "reject",
+                "tier": "",
+                "final_confidence": 70,
+                "reasons": ["watchlist_only"],
+            },
+        }
+        for market, confidence in (("GG / BTTS Yes", 72), ("Over 1.5", 80)):
+            MarketPrediction.objects.create(
+                run=run,
+                match_date=run.target_date,
+                fixture="Alpha FC vs Beta FC",
+                home_team="Alpha FC",
+                away_team="Beta FC",
+                league="Premier League",
+                match_id="statpal:20260914001",
+                market=market,
+                confidence=confidence,
+                raw_confidence=confidence,
+                odds=1.76,
+                ev=0.01,
+                eligible=True,
+                insights={
+                    **base_insights,
+                    "summary": f"{market} has {confidence}% calibrated model confidence.",
+                    "raw_probability": confidence / 100,
+                    "calibrated_probability": confidence / 100,
+                },
+            )
+
+        compact = _compact_games_payload(run.target_date)
+        detail = game_detail_payload(run.target_date, "statpal:20260914001")["game"]
+
+        self.assertEqual(compact["games"][0]["top_market"]["market"], "Over 1.5")
+        self.assertEqual(detail["top_market"]["market"], "Over 1.5")
+
     def test_all_games_hides_fixtures_without_displayable_markets(self):
         run = AlgoRun.objects.create(target_date=date(2026, 8, 31), status=AlgoRun.Status.SUCCESS)
         AlgoFixture.objects.create(

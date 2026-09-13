@@ -69,6 +69,7 @@ from betpreneur.modules.picks.services.presentation import (
     _latest_successful_run,
     _market_verdict_for_game,
     _public_reasoning_text,
+    _rebalance_fixture_headline_markets,
     _recent_form_payload,
     _top_pick_sort_key,
     decimal_or_none,
@@ -573,8 +574,8 @@ def _compact_games_payload(target_date, request=None, *, page=1, page_size=20):
         str(item["match_id"] or ""): item["eligible_count"]
         for item in base_predictions.filter(eligible=True).values("match_id").annotate(eligible_count=Count("id"))
     }
+    displayable_markets_by_match = {}
     top_markets_by_match = {}
-    top_market_ranks = {}
     recommended_markets_by_match = {}
     recommended_market_ranks = {}
     predictions = base_predictions.select_related("selected_pick").only(
@@ -611,15 +612,17 @@ def _compact_games_payload(target_date, request=None, *, page=1, page_size=20):
         payload.update(_apply_council_recommendation_gate(payload))
         payload["display_score"] = round(market_display_score(payload)[0], 3)
         if market_analysis_displayable(payload):
-            rank = _game_market_rank(payload)
-            if rank > top_market_ranks.get(prediction_match_id, ()):
-                top_market_ranks[prediction_match_id] = rank
-                top_markets_by_match[prediction_match_id] = payload
+            displayable_markets_by_match.setdefault(prediction_match_id, []).append(payload)
         if payload.get("recommended") and market_analysis_displayable(payload):
             rank = _game_market_rank(payload)
             if rank > recommended_market_ranks.get(prediction_match_id, ()):
                 recommended_market_ranks[prediction_match_id] = rank
                 recommended_markets_by_match[prediction_match_id] = payload
+    for prediction_match_id, markets in displayable_markets_by_match.items():
+        ranked_markets = sorted(markets, key=_game_market_rank, reverse=True)
+        rebalanced_markets = _rebalance_fixture_headline_markets(ranked_markets)
+        if rebalanced_markets:
+            top_markets_by_match[prediction_match_id] = rebalanced_markets[0]
     mark_stage("market_ranking")
 
     games = [
