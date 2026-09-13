@@ -150,7 +150,7 @@ class ProductPolicyTests(SimpleTestCase):
         self.assertFalse(assessment.publishable)
         self.assertIn("market_publicly_paused", assessment.reasons)
 
-    def test_top_picks_policy_does_not_trust_statpal_summary_odds(self):
+    def test_top_picks_policy_trusts_statpal_summary_odds(self):
         market = _market("Corners Over 7.5", calibrated=0.70, confidence=70, family="corners_total")
         value = ValueAssessment(
             fixture_id="fixture-1",
@@ -172,8 +172,8 @@ class ProductPolicyTests(SimpleTestCase):
 
         assessment = assess_top_picks_policy(market, value, score)
 
-        self.assertFalse(assessment.publishable)
-        self.assertIn("real_odds_required", assessment.reasons)
+        self.assertTrue(assessment.publishable)
+        self.assertNotIn("real_odds_required", assessment.reasons)
 
     def test_top_picks_policy_blocks_api_football_disagreement(self):
         market = _market(

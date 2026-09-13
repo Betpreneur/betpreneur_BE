@@ -165,7 +165,7 @@ def _odds_source_penalty(odds_source: str, estimated_odds: bool) -> float:
     source = str(odds_source or "").strip().lower()
     if not source:
         return 8.0
-    if source in {"sportybet", "bookmaker", "market", "real", "api_football", "statpal"}:
+    if source in {"sportybet", "bookmaker", "market", "real", "api_football", "statpal", "statpal_summary"}:
         return 0.0
     return 3.0
 

@@ -594,8 +594,9 @@ class DailyPredictionEngineTests(TestCase):
         ):
             selected_ids = service._select_prediction_ids(run)
 
-        self.assertIn(allowed.id, selected_ids)
-        self.assertNotIn(blocked.id, selected_ids)
+        flat_ids = {pk for ids in selected_ids.values() for pk in ids}
+        self.assertIn(allowed.id, flat_ids)
+        self.assertNotIn(blocked.id, flat_ids)
 
     def test_compact_games_ranks_after_public_policy_gate(self):
         run = AlgoRun.objects.create(target_date=date(2026, 8, 29), status=AlgoRun.Status.SUCCESS)

@@ -40,7 +40,9 @@ WILD_CARD_MIN_VALUE_SCORE = 10.0
 WILD_CARD_STAKE_WARNING = "Higher-variance pick: use reduced stake sizing."
 SLIP_SUPPORTED_SCORE = 70.0
 SLIP_ALTERNATIVE_MIN_DELTA = 3.0
-TRUSTED_REAL_ODDS_SOURCES = frozenset({"sportybet", "bookmaker", "market", "real", "api_football", "statpal"})
+TRUSTED_REAL_ODDS_SOURCES = frozenset(
+    {"sportybet", "bookmaker", "market", "real", "api_football", "statpal", "statpal_summary"}
+)
 TOP_PICK_HARD_WARNING_FLAGS = frozenset(
     {
         "api_football_prediction_opinion_disagrees",
