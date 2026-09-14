@@ -24,6 +24,44 @@ class RecordQuerySerializer(serializers.Serializer):
     days = serializers.IntegerField(required=False, min_value=1, max_value=365, default=90)
 
 
+class AllGamesRecordQuerySerializer(serializers.Serializer):
+    date = serializers.DateField(required=False)
+
+
+class AllGamesRecordSummarySerializer(serializers.Serializer):
+    total_games = serializers.IntegerField()
+    wins = serializers.IntegerField()
+    losses = serializers.IntegerField()
+    win_rate = serializers.FloatField()
+
+
+class AllGamesRecordDateSerializer(AllGamesRecordSummarySerializer):
+    date = serializers.DateField()
+
+
+class AllGamesRecordGameSerializer(serializers.Serializer):
+    date = serializers.DateField()
+    game = serializers.CharField()
+    home_team = serializers.CharField(allow_blank=True)
+    away_team = serializers.CharField(allow_blank=True)
+    league = serializers.CharField(allow_blank=True)
+    kickoff = serializers.CharField(allow_blank=True)
+    top_market = serializers.CharField()
+    meaning = serializers.CharField(allow_blank=True)
+    confidence = serializers.IntegerField()
+    odds = serializers.DecimalField(max_digits=8, decimal_places=2, allow_null=True)
+    settlement = serializers.CharField()
+    settlement_detail = serializers.CharField(allow_blank=True)
+
+
+class AllGamesRecordResponseSerializer(serializers.Serializer):
+    overall = AllGamesRecordSummarySerializer()
+    dates = AllGamesRecordDateSerializer(many=True)
+    date = serializers.DateField(required=False)
+    summary = AllGamesRecordSummarySerializer(required=False)
+    games = AllGamesRecordGameSerializer(many=True, required=False)
+
+
 class MarketHealthQuerySerializer(serializers.Serializer):
     days = serializers.IntegerField(required=False, min_value=1, max_value=365, default=90)
     market = serializers.CharField(required=False, allow_blank=True)

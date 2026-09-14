@@ -17,6 +17,8 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from betpreneur.modules.analytics.interface.serializers import (
+    AllGamesRecordQuerySerializer,
+    AllGamesRecordResponseSerializer,
     MaintenanceRunRequestSerializer,
     MaintenanceRunResponseSerializer,
     MarketHealthQuerySerializer,
@@ -28,6 +30,7 @@ from betpreneur.modules.analytics.interface.serializers import (
     RecordResponseSerializer,
     TaskStatusSerializer,
 )
+from betpreneur.modules.analytics.services.all_games_record import build_all_games_record
 from betpreneur.modules.analytics.services.model_health import (
     DEFAULT_WINDOW_DAYS,
     model_health_service,
@@ -389,6 +392,29 @@ class PublicRecordView(APIView):
             },
             request=request,
         )
+
+
+class PublicAllGamesRecordView(APIView):
+    authentication_classes = []
+    permission_classes = [AllowAny]
+    serializer_class = AllGamesRecordResponseSerializer
+
+    @extend_schema(
+        summary="Public all-games top market record",
+        description=(
+            "Returns settled all-games top market records. Without a date it returns "
+            "available settled dates and overall summary. With date=YYYY-MM-DD it "
+            "also returns that day's settled win/loss games."
+        ),
+        tags=["Public Record"],
+        parameters=[AllGamesRecordQuerySerializer],
+        responses={200: AllGamesRecordResponseSerializer},
+    )
+    def get(self, request):
+        query = AllGamesRecordQuerySerializer(data=request.query_params)
+        query.is_valid(raise_exception=True)
+        payload = build_all_games_record(query.validated_data.get("date"))
+        return public_cached_response(payload, request=request)
 
 
 def _maintenance_jobs():
